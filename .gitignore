@@ -172,3 +172,5 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+vosk-model-en-us-0.42-gigaspeech
