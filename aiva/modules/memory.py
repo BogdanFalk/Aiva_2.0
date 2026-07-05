@@ -1,90 +1,128 @@
+"""Aiva's memory: session transcripts + durable facts about the user.
+
+Two SQLite tables:
+- messages: rolling conversation transcripts, tagged by session
+- facts:    LLM-extracted durable facts, injected into the system prompt
+            at startup so Aiva remembers the user across restarts
+
+The system prompt is never stored here (the old design re-inserted it on
+every launch and polluted the history).
+"""
+
+import json
 import sqlite3
 from datetime import datetime
-import os
+
+FACT_EXTRACTION_PROMPT = """You maintain the long-term memory of Aiva, a voice assistant. \
+From the conversation transcript, extract durable facts about the user worth remembering \
+across sessions: their name, preferences, pets, family, work, projects, recurring habits.
+
+Do NOT extract: one-off requests, small talk, anything about Aiva herself, or facts \
+already in the known list (unless the conversation contradicts them — then restate the \
+corrected fact).
+
+Reply with JSON: {"facts": [{"category": "preference|person|work|project|other", "fact": "..."}]}
+Each fact must be one short self-contained sentence. Reply {"facts": []} if nothing qualifies."""
+
 
 class Memory:
     def __init__(self, db_file="memory.db"):
-        self.db_file = db_file
-        self.conn = None
-        self.cursor = None
-        self.init_db()
+        self.conn = sqlite3.connect(db_file)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ts DATETIME NOT NULL
+            )""")
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL DEFAULT 'other',
+                fact TEXT NOT NULL UNIQUE,
+                created_ts DATETIME NOT NULL,
+                last_confirmed_ts DATETIME NOT NULL
+            )""")
+        self.conn.commit()
+        self._saved_count = 0
 
-    def init_db(self):
-        """Initialize the database"""
+    # --- facts ---------------------------------------------------------------
+
+    def load_facts(self, limit=200):
+        """All known facts, oldest first (capped — hobby scale)."""
+        rows = self.conn.execute(
+            "SELECT fact FROM facts ORDER BY created_ts LIMIT ?", (limit,)
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def upsert_facts(self, facts):
+        """Insert new facts; refresh the timestamp of ones we already know."""
+        now = datetime.now().isoformat()
+        added = 0
+        for item in facts:
+            fact = (item.get("fact") or "").strip()
+            if not fact:
+                continue
+            cur = self.conn.execute(
+                """INSERT INTO facts (category, fact, created_ts, last_confirmed_ts)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(fact) DO UPDATE SET last_confirmed_ts = excluded.last_confirmed_ts""",
+                (item.get("category", "other"), fact, now, now),
+            )
+            added += cur.rowcount
+        self.conn.commit()
+        return added
+
+    async def extract_facts(self, openai_client, model, messages):
+        """One cheap LLM call: transcript -> new durable facts -> upsert."""
+        transcript = "\n".join(
+            f"{m['role']}: {m['content']}" for m in messages
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+        )
+        if len(transcript) < 80:  # nothing meaningful happened
+            return 0
+
+        known = self.load_facts()
+        known_block = "\n".join(f"- {f}" for f in known) if known else "(none)"
+        response = await openai_client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": FACT_EXTRACTION_PROMPT},
+                {"role": "user",
+                 "content": f"Known facts:\n{known_block}\n\nConversation:\n{transcript[-8000:]}"},
+            ],
+            temperature=0.0,
+            max_tokens=500,
+        )
         try:
-            self.conn = sqlite3.connect(self.db_file)
-            self.cursor = self.conn.cursor()
-            
-            # Create table if it doesn't exist
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS conversation_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    timestamp DATETIME NOT NULL
-                )
-            ''')
-            
-            # Create index for faster queries
-            self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_timestamp 
-                ON conversation_history(timestamp)
-            ''')
-            
-            self.conn.commit()
-        except Exception as e:
-            print(f"Error initializing database: {e}")
+            facts = json.loads(response.choices[0].message.content).get("facts", [])
+        except (json.JSONDecodeError, AttributeError):
+            return 0
+        return self.upsert_facts(facts)
 
-    def add_to_history(self, role, content):
-        """Add a message to the conversation history"""
-        try:
-            self.cursor.execute('''
-                INSERT INTO conversation_history (role, content, timestamp)
-                VALUES (?, ?, ?)
-            ''', (role, content, datetime.now().isoformat()))
-            
-            # Keep only the last 1000 messages
-            self.cursor.execute('''
-                DELETE FROM conversation_history
-                WHERE id NOT IN (
-                    SELECT id FROM conversation_history
-                    ORDER BY timestamp DESC
-                    LIMIT 1000
-                )
-            ''')
-            
-            self.conn.commit()
-        except Exception as e:
-            print(f"Error adding to history: {e}")
+    # --- transcripts -----------------------------------------------------------
 
-    def get_recent_history(self, max_messages=10):
-        """Get recent conversation history"""
-        try:
-            self.cursor.execute('''
-                SELECT role, content
-                FROM conversation_history
-                ORDER BY timestamp DESC
-                LIMIT ?
-            ''', (max_messages,))
-            
-            # Convert to the format OpenAI expects
-            messages = []
-            for role, content in reversed(self.cursor.fetchall()):
-                messages.append({"role": role, "content": content})
-            return messages
-        except Exception as e:
-            print(f"Error getting history: {e}")
-            return []
+    def save_new_messages(self, session_id, messages):
+        """Persist user/assistant messages not yet saved this session.
 
-    def clear_memory(self):
-        """Clear the conversation history"""
-        try:
-            self.cursor.execute('DELETE FROM conversation_history')
-            self.conn.commit()
-        except Exception as e:
-            print(f"Error clearing memory: {e}")
+        Idempotent: tracks how many of `messages` were already written, so it
+        can be called periodically and again at shutdown.
+        """
+        speakable = [
+            m for m in messages
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+        ]
+        fresh = speakable[self._saved_count:]
+        now = datetime.now().isoformat()
+        self.conn.executemany(
+            "INSERT INTO messages (session_id, role, content, ts) VALUES (?, ?, ?, ?)",
+            [(session_id, m["role"], m["content"], now) for m in fresh],
+        )
+        self.conn.commit()
+        self._saved_count = len(speakable)
+        return len(fresh)
 
-    def __del__(self):
-        """Clean up database connection"""
-        if self.conn:
-            self.conn.close() 
+    def close(self):
+        self.conn.close()
