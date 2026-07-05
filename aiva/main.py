@@ -1,154 +1,214 @@
-import json
-import asyncio
-from modules.file_operations import create_file, open_file, list_directory
-from modules.app_launcher import launch_app
-from modules.voice import VoiceAssistant
-from modules.ai_handler import AIHandler
-from modules.vtube_studio import VTubeStudio
-from modules.utilities import get_current_time, get_current_date, get_weather
-import msvcrt  # For Windows key detection
+"""Aiva — streaming voice pipeline (pipecat 1.x).
 
-async def perform_action(action_type, **kwargs):
-    """Perform system actions based on the action type and parameters"""
-    try:
-        if action_type == "create_file":
-            return create_file(kwargs.get('file_path'), kwargs.get('content', ''))
-        
-        elif action_type == "open_file":
-            return open_file(kwargs.get('file_path'))
-        
-        elif action_type == "run_command":
-            command = kwargs.get('command')
-            if not command:
-                return "Error: No command provided"
-            import subprocess
-            subprocess.run(command, shell=True, capture_output=True, text=True)
-            return ""
-        
-        elif action_type == "list_directory":
-            return list_directory(kwargs.get('path', '.'))
-        
-        elif action_type == "launch_app" or action_type == "launch_application":
-            return launch_app(kwargs.get('app_name') or kwargs.get('name'))
-        
-        elif action_type == "vtube_expression":
-            await vtube.trigger_expression(kwargs.get('expression'))
-            return ""
-        
-        elif action_type == "vtube_move" or action_type == "vtube_move_model" or action_type == "vtube_move_model_position" or action_type == "move_model":
-            print("Moving model to", kwargs.get('x', 0), kwargs.get('y', 0), kwargs.get('rotation', 0), kwargs.get('size', 2))
-            await vtube.move_model(
-                x=kwargs.get('x', 0),
-                y=kwargs.get('y', 0),
-                rotation=kwargs.get('rotation', 0),
-                size=kwargs.get('size', 2)
+mic -> Deepgram streaming STT -> Silero VAD + local smart-turn (in the user
+aggregator) -> LLM (native tool calling, streamed) -> ElevenLabs Flash TTS
+-> speaker.
+
+Hotkeys: F9 toggles the mic mute, Esc quits.
+Run `python main.py --list-devices` to see audio device indices for
+AIVA_INPUT_DEVICE_INDEX / AIVA_OUTPUT_DEVICE_INDEX (VB-Cable routing).
+"""
+
+import asyncio
+import os
+import sys
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.frames.frames import Frame, InputAudioRawFrame, LLMRunFrame
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.services.deepgram.stt import DeepgramSTTService, LiveOptions
+from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
+from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
+    TurnAnalyzerUserTurnStopStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+from modules.persona import build_system_prompt
+from modules.tools import TOOL_SCHEMAS, register_tools
+from modules.vtube_studio import VTubeStudio
+
+
+class MicGate(FrameProcessor):
+    """Mute gate right after the transport input.
+
+    While muted, incoming audio is replaced with silence before it reaches
+    STT and the VAD, so nothing is transcribed and nothing interrupts.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.muted = False
+
+    def toggle(self):
+        self.muted = not self.muted
+        print(f"\n[MIC {'MUTED' if self.muted else 'LIVE'}] (F9 to toggle)")
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if self.muted and isinstance(frame, InputAudioRawFrame):
+            frame = InputAudioRawFrame(
+                audio=b"\x00" * len(frame.audio),
+                sample_rate=frame.sample_rate,
+                num_channels=frame.num_channels,
             )
-            return ""
-        
-        elif action_type == "get_time":
-            return get_current_time()
-        
-        elif action_type == "get_date":
-            return get_current_date()
-        
-        elif action_type == "get_weather":
-            return get_weather(kwargs.get('city'), kwargs.get('day', 'today'))
-        
-        else:
-            return f"Unknown action type: {action_type}"
-    
-    except Exception as e:
-        return f"Error: {str(e)}"
+        await self.push_frame(frame, direction)
+
+
+def list_audio_devices():
+    import pyaudio
+
+    pa = pyaudio.PyAudio()
+    print("index | in/out channels | name")
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+        print(f"{i:5d} | in:{info['maxInputChannels']:2d} out:{info['maxOutputChannels']:2d} | {info['name']}")
+    pa.terminate()
+
+
+def _require_env(*names):
+    missing = [n for n in names if not os.getenv(n)]
+    if missing:
+        print("Missing required .env keys: " + ", ".join(missing))
+        if "DEEPGRAM_API_KEY" in missing:
+            print("  -> Get a free Deepgram key (comes with $200 credit) at https://console.deepgram.com/signup")
+        sys.exit(1)
+
 
 async def main():
-    global vtube
-    voice = VoiceAssistant()
-    ai = AIHandler()
+    _require_env("OPENAI_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "DEEPGRAM_API_KEY")
+
+    # --- transport & services ----------------------------------------------
+    def _device_index(env_name):
+        value = os.getenv(env_name)
+        return int(value) if value else None
+
+    transport = LocalAudioTransport(
+        LocalAudioTransportParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            input_device_index=_device_index("AIVA_INPUT_DEVICE_INDEX"),
+            output_device_index=_device_index("AIVA_OUTPUT_DEVICE_INDEX"),
+        )
+    )
+
+    stt = DeepgramSTTService(
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
+        live_options=LiveOptions(
+            model="nova-3",
+            language="en-US",
+            smart_format=True,
+        ),
+    )
+
+    llm = OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model=os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini"),
+        params=OpenAILLMService.InputParams(
+            temperature=0.7,
+            max_completion_tokens=300,
+        ),
+    )
+
+    tts = ElevenLabsTTSService(
+        api_key=os.getenv("ELEVENLABS_API_KEY"),
+        voice_id=os.getenv("ELEVENLABS_VOICE_ID"),
+        model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
+    )
+
+    # --- avatar + tools ------------------------------------------------------
     vtube = VTubeStudio()
-    
-    # Connect to VTube Studio
-    await vtube.connect()
-    
-    print("Welcome to Aiva! You can speak or type your questions.")
-    print("Type 'exit' or 'quit' to end the conversation.")
-    print("Press Enter to start voice input, or type your question directly.")
-    print("Press Escape at any time to quit.")
-    
-    while True:
-        # Check for Escape key before getting input
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
-            if key == b'\x1b':  # Escape key
-                voice.speak("Goodbye!")
-                await vtube.close()
-                break
-        
-        user_input = ""
-        
-        if user_input.lower() in ["exit", "quit"]:
-            voice.speak("Goodbye! Have a great day!")
-            await vtube.close()
-            break
-            
-        if user_input == "":
-            print("Listening... (Press Escape to quit)")
-            user_input = voice.get_voice_input()
-            if user_input is None:
-                continue
-                
-        reply = ai.get_response(user_input)
-        
-        # Check if the reply is in JSON format (contains an action)
-        try:
-            response_data = json.loads(reply)
-            print("\n[DEBUG] Parsed response:", response_data)
-            if "action" in response_data:
-                print(f"[DEBUG] Performing action: {response_data['action']['type']} with params: {response_data['action']['params']}")
-                # Perform the action
-                action_result = await perform_action(
-                    response_data["action"]["type"],
-                    **response_data["action"]["params"]
-                )
-                print(f"[DEBUG] Action result: {action_result}")
-                
-                # For time, date, and weather, combine the AI's personality with the actual result
-                if response_data["action"]["type"] in ["get_time", "get_date", "get_weather"]:
-                    # Extract the actual data from the action result
-                    if response_data["action"]["type"] == "get_weather":
-                        # For weather, we want to keep the temperature and description
-                        temp = action_result.split("temperature in")[1].split("°C")[0].strip()
-                        desc = action_result.split("with")[1].strip().rstrip(".")
-                        # Combine with AI's personality response
-                        combined_response = f"{response_data['response']} {temp}°C with {desc}. Perfect weather for some cookies and anime! 🍪🌸"
-                    elif response_data["action"]["type"] == "get_time":
-                        # For time, we want to keep the natural time format
-                        time_part = action_result.split(" in")[0]
-                        period = action_result.split(" in")[1].strip()
-                        # Combine with AI's personality response
-                        combined_response = f"{response_data['response']} {time_part} {period}! Time for a cookie break, don't you think? 🍪"
-                    elif response_data["action"]["type"] == "get_date":
-                        # For date, we want to keep the full date
-                        combined_response = f"{response_data['response']} {action_result}! Another beautiful day to learn new things! 🌸"
-                    
-                    voice.speak(combined_response)
-                else:
-                    # For other actions, use the AI's natural response
-                    voice.speak(response_data["response"])
-            else:
-                # If not an action, speak the entire response
-                voice.speak(reply)
-        except json.JSONDecodeError:
-            print("[DEBUG] Not a JSON response, treating as normal text")
-            # If not JSON, it's a normal response
-            voice.speak(reply)
-        
-        # Check for Escape key after each action
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
-            if key == b'\x1b':  # Escape key
-                voice.speak("Goodbye!")
-                await vtube.close()
-                break
+    await vtube.connect()  # non-fatal if VTube Studio isn't running
+    register_tools(llm, vtube)
+
+    # --- context: system prompt + startup greeting ---------------------------
+    context = LLMContext(
+        messages=[
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "system", "content": "Introduce yourself very briefly and greet the user."},
+        ],
+        tools=TOOL_SCHEMAS,
+    )
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(),
+            user_turn_strategies=UserTurnStrategies(
+                # keep default VAD start strategy (with interruptions);
+                # stop turns on the semantic smart-turn model so stutters
+                # and "uhhmm" pauses don't cut the user off
+                stop=[
+                    TurnAnalyzerUserTurnStopStrategy(
+                        turn_analyzer=LocalSmartTurnAnalyzerV3()
+                    )
+                ],
+            ),
+        ),
+    )
+
+    # --- pipeline -------------------------------------------------------------
+    mic_gate = MicGate()
+
+    pipeline = Pipeline([
+        transport.input(),
+        mic_gate,
+        stt,
+        user_aggregator,
+        llm,
+        tts,
+        transport.output(),
+        assistant_aggregator,
+    ])
+
+    task = PipelineTask(pipeline, params=PipelineParams())
+
+    # --- hotkeys ---------------------------------------------------------------
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    try:
+        import keyboard
+
+        keyboard.add_hotkey("f9", lambda: loop.call_soon_threadsafe(mic_gate.toggle))
+        keyboard.add_hotkey("esc", lambda: loop.call_soon_threadsafe(stop_event.set))
+        print("Hotkeys: F9 = mute/unmute mic, Esc = quit")
+    except Exception as e:
+        print(f"Global hotkeys unavailable ({e}); use Ctrl+C to quit")
+
+    async def watch_stop():
+        await stop_event.wait()
+        print("\nShutting down...")
+        await task.cancel()
+
+    watcher = asyncio.create_task(watch_stop())
+
+    # --- run --------------------------------------------------------------------
+    await task.queue_frames([LLMRunFrame()])
+
+    print("Aiva is listening. Just talk.")
+    runner = PipelineRunner(handle_sigint=False)
+    try:
+        await runner.run(task)
+    finally:
+        watcher.cancel()
+        await vtube.close()
+
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    if "--list-devices" in sys.argv:
+        list_audio_devices()
+    else:
+        asyncio.run(main())

@@ -64,43 +64,68 @@ def find_app_path(app_name):
     
     return None
 
+def _pick_exe(directory, app_name):
+    """Pick the most plausible executable in a directory tree.
+
+    Prefers an exe whose name matches the app name; falls back to the first
+    non-uninstaller exe. Walks at most 2 levels deep to avoid dredging up
+    crash reporters and helper binaries from deep subfolders.
+    """
+    candidates = []
+    base_depth = directory.rstrip("\\/").count(os.sep)
+    for root, dirs, files in os.walk(directory):
+        if root.count(os.sep) - base_depth >= 2:
+            dirs[:] = []
+            continue
+        for file in files:
+            name = file.lower()
+            if name.endswith('.exe') and 'uninstall' not in name and 'setup' not in name:
+                candidates.append(os.path.join(root, file))
+
+    if not candidates:
+        return None
+
+    normalized = app_name.lower().replace(' ', '')
+    for exe in candidates:
+        stem = os.path.splitext(os.path.basename(exe))[0].lower().replace(' ', '')
+        if normalized in stem or stem in normalized:
+            return exe
+    return candidates[0]
+
+
+def _popen(exe_path):
+    try:
+        subprocess.Popen([exe_path])
+    except PermissionError:
+        print(f"[DEBUG] Trying to run {exe_path} with elevation")
+        subprocess.Popen(['runas', '/user:Administrator', exe_path])
+
+
 def launch_app(app_name):
     """Launch an application by name"""
     try:
         app_name = app_name.lower()
-        
+
         # First check the app_paths.json configuration
         app_paths = load_app_paths()
         if app_name in app_paths:
             exe_path = app_paths[app_name]
             print(f"[DEBUG] Found {app_name} in app_paths.json: {exe_path}")
             if os.path.exists(exe_path):
-                # Try to run with elevation if needed
-                try:
-                    subprocess.Popen([exe_path])
-                except PermissionError:
-                    print(f"[DEBUG] Trying to run {exe_path} with elevation")
-                    subprocess.Popen(['runas', '/user:Administrator', exe_path])
+                _popen(exe_path)
                 return ""
             else:
                 print(f"[DEBUG] Path from app_paths.json doesn't exist: {exe_path}")
-        
+
         # Try to find the app in installed applications
         app_path = find_app_path(app_name)
         if app_path:
-            # Try to find the executable in the installation directory
-            for root, dirs, files in os.walk(app_path):
-                for file in files:
-                    if file.endswith('.exe') and not file.lower().endswith('uninstall.exe'):
-                        exe_path = os.path.join(root, file)
-                        print(f"[DEBUG] Found executable at: {exe_path}")
-                        try:
-                            subprocess.Popen([exe_path])
-                        except PermissionError:
-                            print(f"[DEBUG] Trying to run {exe_path} with elevation")
-                            subprocess.Popen(['runas', '/user:Administrator', exe_path])
-                        return ""
-        
+            exe_path = _pick_exe(app_path, app_name)
+            if exe_path:
+                print(f"[DEBUG] Found executable at: {exe_path}")
+                _popen(exe_path)
+                return ""
+
         # If not found in installed apps, try common locations
         common_paths = [
             os.path.join(os.environ['ProgramFiles'], app_name),
@@ -108,21 +133,15 @@ def launch_app(app_name):
             os.path.join(os.environ['LOCALAPPDATA'], app_name),
             os.path.join(os.environ['APPDATA'], app_name)
         ]
-        
+
         for path in common_paths:
             if os.path.exists(path):
-                for root, dirs, files in os.walk(path):
-                    for file in files:
-                        if file.endswith('.exe') and not file.lower().endswith('uninstall.exe'):
-                            exe_path = os.path.join(root, file)
-                            print(f"[DEBUG] Found executable at: {exe_path}")
-                            try:
-                                subprocess.Popen([exe_path])
-                            except PermissionError:
-                                print(f"[DEBUG] Trying to run {exe_path} with elevation")
-                                subprocess.Popen(['runas', '/user:Administrator', exe_path])
-                            return ""
-        
+                exe_path = _pick_exe(path, app_name)
+                if exe_path:
+                    print(f"[DEBUG] Found executable at: {exe_path}")
+                    _popen(exe_path)
+                    return ""
+
         # If still not found, try using the Windows shell command
         print(f"[DEBUG] Trying to launch {app_name} using Windows shell")
         subprocess.Popen(f'start "" "{app_name}"', shell=True)

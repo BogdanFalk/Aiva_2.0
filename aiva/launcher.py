@@ -88,15 +88,13 @@ async def main():
         print("VTube Studio did not start properly. Exiting...")
         return
     
-    # Launch OBS
-    if not launch_obs():
-        print("Failed to launch OBS. Exiting...")
-        return
-    
-    # Wait for OBS
-    if not wait_for_process('obs64'):
-        print("OBS did not start properly. Exiting...")
-        return
+    # Launch OBS (optional — skip with --no-obs, and never a hard failure)
+    if "--no-obs" not in sys.argv:
+        if launch_obs():
+            if not wait_for_process('obs64'):
+                print("OBS did not start properly; continuing without it.")
+        else:
+            print("Could not launch OBS; continuing without it.")
     
     # Launch Aiva
     print("Starting Aiva...")
