@@ -106,7 +106,7 @@ aiva/modules/memory.py       session transcripts + long-term facts (SQLite)
 - [x] Phase 0 — repo hygiene
 - [x] Phase 1 — streaming pipeline core, native tool calling, hotkeys
 - [x] Phase 2 — self-hearing gate for speaker use, F10 interrupt, pipecat 1.x API migration
-  - [ ] VB-Cable lip-sync routing into VTube Studio (needs VB-Cable installed)
+  - [x] VB-Cable lip-sync routing into VTube Studio + expression hotkeys (queried from the live model at startup)
 - [x] Phase 3 — long-term memory (facts table, injected into the prompt)
 - [x] Phase 4 — wake word + ambient mode (placeholder "Hey Jarvis"; custom "Aiva" model pending)
 - [x] Phase 5 — session cost telemetry
