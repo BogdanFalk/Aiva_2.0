@@ -174,3 +174,8 @@ cython_debug/
 .pypirc
 
 vosk-model-en-us-0.42-gigaspeech
+
+# Aiva runtime artifacts
+*.db
+*.wav
+pyvts_token.txt
