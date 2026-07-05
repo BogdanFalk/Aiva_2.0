@@ -57,9 +57,12 @@ class VTubeStudio:
             if not match:
                 print(f"No hotkey matching {name!r}")
                 return False
-            await self.vts.request(
+            response = await self.vts.request(
                 self.vts.vts_request.requestTriggerHotKey(match["hotkeyID"])
             )
+            if response.get("messageType") == "APIError":
+                print(f"VTS rejected hotkey {match['name']!r}: {response['data'].get('message')}")
+                return False
             return True
         except Exception as e:
             print(f"Error triggering hotkey: {e}")
@@ -79,7 +82,10 @@ class VTubeStudio:
                 relative=False,
                 move_time=0.2
             )
-            await self.vts.request(request_msg)
+            response = await self.vts.request(request_msg)
+            if response.get("messageType") == "APIError":
+                print(f"VTS rejected move: {response['data'].get('message')}")
+                return False
             return True
         except Exception as e:
             print(f"Error moving model: {e}")
