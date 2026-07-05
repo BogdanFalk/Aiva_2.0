@@ -25,6 +25,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# hotkey/expression names can be CJK; don't let a console print crash a handler
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
@@ -241,16 +245,36 @@ async def main():
     idle_timeout = float(os.getenv("AIVA_IDLE_TIMEOUT", "60"))
 
     # --- transport & services ----------------------------------------------
-    def _device_index(env_name):
-        value = os.getenv(env_name)
-        return int(value) if value else None
+    def _device_index(env_index, env_name, output):
+        """Resolve an audio device from env: numeric index, or (more robust,
+        indices shift when drivers change) a name substring like 'CABLE Input'."""
+        value = os.getenv(env_index)
+        if value:
+            return int(value)
+        name = os.getenv(env_name)
+        if not name:
+            return None
+        import pyaudio
+
+        pa = pyaudio.PyAudio()
+        try:
+            channel_key = "maxOutputChannels" if output else "maxInputChannels"
+            for i in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(i)
+                if name.lower() in info["name"].lower() and info[channel_key] > 0:
+                    print(f"Audio {'output' if output else 'input'}: [{i}] {info['name']}")
+                    return i
+        finally:
+            pa.terminate()
+        print(f"WARNING: no {'output' if output else 'input'} device matching '{name}'; using default")
+        return None
 
     transport = LocalAudioTransport(
         LocalAudioTransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            input_device_index=_device_index("AIVA_INPUT_DEVICE_INDEX"),
-            output_device_index=_device_index("AIVA_OUTPUT_DEVICE_INDEX"),
+            input_device_index=_device_index("AIVA_INPUT_DEVICE_INDEX", "AIVA_INPUT_DEVICE_NAME", False),
+            output_device_index=_device_index("AIVA_OUTPUT_DEVICE_INDEX", "AIVA_OUTPUT_DEVICE_NAME", True),
         )
     )
 
@@ -285,6 +309,10 @@ async def main():
     await vtube.connect()  # non-fatal if VTube Studio isn't running
     register_tools(llm, vtube)
 
+    avatar_hotkeys = [h["name"] for h in await vtube.get_hotkeys()]
+    if avatar_hotkeys:
+        print(f"Avatar hotkeys available: {len(avatar_hotkeys)}")
+
     # --- memory + context ----------------------------------------------------
     memory = Memory()
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -294,7 +322,7 @@ async def main():
 
     context = LLMContext(
         messages=[
-            {"role": "system", "content": build_system_prompt(facts)},
+            {"role": "system", "content": build_system_prompt(facts, avatar_hotkeys)},
             {"role": "system", "content": "Introduce yourself very briefly and greet the user."},
         ],
         tools=TOOL_SCHEMAS,
@@ -371,7 +399,7 @@ async def main():
         wake_listener = WakeWordListener(
             model=os.getenv("AIVA_WAKE_MODEL", "hey_jarvis"),
             on_wake=lambda: loop.call_soon_threadsafe(mic.wake),
-            device_index=_device_index("AIVA_INPUT_DEVICE_INDEX"),
+            device_index=_device_index("AIVA_INPUT_DEVICE_INDEX", "AIVA_INPUT_DEVICE_NAME", False),
         )
         wake_listener.start()
 

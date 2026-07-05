@@ -127,7 +127,7 @@ def make_vtube_handlers(vtube):
     """VTube handlers close over the shared VTubeStudio instance."""
 
     async def vtube_expression(params: FunctionCallParams):
-        ok = await vtube.trigger_expression(params.arguments.get("expression", ""))
+        ok = await vtube.trigger_hotkey(params.arguments.get("expression", ""))
         await params.result_callback({"success": ok})
 
     async def vtube_move(params: FunctionCallParams):
@@ -135,7 +135,7 @@ def make_vtube_handlers(vtube):
             x=params.arguments.get("x", 0),
             y=params.arguments.get("y", 0),
             rotation=params.arguments.get("rotation", 0),
-            size=params.arguments.get("size", 1.0),
+            size=params.arguments.get("size", 0),
         )
         await params.result_callback({"success": ok})
 
@@ -201,18 +201,21 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="vtube_expression",
-        description="Trigger one of your avatar's expressions, e.g. 'happy', 'surprised', 'angry'.",
-        properties={"expression": {"type": "string", "description": "Expression name"}},
+        description="Toggle one of your avatar's expression/prop hotkeys by its exact name. "
+                    "The available hotkey names are listed in your system prompt (they may be "
+                    "in Chinese — pass them verbatim). Hotkeys are toggles: trigger the same "
+                    "one again to turn it off.",
+        properties={"expression": {"type": "string", "description": "Exact hotkey name from your avatar's list"}},
         required=["expression"],
     ),
     FunctionSchema(
         name="vtube_move",
-        description="Move your avatar model on screen.",
+        description="Move/resize your avatar model on screen (absolute placement, animated over 0.2s).",
         properties={
-            "x": {"type": "number", "description": "Horizontal position, roughly -1 to 1"},
-            "y": {"type": "number", "description": "Vertical position, roughly -1 to 1"},
-            "rotation": {"type": "number", "description": "Rotation in degrees"},
-            "size": {"type": "number", "description": "Model size/zoom"},
+            "x": {"type": "number", "description": "Horizontal position, -1 (left edge) to 1 (right edge), 0 = center"},
+            "y": {"type": "number", "description": "Vertical position, -1 (bottom) to 1 (top), 0 = center"},
+            "rotation": {"type": "number", "description": "Rotation in degrees, 0 = upright"},
+            "size": {"type": "number", "description": "Zoom from -100 (tiny) to 100 (huge); 0 is the normal default size. Negative = smaller."},
         },
         required=[],
     ),

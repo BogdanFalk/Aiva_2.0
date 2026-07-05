@@ -31,8 +31,11 @@ Using your tools:
 - Use your avatar expressions occasionally to match your mood, without announcing that you did."""
 
 
-def build_system_prompt(facts: list[str] | None = None) -> str:
-    """Assemble the system prompt: personality + today's date + long-term facts."""
+def build_system_prompt(
+    facts: list[str] | None = None,
+    avatar_hotkeys: list[str] | None = None,
+) -> str:
+    """Assemble the system prompt: personality + date + facts + avatar abilities."""
     parts = [PERSONALITY]
 
     today = datetime.now().strftime("%A, %B %d, %Y")
@@ -41,5 +44,13 @@ def build_system_prompt(facts: list[str] | None = None) -> str:
     if facts:
         facts_text = "\n".join(f"- {fact}" for fact in facts)
         parts.append(f"Things you remember about the user from past conversations:\n{facts_text}")
+
+    if avatar_hotkeys:
+        hotkeys_text = "\n".join(f"- {name}" for name in avatar_hotkeys)
+        parts.append(
+            "Your avatar's expression/prop hotkeys (use vtube_expression with the EXACT name, "
+            "even if it's in another language — translate the user's request to the closest one; "
+            "they are toggles, so trigger the same one again to turn it off):\n" + hotkeys_text
+        )
 
     return "\n\n".join(parts)

@@ -32,19 +32,41 @@ class VTubeStudio:
             await self.connect()
         return self.connected
 
-    async def trigger_expression(self, expression_name):
-        """Trigger a specific expression"""
+    async def get_hotkeys(self):
+        """List the current model's hotkeys (expressions, props, animations)."""
+        try:
+            if not await self.ensure_connected():
+                return []
+            response = await self.vts.request(self.vts.vts_request.requestHotKeyList())
+            self._hotkeys = response["data"].get("availableHotkeys", [])
+            return self._hotkeys
+        except Exception as e:
+            print(f"Error listing hotkeys: {e}")
+            self.connected = False
+            return []
+
+    async def trigger_hotkey(self, name):
+        """Trigger a hotkey by (fuzzy) name. Most are toggles."""
         try:
             if not await self.ensure_connected():
                 return False
-            await self.vts.trigger_expression(expression_name)
+            hotkeys = getattr(self, "_hotkeys", None) or await self.get_hotkeys()
+            wanted = name.strip().casefold()
+            match = next((h for h in hotkeys if h["name"].casefold() == wanted), None) \
+                or next((h for h in hotkeys if wanted in h["name"].casefold()), None)
+            if not match:
+                print(f"No hotkey matching {name!r}")
+                return False
+            await self.vts.request(
+                self.vts.vts_request.requestTriggerHotKey(match["hotkeyID"])
+            )
             return True
         except Exception as e:
-            print(f"Error triggering expression: {e}")
+            print(f"Error triggering hotkey: {e}")
             self.connected = False
             return False
 
-    async def move_model(self, x=0, y=0, rotation=0, size=1.0):
+    async def move_model(self, x=0, y=0, rotation=0, size=0):
         """Move the model to a specific position"""
         try:
             if not await self.ensure_connected():
