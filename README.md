@@ -43,11 +43,34 @@ cd aiva
 ```
 
 - **F9** — mute/unmute the mic
-- **Esc** — quit
-- Talk naturally; interrupting her mid-sentence works. Wear headphones, or she may
-  hear herself through the speakers and interrupt herself.
+- **F10** — interrupt Aiva mid-sentence
+- **Esc** — quit (prints a session cost summary, saves the conversation, and
+  distills new long-term facts about you)
+- Speakers are fine: while Aiva talks, her ears are off (audio is gated before
+  STT), so she can't hear or interrupt herself. Voice barge-in is therefore
+  disabled — use F10 to cut her off.
 
 `python launcher.py` additionally boots VTube Studio (and OBS unless `--no-obs`).
+
+## Memory
+
+Aiva keeps `aiva/memory.db`: full transcripts per session, plus a `facts` table
+of durable things she's learned about you (extracted by a cheap LLM pass at
+shutdown). Facts are injected into her system prompt at startup, so she
+remembers you across restarts.
+
+## Ambient mode (wake word)
+
+Set `AIVA_WAKE_WORD=1` in `.env` and she starts asleep: nothing streams to
+Deepgram (idle time costs nothing) until the wake word — currently the
+pretrained **"Hey Jarvis"** model from openWakeWord as a placeholder. After
+`AIVA_IDLE_TIMEOUT` seconds (default 60) without conversation she dozes off
+again.
+
+To make her answer to "Aiva" instead: train a custom openWakeWord model (their
+[automatic training notebook](https://github.com/dscripka/openWakeWord#training-new-models)
+takes ~an hour on Colab), drop the `.onnx` file in the repo, and set
+`AIVA_WAKE_MODEL=path\to\aiva.onnx`.
 
 ## Audio routing for avatar lip-sync (VTube Studio)
 
@@ -75,14 +98,16 @@ aiva/modules/app_launcher.py launch Windows apps (app_paths.json + registry)
 aiva/modules/file_operations.py  create/open/list files (fenced to your user profile)
 aiva/modules/utilities.py    time/date/weather
 aiva/modules/vtube_studio.py pyvts wrapper (expressions, model movement)
-aiva/modules/memory.py       conversation history (long-term memory: planned)
+aiva/modules/memory.py       session transcripts + long-term facts (SQLite)
 ```
 
 ## Roadmap
 
 - [x] Phase 0 — repo hygiene
 - [x] Phase 1 — streaming pipeline core, native tool calling, hotkeys
-- [ ] Phase 2 — VB-Cable lip-sync routing, barge-in tuning
-- [ ] Phase 3 — long-term memory (facts table, injected into the prompt)
-- [ ] Phase 4 — "Aiva" wake word (local openWakeWord), ambient mode
-- [ ] Phase 5 — cost telemetry, resilience, packaging
+- [x] Phase 2 — self-hearing gate for speaker use, F10 interrupt, pipecat 1.x API migration
+  - [ ] VB-Cable lip-sync routing into VTube Studio (needs VB-Cable installed)
+- [x] Phase 3 — long-term memory (facts table, injected into the prompt)
+- [x] Phase 4 — wake word + ambient mode (placeholder "Hey Jarvis"; custom "Aiva" model pending)
+- [x] Phase 5 — session cost telemetry
+  - [ ] packaging / autostart

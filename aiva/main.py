@@ -4,7 +4,12 @@ mic -> Deepgram streaming STT -> Silero VAD + local smart-turn (in the user
 aggregator) -> LLM (native tool calling, streamed) -> ElevenLabs Flash TTS
 -> speaker.
 
-Hotkeys: F9 toggles the mic mute, Esc quits.
+Hotkeys: F9 mute mic, F10 interrupt Aiva, Esc quit.
+
+Optional ambient mode (AIVA_WAKE_WORD=1): the mic sleeps until the wake word
+(openWakeWord, local) and dozes off again after AIVA_IDLE_TIMEOUT seconds of
+silence. While asleep no audio is sent to Deepgram, so idle time is free.
+
 Run `python main.py --list-devices` to see audio device indices for
 AIVA_INPUT_DEVICE_INDEX / AIVA_OUTPUT_DEVICE_INDEX (VB-Cable routing).
 """
@@ -12,7 +17,9 @@ AIVA_INPUT_DEVICE_INDEX / AIVA_OUTPUT_DEVICE_INDEX (VB-Cable routing).
 import asyncio
 import os
 import sys
+import threading
 import time
+from datetime import datetime
 
 from dotenv import load_dotenv
 
@@ -27,17 +34,19 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     InterruptionWorkerFrame,
     LLMRunFrame,
+    MetricsFrame,
 )
+from pipecat.metrics.metrics import LLMUsageMetricsData, TTSUsageMetricsData
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.task import PipelineParams
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.deepgram.stt import DeepgramSTTService, LiveOptions
+from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
@@ -46,36 +55,56 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.workers.runner import WorkerRunner
 
+from modules.memory import Memory
 from modules.persona import build_system_prompt
 from modules.tools import TOOL_SCHEMAS, register_tools
 from modules.vtube_studio import VTubeStudio
 
 
-class MicGate(FrameProcessor):
-    """Mute gate right after the transport input.
+class MicController(FrameProcessor):
+    """Gates mic audio right after the transport input.
 
-    Replaces incoming audio with silence BEFORE it reaches STT whenever the
-    mic is manually muted (F9) or Aiva herself is speaking through the
-    speakers (plus a short cooldown for the room's audio tail). Gating
-    upstream of STT matters: it keeps her voice from ever being transcribed,
-    so delayed transcripts can't come back as "user" input after she stops.
-    Bot-speaking state comes from BotStarted/StoppedSpeakingFrames, which the
-    output transport pushes upstream through this processor.
+    Three layers, all applied BEFORE audio reaches STT:
+    - asleep (ambient mode): audio frames are DROPPED entirely — Deepgram
+      receives nothing and bills nothing (its KeepAlive holds the socket)
+    - manually muted (F9) or Aiva speaking (+ cooldown for the room's audio
+      tail): audio is zero-filled, so her own voice is never transcribed and
+      delayed self-transcripts can't come back as user input
+    - awake and quiet: audio passes, and billed STT seconds are counted
     """
 
-    def __init__(self, bot_cooldown_secs: float = 0.5):
+    def __init__(self, ambient: bool, bot_cooldown_secs: float = 0.5):
         super().__init__()
         self.muted = False
+        self.awake = not ambient
+        self.last_activity = time.monotonic()
+        self.stt_seconds = 0.0
+        self._ambient = ambient
         self._bot_cooldown_secs = bot_cooldown_secs
         self._bot_speaking = False
         self._bot_stopped_at = 0.0
 
-    def toggle(self):
+    def toggle_mute(self):
         self.muted = not self.muted
         print(f"\n[MIC {'MUTED' if self.muted else 'LIVE'}] (F9 to toggle)")
 
-    def _gate_closed(self) -> bool:
+    def wake(self):
+        self.last_activity = time.monotonic()
+        if not self.awake:
+            self.awake = True
+            print("\n[AWAKE] Aiva is listening")
+
+    def sleep(self):
+        if self.awake and self._ambient:
+            self.awake = False
+            print("\n[IDLE] say the wake word to talk to Aiva")
+
+    def idle_for(self) -> float:
+        return time.monotonic() - self.last_activity
+
+    def _zeroed(self) -> bool:
         if self.muted or self._bot_speaking:
             return True
         return (time.monotonic() - self._bot_stopped_at) < self._bot_cooldown_secs
@@ -88,14 +117,87 @@ class MicGate(FrameProcessor):
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
             self._bot_stopped_at = time.monotonic()
+            self.last_activity = time.monotonic()
 
-        if isinstance(frame, InputAudioRawFrame) and self._gate_closed():
-            frame = InputAudioRawFrame(
-                audio=b"\x00" * len(frame.audio),
-                sample_rate=frame.sample_rate,
-                num_channels=frame.num_channels,
-            )
+        if isinstance(frame, InputAudioRawFrame):
+            if not self.awake:
+                return  # dropped: nothing streams to Deepgram while asleep
+            if self._zeroed():
+                frame = InputAudioRawFrame(
+                    audio=b"\x00" * len(frame.audio),
+                    sample_rate=frame.sample_rate,
+                    num_channels=frame.num_channels,
+                )
+            self.stt_seconds += len(frame.audio) / (2 * frame.sample_rate)
+
         await self.push_frame(frame, direction)
+
+
+class UsageTracker(FrameProcessor):
+    """Collects LLM token and TTS character usage from metrics frames."""
+
+    def __init__(self):
+        super().__init__()
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.tts_chars = 0
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, MetricsFrame):
+            for data in frame.data:
+                if isinstance(data, LLMUsageMetricsData):
+                    self.prompt_tokens += data.value.prompt_tokens or 0
+                    self.completion_tokens += data.value.completion_tokens or 0
+                elif isinstance(data, TTSUsageMetricsData):
+                    self.tts_chars += data.value or 0
+        await self.push_frame(frame, direction)
+
+
+class WakeWordListener:
+    """Local wake-word detection (openWakeWord) on its own mic stream.
+
+    Runs in a thread; never sends audio anywhere. Fires on_wake() when the
+    wake word scores above threshold while Aiva is asleep.
+    """
+
+    def __init__(self, model, on_wake, device_index=None, threshold=0.5):
+        self._model = model
+        self._on_wake = on_wake
+        self._device_index = device_index
+        self._threshold = threshold
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        import numpy as np
+        import pyaudio
+        from openwakeword.model import Model
+
+        oww = Model(wakeword_models=[self._model], inference_framework="onnx")
+        pa = pyaudio.PyAudio()
+        stream = pa.open(
+            rate=16000, channels=1, format=pyaudio.paInt16, input=True,
+            frames_per_buffer=1280, input_device_index=self._device_index,
+        )
+        print(f"Wake word armed ({self._model})")
+        try:
+            while not self._stop.is_set():
+                chunk = stream.read(1280, exception_on_overflow=False)
+                scores = oww.predict(np.frombuffer(chunk, dtype=np.int16))
+                if scores and max(scores.values()) >= self._threshold:
+                    oww.reset()
+                    self._on_wake()
+                    time.sleep(2)  # debounce
+        finally:
+            stream.close()
+            pa.terminate()
 
 
 def list_audio_devices():
@@ -118,8 +220,25 @@ def _require_env(*names):
         sys.exit(1)
 
 
+def _print_usage_summary(mic: MicController, usage: UsageTracker):
+    """Session cost estimate (rates: mid-2026, see plan)."""
+    stt_min = mic.stt_seconds / 60
+    stt_cost = stt_min * 0.0077
+    llm_cost = usage.prompt_tokens * 0.40 / 1e6 + usage.completion_tokens * 1.60 / 1e6
+    tts_credits = usage.tts_chars * 0.5  # Flash v2.5
+    print("\n----- session usage -----")
+    print(f"STT streamed:  {stt_min:.1f} min       (~${stt_cost:.3f})")
+    print(f"LLM tokens:    {usage.prompt_tokens} in / {usage.completion_tokens} out (~${llm_cost:.3f})")
+    print(f"TTS:           {usage.tts_chars} chars = {tts_credits:.0f} ElevenLabs credits (free tier: 10k/month)")
+    print("-------------------------")
+
+
 async def main():
     _require_env("OPENAI_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "DEEPGRAM_API_KEY")
+
+    llm_model = os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini")
+    ambient = os.getenv("AIVA_WAKE_WORD", "0") == "1"
+    idle_timeout = float(os.getenv("AIVA_IDLE_TIMEOUT", "60"))
 
     # --- transport & services ----------------------------------------------
     def _device_index(env_name):
@@ -137,7 +256,7 @@ async def main():
 
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
-        live_options=LiveOptions(
+        settings=DeepgramSTTService.Settings(
             model="nova-3",
             language="en-US",
             smart_format=True,
@@ -146,17 +265,19 @@ async def main():
 
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
-        model=os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini"),
-        params=OpenAILLMService.InputParams(
+        settings=OpenAILLMService.Settings(
+            model=llm_model,
             temperature=0.7,
-            max_completion_tokens=300,
+            max_tokens=300,
         ),
     )
 
     tts = ElevenLabsTTSService(
         api_key=os.getenv("ELEVENLABS_API_KEY"),
-        voice_id=os.getenv("ELEVENLABS_VOICE_ID"),
-        model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
+        settings=ElevenLabsTTSService.Settings(
+            voice=os.getenv("ELEVENLABS_VOICE_ID"),
+            model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
+        ),
     )
 
     # --- avatar + tools ------------------------------------------------------
@@ -164,10 +285,16 @@ async def main():
     await vtube.connect()  # non-fatal if VTube Studio isn't running
     register_tools(llm, vtube)
 
-    # --- context: system prompt + startup greeting ---------------------------
+    # --- memory + context ----------------------------------------------------
+    memory = Memory()
+    session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    facts = memory.load_facts()
+    if facts:
+        print(f"Loaded {len(facts)} remembered facts")
+
     context = LLMContext(
         messages=[
-            {"role": "system", "content": build_system_prompt()},
+            {"role": "system", "content": build_system_prompt(facts)},
             {"role": "system", "content": "Introduce yourself very briefly and greet the user."},
         ],
         tools=TOOL_SCHEMAS,
@@ -176,11 +303,9 @@ async def main():
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
-            # Speakers + open mic: deafen the mic while Aiva speaks so she
-            # never hears (and interrupts) herself. F10 cuts her off instead.
+            # second layer against self-hearing (primary gate: MicController)
             user_mute_strategies=[AlwaysUserMuteStrategy()],
             user_turn_strategies=UserTurnStrategies(
-                # keep default VAD start strategy (with interruptions);
                 # stop turns on the semantic smart-turn model so stutters
                 # and "uhhmm" pauses don't cut the user off
                 stop=[
@@ -193,20 +318,25 @@ async def main():
     )
 
     # --- pipeline -------------------------------------------------------------
-    mic_gate = MicGate()
+    mic = MicController(ambient=ambient)
+    usage = UsageTracker()
 
     pipeline = Pipeline([
         transport.input(),
-        mic_gate,
+        mic,
         stt,
         user_aggregator,
         llm,
         tts,
+        usage,
         transport.output(),
         assistant_aggregator,
     ])
 
-    task = PipelineTask(pipeline, params=PipelineParams())
+    worker = PipelineWorker(
+        pipeline,
+        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+    )
 
     # --- hotkeys ---------------------------------------------------------------
     loop = asyncio.get_running_loop()
@@ -217,10 +347,10 @@ async def main():
         def interrupt_bot():
             print("\n[F10] Interrupting Aiva")
             asyncio.run_coroutine_threadsafe(
-                task.queue_frames([InterruptionWorkerFrame()]), loop
+                worker.queue_frames([InterruptionWorkerFrame()]), loop
             )
 
-        keyboard.add_hotkey("f9", lambda: loop.call_soon_threadsafe(mic_gate.toggle))
+        keyboard.add_hotkey("f9", lambda: loop.call_soon_threadsafe(mic.toggle_mute))
         keyboard.add_hotkey("f10", interrupt_bot)
         keyboard.add_hotkey("esc", lambda: loop.call_soon_threadsafe(stop_event.set))
         print("Hotkeys: F9 = mute/unmute mic, F10 = interrupt Aiva, Esc = quit")
@@ -230,19 +360,71 @@ async def main():
     async def watch_stop():
         await stop_event.wait()
         print("\nShutting down...")
-        await task.cancel()
+        await worker.cancel()
 
     watcher = asyncio.create_task(watch_stop())
 
-    # --- run --------------------------------------------------------------------
-    await task.queue_frames([LLMRunFrame()])
+    # --- ambient mode: wake word + idle timeout --------------------------------
+    wake_listener = None
+    idle_task = None
+    if ambient:
+        wake_listener = WakeWordListener(
+            model=os.getenv("AIVA_WAKE_MODEL", "hey_jarvis"),
+            on_wake=lambda: loop.call_soon_threadsafe(mic.wake),
+            device_index=_device_index("AIVA_INPUT_DEVICE_INDEX"),
+        )
+        wake_listener.start()
 
-    print("Aiva is listening. Just talk.")
-    runner = PipelineRunner(handle_sigint=False)
+        async def idle_watch():
+            while True:
+                await asyncio.sleep(5)
+                if mic.awake and mic.idle_for() > idle_timeout:
+                    mic.sleep()
+
+        idle_task = asyncio.create_task(idle_watch())
+        print("[IDLE] say the wake word to talk to Aiva")
+
+    # --- periodic transcript persistence ----------------------------------------
+    async def flush_transcripts():
+        while True:
+            await asyncio.sleep(60)
+            memory.save_new_messages(session_id, context.get_messages())
+
+    flush_task = asyncio.create_task(flush_transcripts())
+
+    # --- run ---------------------------------------------------------------------
+    if not ambient:
+        await worker.queue_frames([LLMRunFrame()])
+
+    print("Aiva is ready." + (" (ambient mode)" if ambient else " Just talk."))
+    runner = WorkerRunner(handle_sigint=False)
+    await runner.add_workers(worker)
     try:
-        await runner.run(task)
+        await runner.run()
     finally:
-        watcher.cancel()
+        for t in (watcher, idle_task, flush_task):
+            if t:
+                t.cancel()
+        if wake_listener:
+            wake_listener.stop()
+
+        # persist the session and distill long-term facts from it
+        messages = context.get_messages()
+        memory.save_new_messages(session_id, messages)
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            added = await asyncio.wait_for(
+                memory.extract_facts(client, llm_model, messages), timeout=30
+            )
+            if added:
+                print(f"Remembered {added} new fact(s) about you")
+        except Exception as e:
+            print(f"Fact extraction skipped: {e}")
+
+        _print_usage_summary(mic, usage)
+        memory.close()
         await vtube.close()
 
 
