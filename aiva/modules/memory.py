@@ -17,6 +17,11 @@ FACT_EXTRACTION_PROMPT = """You maintain the long-term memory of Aiva, a voice a
 From the conversation transcript, extract durable facts about the user worth remembering \
 across sessions: their name, preferences, pets, family, work, projects, recurring habits.
 
+The transcript comes from speech recognition and CONTAINS MISHEARINGS. Be skeptical: \
+only extract the user's name if they explicitly introduced themselves ("my name is..."); \
+words resembling "Aiva", "Eva", "Ava" or "Geneva" are almost always the assistant's own \
+name misheard, never the user's. When in doubt, extract nothing.
+
 Do NOT extract: one-off requests, small talk, anything about Aiva herself, or facts \
 already in the known list (unless the conversation contradicts them — then restate the \
 corrected fact).
