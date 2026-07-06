@@ -210,9 +210,9 @@ async def move_avatar_to_monitor(params: FunctionCallParams):
         })
         return
     x, y, w, h = monitors[idx]
-    HWND_TOPMOST = -1
-    SWP_SHOWWINDOW = 0x0040
-    ok = ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW)
+    # SetWindowPos silently fails on this layered/topmost overlay window;
+    # MoveWindow actually moves it (topmost style is baked in, so it stays on top)
+    ok = ctypes.windll.user32.MoveWindow(hwnd, x, y, w, h, True)
     await params.result_callback({"success": bool(ok), "moved_to_monitor": idx})
 
 
