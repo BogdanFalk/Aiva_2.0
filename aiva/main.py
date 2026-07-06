@@ -31,6 +31,7 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
 
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
@@ -39,6 +40,7 @@ from pipecat.frames.frames import (
     InterruptionWorkerFrame,
     LLMRunFrame,
     MetricsFrame,
+    StartFrame,
 )
 from pipecat.metrics.metrics import LLMUsageMetricsData, TTSUsageMetricsData
 from pipecat.pipeline.pipeline import Pipeline
@@ -89,6 +91,12 @@ class MicController(FrameProcessor):
         self._bot_cooldown_secs = bot_cooldown_secs
         self._bot_speaking = False
         self._bot_stopped_at = 0.0
+        # The transport must capture at the mic's NATIVE rate (Windows
+        # delivers silence/garbage otherwise), but Silero VAD and friends
+        # require 16 kHz — so this processor resamples the stream and
+        # re-stamps the StartFrame before anything downstream sees it.
+        self._resampler = SOXRStreamAudioResampler()
+        self._capture_rate = None
 
     def toggle_mute(self):
         self.muted = not self.muted
@@ -116,6 +124,11 @@ class MicController(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
+        if isinstance(frame, StartFrame):
+            self._capture_rate = frame.audio_in_sample_rate
+            if self._capture_rate != 16000:
+                frame.audio_in_sample_rate = 16000  # what downstream will get
+
         if isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
         elif isinstance(frame, BotStoppedSpeakingFrame):
@@ -126,15 +139,33 @@ class MicController(FrameProcessor):
         if isinstance(frame, InputAudioRawFrame):
             if not self.awake:
                 return  # dropped: nothing streams to Deepgram while asleep
+            audio = frame.audio
+            # frame.sample_rate is the transport's TRUE capture rate (the
+            # StartFrame only carries the pipeline's configured rate) —
+            # resample by what the frame actually is.
+            if frame.sample_rate != 16000:
+                audio = await self._resampler.resample(audio, frame.sample_rate, 16000)
             if self._zeroed():
-                frame = InputAudioRawFrame(
-                    audio=b"\x00" * len(frame.audio),
-                    sample_rate=frame.sample_rate,
-                    num_channels=frame.num_channels,
-                )
-            self.stt_seconds += len(frame.audio) / (2 * frame.sample_rate)
+                audio = b"\x00" * len(audio)
+            if os.getenv("AIVA_DEBUG_MIC") == "1":
+                self._debug_meter(frame.audio, audio)
+            frame = InputAudioRawFrame(audio=audio, sample_rate=16000, num_channels=1)
+            self.stt_seconds += len(audio) / (2 * 16000)
 
         await self.push_frame(frame, direction)
+
+    _dbg_acc = []
+
+    def _debug_meter(self, raw, processed):
+        import numpy as np
+
+        self._dbg_acc.append((raw, processed))
+        if sum(len(r) for r, _ in self._dbg_acc) >= self._capture_rate * 2 * 2:  # ~2s
+            raw_all = np.frombuffer(b"".join(r for r, _ in self._dbg_acc), dtype=np.int16)
+            out_all = np.frombuffer(b"".join(p for _, p in self._dbg_acc), dtype=np.int16)
+            print(f"[MIC] in_rate={self._capture_rate} raw_rms={raw_all.std():.0f} "
+                  f"resampled_rms={out_all.std():.0f} frames={len(self._dbg_acc)}")
+            self._dbg_acc.clear()
 
 
 class UsageTracker(FrameProcessor):
@@ -286,14 +317,15 @@ async def main():
                     candidates.append((i, info["name"], host))
             if candidates:
                 # A device shows up once per host API and they are NOT equal.
-                # On this machine DirectSound capture stutters (repeats stale
-                # buffers) and MME goes silent at non-native rates — WASAPI at
-                # the device's native rate is the reliable one. Capture must
-                # then happen at native rate (see audio_in_sample_rate below).
+                # MME works for both directions as long as capture runs at the
+                # device's NATIVE rate (16 kHz capture silently dies) — output
+                # MME resamples anything. WASAPI capture is fine but its output
+                # rejects non-mix-format rates, and DirectSound capture
+                # stutters. So: MME everywhere, native input rate.
                 def rank(c):
-                    if "WASAPI" in c[2]:
-                        return 0
                     if "MME" in c[2]:
+                        return 0
+                    if "WASAPI" in c[2]:
                         return 1
                     return 2
                 candidates.sort(key=rank)
