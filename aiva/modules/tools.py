@@ -216,6 +216,26 @@ async def move_avatar_to_monitor(params: FunctionCallParams):
     await params.result_callback({"success": bool(ok), "moved_to_monitor": idx})
 
 
+def make_sleep_handler(mic):
+    """Voice-commanded standby: closes her ears until the wake word."""
+
+    async def go_to_sleep(params: FunctionCallParams):
+        if not getattr(mic, "ambient", False):
+            await params.result_callback({
+                "success": False,
+                "error": "wake word mode is off, so sleeping would leave me deaf; "
+                         "tell the user to say Escape to quit or restart me with AIVA_WAKE_WORD=1",
+            })
+            return
+        mic.sleep()
+        await params.result_callback({
+            "success": True,
+            "status": "asleep — say the wake word to wake me",
+        })
+
+    return go_to_sleep
+
+
 def make_vtube_handlers(vtube):
     """VTube handlers close over the shared VTubeStudio instance."""
 
@@ -293,6 +313,14 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         required=[],
     ),
     FunctionSchema(
+        name="go_to_sleep",
+        description="Go into standby: your eyes close and you stop listening until the user "
+                    "says the wake word. Use when the user says 'go to sleep', 'goodnight', "
+                    "'that's all', or wants privacy. Say a SHORT goodnight line after calling it.",
+        properties={},
+        required=[],
+    ),
+    FunctionSchema(
         name="move_avatar_to_monitor",
         description="Move your desktop avatar overlay to another monitor. "
                     f"Monitors left-to-right: {_monitor_description()}. "
@@ -323,9 +351,10 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
 ])
 
 
-def register_tools(llm, vtube):
+def register_tools(llm, vtube, mic=None):
     """Register every tool handler on the LLM service."""
     vtube_expression, vtube_move = make_vtube_handlers(vtube)
+    llm.register_function("go_to_sleep", make_sleep_handler(mic))
 
     llm.register_function("launch_app", launch_app)
     llm.register_function("create_file", create_file)

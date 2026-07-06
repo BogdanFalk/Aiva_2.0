@@ -123,6 +123,10 @@ class MicController(FrameProcessor):
     def bot_speaking(self) -> bool:
         return self._bot_speaking
 
+    @property
+    def ambient(self) -> bool:
+        return self._ambient
+
     def idle_for(self) -> float:
         return time.monotonic() - self.last_activity
 
@@ -417,9 +421,11 @@ async def main():
     )
 
     # --- avatar + tools ------------------------------------------------------
+    mic = MicController(ambient=ambient)
+
     vtube = VTubeStudio()
     await vtube.connect()  # non-fatal if VTube Studio isn't running
-    register_tools(llm, vtube)
+    register_tools(llm, vtube, mic)
 
     avatar_hotkeys = [h["name"] for h in await vtube.get_hotkeys()]
     if avatar_hotkeys:
@@ -458,7 +464,6 @@ async def main():
     )
 
     # --- pipeline -------------------------------------------------------------
-    mic = MicController(ambient=ambient)
     usage = UsageTracker()
 
     pipeline = Pipeline([
