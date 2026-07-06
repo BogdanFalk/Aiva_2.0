@@ -67,6 +67,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from modules.memory import Memory
 from modules.persona import build_system_prompt
+from modules.terminals import TerminalManager
 from modules.tools import TOOL_SCHEMAS, register_tools
 from modules.vtube_studio import VTubeStudio
 
@@ -422,10 +423,11 @@ async def main():
 
     # --- avatar + tools ------------------------------------------------------
     mic = MicController(ambient=ambient)
+    terminals = TerminalManager()
 
     vtube = VTubeStudio()
     await vtube.connect()  # non-fatal if VTube Studio isn't running
-    register_tools(llm, vtube, mic)
+    register_tools(llm, vtube, mic, terminals)
 
     avatar_hotkeys = [h["name"] for h in await vtube.get_hotkeys()]
     if avatar_hotkeys:
@@ -483,6 +485,15 @@ async def main():
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
     )
+
+    async def announce(text: str):
+        """Voice path for background-job news: inject a system note and
+        trigger a turn so Aiva proactively speaks up."""
+        mic.wake()  # eyes open, ears on — she has news
+        context.add_message({"role": "system", "content": text})
+        await worker.queue_frames([LLMRunFrame()])
+
+    terminals._announce = announce
 
     # --- hotkeys ---------------------------------------------------------------
     loop = asyncio.get_running_loop()
@@ -582,6 +593,7 @@ async def main():
             print(f"Fact extraction skipped: {e}")
 
         _print_usage_summary(mic, usage)
+        terminals.shutdown()
         memory.close()
         await vtube.close()
 

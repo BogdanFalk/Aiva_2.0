@@ -216,6 +216,60 @@ async def move_avatar_to_monitor(params: FunctionCallParams):
     await params.result_callback({"success": bool(ok), "moved_to_monitor": idx})
 
 
+def make_terminal_handlers(terminals):
+    """Terminal/job/Claude-Code handlers close over the TerminalManager."""
+
+    async def open_terminal(params: FunctionCallParams):
+        await params.result_callback(terminals.open_session(
+            params.arguments.get("name", "main"),
+            params.arguments.get("directory", "~"),
+        ))
+
+    async def run_in_terminal(params: FunctionCallParams):
+        await params.result_callback(await terminals.run(
+            params.arguments.get("terminal", "main"),
+            params.arguments.get("command", ""),
+        ))
+
+    async def read_terminal(params: FunctionCallParams):
+        await params.result_callback(terminals.read_session(params.arguments.get("name", "main")))
+
+    async def list_terminals(params: FunctionCallParams):
+        await params.result_callback({"success": True, "open": terminals.list_sessions()})
+
+    async def close_terminal(params: FunctionCallParams):
+        await params.result_callback(terminals.close_session(params.arguments.get("name", "main")))
+
+    async def show_terminal(params: FunctionCallParams):
+        name = params.arguments.get("name", "main")
+        try:
+            if name in terminals.jobs:
+                log = terminals.jobs[name]["log_path"]
+                subprocess.Popen(["wt", "nt", "--title", f"Aiva: {name}", "powershell",
+                                  "-NoExit", "-Command", f"Get-Content -Wait '{log}'"])
+            elif name in terminals.sessions:
+                subprocess.Popen(["wt", "nt", "--title", f"Aiva: {name}",
+                                  "-d", terminals.sessions[name]["cwd"]])
+            else:
+                await params.result_callback({"success": False, "error": f"nothing named '{name}'"})
+                return
+            await params.result_callback({"success": True, "shown": name})
+        except FileNotFoundError:
+            await params.result_callback({"success": False, "error": "Windows Terminal (wt) not available"})
+
+    async def claude_code(params: FunctionCallParams):
+        await params.result_callback(await terminals.start_claude(
+            job_name=params.arguments.get("job", "claude-1"),
+            project_dir=params.arguments.get("project_dir", "."),
+            prompt=params.arguments.get("task", ""),
+            mode=params.arguments.get("mode", "plan"),
+            resume_id=params.arguments.get("resume_session_id"),
+        ))
+
+    return (open_terminal, run_in_terminal, read_terminal, list_terminals,
+            close_terminal, show_terminal, claude_code)
+
+
 def make_sleep_handler(mic):
     """Voice-commanded standby: closes her ears until the wake word."""
 
@@ -313,6 +367,71 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         required=[],
     ),
     FunctionSchema(
+        name="open_terminal",
+        description="Open a named terminal session in a directory. Terminals remember their "
+                    "working directory and command history — use descriptive names like 'aiva-repo'.",
+        properties={
+            "name": {"type": "string", "description": "Short name for this terminal"},
+            "directory": {"type": "string", "description": "Working directory, e.g. a project path"},
+        },
+        required=["name", "directory"],
+    ),
+    FunctionSchema(
+        name="run_in_terminal",
+        description="Run a shell command in a named terminal. Fast commands return their output; "
+                    "slow ones automatically become background jobs and you'll be notified when done.",
+        properties={
+            "terminal": {"type": "string", "description": "Terminal name"},
+            "command": {"type": "string", "description": "PowerShell command to run"},
+        },
+        required=["terminal", "command"],
+    ),
+    FunctionSchema(
+        name="read_terminal",
+        description="Read recent output/history of a terminal or background job by name.",
+        properties={"name": {"type": "string", "description": "Terminal or job name"}},
+        required=["name"],
+    ),
+    FunctionSchema(
+        name="list_terminals",
+        description="List your open terminals and running/finished background jobs — use this to "
+                    "recall what you're working on and where.",
+        properties={},
+        required=[],
+    ),
+    FunctionSchema(
+        name="close_terminal",
+        description="Close a terminal session (kills its background job if one is running).",
+        properties={"name": {"type": "string", "description": "Terminal name"}},
+        required=["name"],
+    ),
+    FunctionSchema(
+        name="show_terminal",
+        description="Open a visible terminal window on the user's screen showing a session's "
+                    "directory or a job's live output, so they can watch.",
+        properties={"name": {"type": "string", "description": "Terminal or job name"}},
+        required=["name"],
+    ),
+    FunctionSchema(
+        name="claude_code",
+        description="Delegate coding work to Claude Code (an autonomous coding agent) in a project "
+                    "directory. Runs in the background for minutes; you'll be told when it finishes. "
+                    "WORKFLOW: first call with mode='plan' to get an implementation plan, summarize "
+                    "it to the user and discuss; refine by calling again with resume_session_id (from "
+                    "the finished job's claude_session_id) and their feedback; only when the user "
+                    "approves, call with mode='execute' and resume_session_id to implement.",
+        properties={
+            "job": {"type": "string", "description": "Job name, e.g. 'claude-featureX'"},
+            "project_dir": {"type": "string", "description": "Absolute path of the project"},
+            "task": {"type": "string", "description": "The task, plan feedback, or approval message"},
+            "mode": {"type": "string", "enum": ["plan", "execute"],
+                     "description": "plan = propose only; execute = actually change code"},
+            "resume_session_id": {"type": "string",
+                                  "description": "claude_session_id of a previous job to continue that conversation"},
+        },
+        required=["job", "project_dir", "task", "mode"],
+    ),
+    FunctionSchema(
         name="go_to_sleep",
         description="Go into standby: your eyes close and you stop listening until the user "
                     "says the wake word. Use when the user says 'go to sleep', 'goodnight', "
@@ -351,10 +470,21 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
 ])
 
 
-def register_tools(llm, vtube, mic=None):
+def register_tools(llm, vtube, mic=None, terminals=None):
     """Register every tool handler on the LLM service."""
     vtube_expression, vtube_move = make_vtube_handlers(vtube)
     llm.register_function("go_to_sleep", make_sleep_handler(mic))
+
+    if terminals is not None:
+        (open_terminal, run_in_terminal, read_terminal, list_terminals,
+         close_terminal, show_terminal, claude_code) = make_terminal_handlers(terminals)
+        llm.register_function("open_terminal", open_terminal)
+        llm.register_function("run_in_terminal", run_in_terminal)
+        llm.register_function("read_terminal", read_terminal)
+        llm.register_function("list_terminals", list_terminals)
+        llm.register_function("close_terminal", close_terminal)
+        llm.register_function("show_terminal", show_terminal)
+        llm.register_function("claude_code", claude_code)
 
     llm.register_function("launch_app", launch_app)
     llm.register_function("create_file", create_file)
