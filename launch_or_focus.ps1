@@ -62,7 +62,11 @@ public class WinFinder {
 $found = [WinFinder]::FindWindowsByTitle($windowTitleMatch, $PID)
 
 if ($found.Count -eq 0) {
-    Start-Process -FilePath $batPath
+    # Launch through the shell (explorer) so the console is ALWAYS visible:
+    # when this script runs from a "-WindowStyle Hidden" shortcut, directly
+    # spawned console children inherit the hidden state and Aiva boots
+    # invisibly.
+    Start-Process explorer.exe -ArgumentList "`"$batPath`""
 } else {
     [WinFinder]::ForceFocus($found[0])
 }

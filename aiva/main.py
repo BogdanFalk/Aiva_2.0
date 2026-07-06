@@ -534,8 +534,10 @@ async def main():
 
         keyboard.add_hotkey("f9", lambda: loop.call_soon_threadsafe(mic.toggle_mute))
         keyboard.add_hotkey("f10", interrupt_bot)
-        keyboard.add_hotkey("esc", lambda: loop.call_soon_threadsafe(stop_event.set))
-        print("Hotkeys: F9 = mute/unmute mic, F10 = interrupt Aiva, Esc = quit")
+        # NOT Esc: a global Esc hotkey means any stray Escape press anywhere
+        # in Windows silently kills her — it did, repeatedly.
+        keyboard.add_hotkey("ctrl+alt+x", lambda: loop.call_soon_threadsafe(stop_event.set))
+        print("Hotkeys: F9 = mute/unmute mic, F10 = interrupt Aiva, Ctrl+Alt+X = quit")
     except Exception as e:
         print(f"Global hotkeys unavailable ({e}); use Ctrl+C to quit")
 
