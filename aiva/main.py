@@ -37,10 +37,12 @@ from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     Frame,
     InputAudioRawFrame,
+    InterimTranscriptionFrame,
     InterruptionWorkerFrame,
     LLMRunFrame,
     MetricsFrame,
     StartFrame,
+    TranscriptionFrame,
 )
 from pipecat.metrics.metrics import LLMUsageMetricsData, TTSUsageMetricsData
 from pipecat.pipeline.pipeline import Pipeline
@@ -108,10 +110,18 @@ class MicController(FrameProcessor):
             self.awake = True
             print("\n[AWAKE] Aiva is listening")
 
+    def poke(self):
+        """Conversation activity happened — keep her awake."""
+        self.last_activity = time.monotonic()
+
     def sleep(self):
         if self.awake and self._ambient:
             self.awake = False
             print("\n[IDLE] say the wake word to talk to Aiva")
+
+    @property
+    def bot_speaking(self) -> bool:
+        return self._bot_speaking
 
     def idle_for(self) -> float:
         return time.monotonic() - self.last_activity
@@ -131,6 +141,7 @@ class MicController(FrameProcessor):
 
         if isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
+            self.last_activity = time.monotonic()
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
             self._bot_stopped_at = time.monotonic()
@@ -166,6 +177,22 @@ class MicController(FrameProcessor):
             print(f"[MIC] in_rate={self._capture_rate} raw_rms={raw_all.std():.0f} "
                   f"resampled_rms={out_all.std():.0f} frames={len(self._dbg_acc)}")
             self._dbg_acc.clear()
+
+
+class ActivityWatcher(FrameProcessor):
+    """Sits after STT: any transcription (interim or final) means the user is
+    talking to Aiva, so the idle timer resets — including when they say her
+    name mid-conversation."""
+
+    def __init__(self, mic: "MicController"):
+        super().__init__()
+        self._mic = mic
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, (InterimTranscriptionFrame, TranscriptionFrame)):
+            self._mic.poke()
+        await self.push_frame(frame, direction)
 
 
 class UsageTracker(FrameProcessor):
@@ -292,7 +319,7 @@ async def main():
 
     llm_model = os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini")
     ambient = os.getenv("AIVA_WAKE_WORD", "0") == "1"
-    idle_timeout = float(os.getenv("AIVA_IDLE_TIMEOUT", "60"))
+    idle_timeout = float(os.getenv("AIVA_IDLE_TIMEOUT", "20"))
 
     # --- transport & services ----------------------------------------------
     def _device_index(env_index, env_name, output):
@@ -438,6 +465,7 @@ async def main():
         transport.input(),
         mic,
         stt,
+        ActivityWatcher(mic),
         user_aggregator,
         llm,
         tts,
@@ -491,8 +519,9 @@ async def main():
 
         async def idle_watch():
             while True:
-                await asyncio.sleep(5)
-                if mic.awake and mic.idle_for() > idle_timeout:
+                await asyncio.sleep(2)
+                # never doze off mid-sentence or mid-conversation
+                if mic.awake and not mic.bot_speaking and mic.idle_for() > idle_timeout:
                     mic.sleep()
 
         idle_task = asyncio.create_task(idle_watch())
