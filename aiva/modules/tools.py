@@ -10,6 +10,7 @@ confirm_pending_command. This gate is non-bypassable.
 """
 
 import ctypes
+import os
 import subprocess
 from ctypes import wintypes
 
@@ -64,6 +65,44 @@ def _find_overlay_hwnd():
 
     user32.EnumWindows(proc_type(_cb), 0)
     return found[0] if found else None
+
+
+_overlay_state = {"mode": "top", "monitor": None}
+
+_SWP_ZONLY = 0x0010 | 0x0002 | 0x0001  # NOACTIVATE | NOMOVE | NOSIZE
+_HWND_BOTTOM = 1
+_HWND_TOPMOST = -1
+
+_OVERLAY_EXE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "tools", "Spout2OverlayHUD.exe")
+
+
+def _overlay_is_topmost(hwnd):
+    return bool(ctypes.windll.user32.GetWindowLongW(hwnd, -20) & 0x8)
+
+
+async def _restart_overlay():
+    """The only reliable way to regain always-on-top: the overlay creates
+    itself topmost, and Windows refuses cross-process topmost promotion."""
+    import asyncio
+
+    subprocess.run('taskkill /IM Spout2OverlayHUD.exe /F', shell=True,
+                   capture_output=True)
+    subprocess.Popen([_OVERLAY_EXE], cwd=os.path.dirname(_OVERLAY_EXE))
+    for _ in range(20):
+        await asyncio.sleep(0.4)
+        hwnd = _find_overlay_hwnd()
+        if hwnd:
+            return hwnd
+    return None
+
+
+def _place_on_monitor(hwnd, idx):
+    monitors = _list_monitors()
+    if idx is not None and 0 <= idx < len(monitors):
+        x, y, w, h = monitors[idx]
+        ctypes.windll.user32.MoveWindow(hwnd, x, y, w, h, True)
 
 
 def _monitor_description():
@@ -213,7 +252,38 @@ async def move_avatar_to_monitor(params: FunctionCallParams):
     # SetWindowPos silently fails on this layered/topmost overlay window;
     # MoveWindow actually moves it (topmost style is baked in, so it stays on top)
     ok = ctypes.windll.user32.MoveWindow(hwnd, x, y, w, h, True)
+    _overlay_state["monitor"] = idx
+    if _overlay_state["mode"] == "desktop":
+        ctypes.windll.user32.SetWindowPos(hwnd, _HWND_BOTTOM, 0, 0, 0, 0, _SWP_ZONLY)
     await params.result_callback({"success": bool(ok), "moved_to_monitor": idx})
+
+
+async def set_avatar_layer(params: FunctionCallParams):
+    mode = params.arguments.get("layer", "top")
+    hwnd = _find_overlay_hwnd()
+    if hwnd is None:
+        await params.result_callback({"success": False,
+                                      "error": "the desktop overlay isn't running"})
+        return
+
+    if mode == "desktop":
+        ctypes.windll.user32.SetWindowPos(hwnd, _HWND_BOTTOM, 0, 0, 0, 0, _SWP_ZONLY)
+        _overlay_state["mode"] = "desktop"
+        await params.result_callback({"success": True, "layer": "desktop",
+                                      "note": "now sitting behind the user's windows"})
+        return
+
+    # top: promote if possible, otherwise restart the overlay (born topmost)
+    if not _overlay_is_topmost(hwnd):
+        hwnd = await _restart_overlay()
+        if hwnd is None:
+            await params.result_callback({"success": False,
+                                          "error": "overlay didn't come back after restart"})
+            return
+        _place_on_monitor(hwnd, _overlay_state["monitor"])
+    _overlay_state["mode"] = "top"
+    await params.result_callback({"success": True, "layer": "top",
+                                  "note": "floating above all windows again"})
 
 
 def make_terminal_handlers(terminals):
@@ -385,6 +455,15 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         required=[],
     ),
     FunctionSchema(
+        name="set_avatar_layer",
+        description="Change which layer your desktop avatar lives on. 'desktop' = sit behind all "
+                    "the user's windows, quietly on the desktop (use when they say 'go to the "
+                    "desktop'). 'top' = float above every window again (use for 'come back', "
+                    "'show up', 'always on top' — your window may blink for a second).",
+        properties={"layer": {"type": "string", "enum": ["top", "desktop"]}},
+        required=["layer"],
+    ),
+    FunctionSchema(
         name="open_terminal",
         description="Open a named terminal session in a directory. Terminals remember their "
                     "working directory and command history — use descriptive names like 'aiva-repo'.",
@@ -513,5 +592,6 @@ def register_tools(llm, vtube, mic=None, terminals=None):
     llm.register_function("get_weather", get_weather)
     llm.register_function("get_datetime", get_datetime)
     llm.register_function("move_avatar_to_monitor", move_avatar_to_monitor)
+    llm.register_function("set_avatar_layer", set_avatar_layer)
     llm.register_function("vtube_expression", vtube_expression)
     llm.register_function("vtube_move", vtube_move)
