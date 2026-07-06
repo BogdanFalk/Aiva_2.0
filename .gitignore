@@ -181,3 +181,4 @@ vosk-model-en-us-0.42-gigaspeech
 pyvts_token.txt
 training/
 tools/
+overlay_state.json

@@ -10,6 +10,7 @@ confirm_pending_command. This gate is non-bypassable.
 """
 
 import ctypes
+import json
 import os
 import subprocess
 from ctypes import wintypes
@@ -68,6 +69,24 @@ def _find_overlay_hwnd():
 
 
 _overlay_state = {"mode": "top", "monitor": None}
+_OVERLAY_STATE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "overlay_state.json")
+
+
+def _save_overlay_state():
+    try:
+        with open(_OVERLAY_STATE_FILE, "w") as f:
+            json.dump(_overlay_state, f)
+    except OSError:
+        pass
+
+
+def _load_overlay_state():
+    try:
+        with open(_OVERLAY_STATE_FILE) as f:
+            _overlay_state.update(json.load(f))
+    except (OSError, json.JSONDecodeError):
+        pass
 
 _SWP_ZONLY = 0x0010 | 0x0002 | 0x0001  # NOACTIVATE | NOMOVE | NOSIZE
 _HWND_BOTTOM = 1
@@ -118,16 +137,38 @@ def _place_on_monitor(hwnd, idx):
         ctypes.windll.user32.MoveWindow(hwnd, x, y, w, h, True)
 
 
-def ensure_overlay_running():
-    """Start the desktop overlay if it isn't already (called at Aiva boot)."""
+async def ensure_overlay_running():
+    """Start the desktop overlay if needed and restore its last position
+    and layer (called at Aiva boot)."""
+    import asyncio
+
+    _load_overlay_state()
     if not os.path.exists(_OVERLAY_EXE):
         print("Desktop overlay not found (tools/Spout2OverlayHUD.exe); skipping.")
         return False
     if _overlay_running():
         return False
+
     subprocess.Popen([_OVERLAY_EXE], cwd=os.path.dirname(_OVERLAY_EXE))
-    print("Desktop overlay started")
+    hwnd = None
+    for _ in range(20):
+        await asyncio.sleep(0.4)
+        hwnd = _find_overlay_hwnd()
+        if hwnd:
+            break
+    if hwnd:
+        if _overlay_state["monitor"] is not None:
+            _place_on_monitor(hwnd, _overlay_state["monitor"])
+        if _overlay_state["mode"] == "desktop":
+            ctypes.windll.user32.SetWindowPos(hwnd, _HWND_BOTTOM, 0, 0, 0, 0, _SWP_ZONLY)
+        where = f"monitor {_overlay_state['monitor']}" if _overlay_state["monitor"] is not None else "primary"
+        print(f"Desktop overlay started ({_overlay_state['mode']}, {where})")
     return True
+
+
+def close_vtube_studio():
+    """Kill VTube Studio (called at Aiva shutdown)."""
+    subprocess.run('taskkill /IM "VTube Studio.exe" /F', shell=True, capture_output=True)
 
 
 def close_overlay():
@@ -285,6 +326,7 @@ async def move_avatar_to_monitor(params: FunctionCallParams):
     # MoveWindow actually moves it (topmost style is baked in, so it stays on top)
     ok = ctypes.windll.user32.MoveWindow(hwnd, x, y, w, h, True)
     _overlay_state["monitor"] = idx
+    _save_overlay_state()
     if _overlay_state["mode"] == "desktop":
         ctypes.windll.user32.SetWindowPos(hwnd, _HWND_BOTTOM, 0, 0, 0, 0, _SWP_ZONLY)
     await params.result_callback({"success": bool(ok), "moved_to_monitor": idx})
@@ -301,6 +343,7 @@ async def set_avatar_layer(params: FunctionCallParams):
     if mode == "desktop":
         ctypes.windll.user32.SetWindowPos(hwnd, _HWND_BOTTOM, 0, 0, 0, 0, _SWP_ZONLY)
         _overlay_state["mode"] = "desktop"
+        _save_overlay_state()
         await params.result_callback({"success": True, "layer": "desktop",
                                       "note": "now sitting behind the user's windows"})
         return
@@ -314,6 +357,7 @@ async def set_avatar_layer(params: FunctionCallParams):
             return
         _place_on_monitor(hwnd, _overlay_state["monitor"])
     _overlay_state["mode"] = "top"
+    _save_overlay_state()
     await params.result_callback({"success": True, "layer": "top",
                                   "note": "floating above all windows again"})
 
