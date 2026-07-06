@@ -92,6 +92,28 @@ class VTubeStudio:
             self.connected = False
             return False
 
+    async def set_eyes(self, openness: float):
+        """Drive both eye-open parameters (0 = closed, 1 = open).
+
+        VTS parameter injections expire after ~1s, so call this repeatedly
+        to hold the eyes closed; stop calling and auto-blink resumes.
+        """
+        try:
+            if not await self.ensure_connected():
+                return False
+            request_msg = self.vts.vts_request.requestSetMultiParameterValue(
+                ["EyeOpenLeft", "EyeOpenRight"], [openness, openness], weight=1.0
+            )
+            response = await self.vts.request(request_msg)
+            if response.get("messageType") == "APIError":
+                print(f"VTS rejected eye injection: {response['data'].get('message')}")
+                return False
+            return True
+        except Exception as e:
+            print(f"Error setting eyes: {e}")
+            self.connected = False
+            return False
+
     async def set_parameter(self, parameter_name, value):
         """Set a specific parameter value"""
         try:

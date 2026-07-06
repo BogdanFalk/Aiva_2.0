@@ -508,6 +508,7 @@ async def main():
     # --- ambient mode: wake word + idle timeout --------------------------------
     wake_listener = None
     idle_task = None
+    sleep_face_task = None
     if ambient:
         wake_listener = WakeWordListener(
             model=os.getenv("AIVA_WAKE_MODEL", "hey_jarvis"),
@@ -524,6 +525,15 @@ async def main():
                 if mic.awake and not mic.bot_speaking and mic.idle_for() > idle_timeout:
                     mic.sleep()
 
+        async def sleep_face():
+            """Keep the avatar's eyes closed while she's asleep (injections
+            expire in ~1s, so re-send; when awake, auto-blink resumes)."""
+            while True:
+                await asyncio.sleep(0.6)
+                if not mic.awake and vtube.connected:
+                    await vtube.set_eyes(0.0)
+
+        sleep_face_task = asyncio.create_task(sleep_face())
         idle_task = asyncio.create_task(idle_watch())
         print("[IDLE] say the wake word to talk to Aiva")
 
@@ -545,7 +555,7 @@ async def main():
     try:
         await runner.run()
     finally:
-        for t in (watcher, idle_task, flush_task):
+        for t in (watcher, idle_task, flush_task, sleep_face_task):
             if t:
                 t.cancel()
         if wake_listener:
