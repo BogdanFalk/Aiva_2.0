@@ -431,10 +431,13 @@ async def main():
 
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
+        # execute batched tool calls in the order the model emitted them, so
+        # "do X, then Y" keeps its sequence even when both arrive in one turn
+        run_in_parallel=False,
         settings=OpenAILLMService.Settings(
             model=llm_model,
             temperature=0.7,
-            max_tokens=300,
+            max_tokens=500,  # headroom for multi-tool-call turns
         ),
     )
 
