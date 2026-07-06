@@ -179,3 +179,5 @@ vosk-model-en-us-0.42-gigaspeech
 *.db
 *.wav
 pyvts_token.txt
+training/
+tools/

@@ -180,21 +180,40 @@ class WakeWordListener:
         self._stop.set()
 
     def _run(self):
+        from math import gcd
+
         import numpy as np
         import pyaudio
         from openwakeword.model import Model
+        from scipy.signal import resample_poly
 
         oww = Model(wakeword_models=[self._model], inference_framework="onnx")
         pa = pyaudio.PyAudio()
+        # Capture at the device's NATIVE rate and resample to the 16 kHz the
+        # model expects — asking Windows for 16 kHz directly yields silence
+        # (MME) or corrupted repeating buffers (DirectSound) on this machine.
+        if self._device_index is None:
+            info = pa.get_default_input_device_info()
+        else:
+            info = pa.get_device_info_by_index(self._device_index)
+        native = int(info["defaultSampleRate"])
+        frames = int(native * 0.08)  # 80 ms, the model's chunk size
+        g = gcd(16000, native)
+        up, down = 16000 // g, native // g
+
         stream = pa.open(
-            rate=16000, channels=1, format=pyaudio.paInt16, input=True,
-            frames_per_buffer=1280, input_device_index=self._device_index,
+            rate=native, channels=1, format=pyaudio.paInt16, input=True,
+            frames_per_buffer=frames, input_device_index=self._device_index,
         )
-        print(f"Wake word armed ({self._model})")
+        print(f"Wake word armed ({self._model}) on '{info['name']}' @ {native} Hz")
         try:
             while not self._stop.is_set():
-                chunk = stream.read(1280, exception_on_overflow=False)
-                scores = oww.predict(np.frombuffer(chunk, dtype=np.int16))
+                chunk = stream.read(frames, exception_on_overflow=False)
+                audio = np.frombuffer(chunk, dtype=np.int16)
+                if native != 16000:
+                    audio = resample_poly(audio.astype(np.float32), up, down)
+                    audio = np.clip(audio, -32768, 32767).astype(np.int16)
+                scores = oww.predict(audio)
                 if scores and max(scores.values()) >= self._threshold:
                     oww.reset()
                     self._on_wake()
@@ -259,21 +278,55 @@ async def main():
         pa = pyaudio.PyAudio()
         try:
             channel_key = "maxOutputChannels" if output else "maxInputChannels"
+            candidates = []
             for i in range(pa.get_device_count()):
                 info = pa.get_device_info_by_index(i)
                 if name.lower() in info["name"].lower() and info[channel_key] > 0:
-                    print(f"Audio {'output' if output else 'input'}: [{i}] {info['name']}")
-                    return i
+                    host = pa.get_host_api_info_by_index(info["hostApi"])["name"]
+                    candidates.append((i, info["name"], host))
+            if candidates:
+                # A device shows up once per host API and they are NOT equal.
+                # On this machine DirectSound capture stutters (repeats stale
+                # buffers) and MME goes silent at non-native rates — WASAPI at
+                # the device's native rate is the reliable one. Capture must
+                # then happen at native rate (see audio_in_sample_rate below).
+                def rank(c):
+                    if "WASAPI" in c[2]:
+                        return 0
+                    if "MME" in c[2]:
+                        return 1
+                    return 2
+                candidates.sort(key=rank)
+                i, dev_name, host = candidates[0]
+                print(f"Audio {'output' if output else 'input'}: [{i}] {dev_name} ({host})")
+                return i
         finally:
             pa.terminate()
         print(f"WARNING: no {'output' if output else 'input'} device matching '{name}'; using default")
         return None
 
+    def _native_rate(device_index):
+        """Capture must run at the device's native rate: forcing 16 kHz makes
+        Windows deliver silence (MME) or corrupted repeating buffers (DS)."""
+        import pyaudio
+
+        pa = pyaudio.PyAudio()
+        try:
+            if device_index is None:
+                return int(pa.get_default_input_device_info()["defaultSampleRate"])
+            return int(pa.get_device_info_by_index(device_index)["defaultSampleRate"])
+        finally:
+            pa.terminate()
+
+    mic_index = _device_index("AIVA_INPUT_DEVICE_INDEX", "AIVA_INPUT_DEVICE_NAME", False)
+    mic_rate = _native_rate(mic_index)
+
     transport = LocalAudioTransport(
         LocalAudioTransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            input_device_index=_device_index("AIVA_INPUT_DEVICE_INDEX", "AIVA_INPUT_DEVICE_NAME", False),
+            audio_in_sample_rate=mic_rate,  # pipecat resamples for STT/VAD
+            input_device_index=mic_index,
             output_device_index=_device_index("AIVA_OUTPUT_DEVICE_INDEX", "AIVA_OUTPUT_DEVICE_NAME", True),
         )
     )
@@ -400,6 +453,7 @@ async def main():
             model=os.getenv("AIVA_WAKE_MODEL", "hey_jarvis"),
             on_wake=lambda: loop.call_soon_threadsafe(mic.wake),
             device_index=_device_index("AIVA_INPUT_DEVICE_INDEX", "AIVA_INPUT_DEVICE_NAME", False),
+            threshold=float(os.getenv("AIVA_WAKE_THRESHOLD", "0.5")),
         )
         wake_listener.start()
 

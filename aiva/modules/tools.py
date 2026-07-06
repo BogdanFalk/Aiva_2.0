@@ -9,7 +9,9 @@ executes until the user verbally confirms and the model calls
 confirm_pending_command. This gate is non-bypassable.
 """
 
+import ctypes
 import subprocess
+from ctypes import wintypes
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
@@ -17,6 +19,70 @@ from pipecat.services.llm_service import FunctionCallParams
 
 from modules import file_operations, utilities
 from modules.app_launcher import launch_app as _launch_app_impl
+
+# --- desktop overlay control (Spout2OverlayHUD window) ----------------------
+
+def _list_monitors():
+    """Monitor rects sorted left-to-right: [(left, top, width, height), ...]"""
+    user32 = ctypes.windll.user32
+    monitors = []
+    proc_type = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HMONITOR, wintypes.HDC,
+                                   ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+    def _cb(hmon, hdc, rect, lparam):
+        r = rect.contents
+        monitors.append((r.left, r.top, r.right - r.left, r.bottom - r.top))
+        return 1
+
+    user32.EnumDisplayMonitors(0, 0, proc_type(_cb), 0)
+    monitors.sort()
+    return monitors
+
+
+def _find_overlay_hwnd():
+    """Window handle of the Spout2OverlayHUD overlay, or None."""
+    user32 = ctypes.windll.user32
+    out = subprocess.check_output(
+        'tasklist /FI "IMAGENAME eq Spout2OverlayHUD.exe" /FO CSV', shell=True, text=True)
+    pids = set()
+    for line in out.splitlines()[1:]:
+        parts = line.strip('"').split('","')
+        if len(parts) > 1 and parts[1].isdigit():
+            pids.add(int(parts[1]))
+    if not pids:
+        return None
+
+    found = []
+    proc_type = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, lparam):
+        wpid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value in pids and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return 1
+
+    user32.EnumWindows(proc_type(_cb), 0)
+    return found[0] if found else None
+
+
+def _monitor_description():
+    """Human hint for the tool schema, computed from the real layout."""
+    descs = []
+    for i, (x, y, w, h) in enumerate(_list_monitors()):
+        pos = []
+        if x < 0:
+            pos.append("left")
+        elif x > 0 and y == 0:
+            pos.append("right of primary")
+        if y > 0:
+            pos.append("bottom")
+        elif y < 0:
+            pos.append("top")
+        if x == 0 and y == 0:
+            pos.append("primary/main/center")
+        descs.append(f"{i}={w}x{h}" + (f" ({', '.join(pos)})" if pos else ""))
+    return "; ".join(descs) if descs else "no monitors detected"
 
 # --- pending shell-command gate ------------------------------------------
 
@@ -123,6 +189,33 @@ async def get_datetime(params: FunctionCallParams):
     })
 
 
+async def move_avatar_to_monitor(params: FunctionCallParams):
+    hwnd = _find_overlay_hwnd()
+    if hwnd is None:
+        await params.result_callback({
+            "success": False,
+            "error": "the desktop overlay (Spout2OverlayHUD) isn't running",
+        })
+        return
+    monitors = _list_monitors()
+    idx = params.arguments.get("monitor", 0)
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        idx = 0
+    if not 0 <= idx < len(monitors):
+        await params.result_callback({
+            "success": False,
+            "error": f"monitor {idx} doesn't exist; there are {len(monitors)} (0..{len(monitors)-1})",
+        })
+        return
+    x, y, w, h = monitors[idx]
+    HWND_TOPMOST = -1
+    SWP_SHOWWINDOW = 0x0040
+    ok = ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW)
+    await params.result_callback({"success": bool(ok), "moved_to_monitor": idx})
+
+
 def make_vtube_handlers(vtube):
     """VTube handlers close over the shared VTubeStudio instance."""
 
@@ -200,6 +293,14 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         required=[],
     ),
     FunctionSchema(
+        name="move_avatar_to_monitor",
+        description="Move your desktop avatar overlay to another monitor. "
+                    f"Monitors left-to-right: {_monitor_description()}. "
+                    "Use vtube_move afterwards to position yourself within the screen.",
+        properties={"monitor": {"type": "integer", "description": "Monitor index from the list"}},
+        required=["monitor"],
+    ),
+    FunctionSchema(
         name="vtube_expression",
         description="Toggle one of your avatar's expression/prop hotkeys by its exact name. "
                     "The available hotkey names are listed in your system prompt (they may be "
@@ -234,5 +335,6 @@ def register_tools(llm, vtube):
     llm.register_function("confirm_pending_command", confirm_pending_command)
     llm.register_function("get_weather", get_weather)
     llm.register_function("get_datetime", get_datetime)
+    llm.register_function("move_avatar_to_monitor", move_avatar_to_monitor)
     llm.register_function("vtube_expression", vtube_expression)
     llm.register_function("vtube_move", vtube_move)

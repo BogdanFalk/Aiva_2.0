@@ -12,19 +12,45 @@ def is_process_running(process_name):
             return True
     return False
 
+def popen_unelevated(cmd, cwd=None, extra_path=None):
+    """Launch an exe forcing it to run WITHOUT elevation.
+
+    VTube Studio.exe and obs64.exe carry a RUNASADMIN compatibility flag on
+    this machine, which makes plain CreateProcess fail with WinError 740
+    (and would otherwise demand a UAC click on every boot). Setting
+    __COMPAT_LAYER=RunAsInvoker overrides the flag for this launch only —
+    neither app needs admin rights for anything Aiva does.
+    """
+    env = os.environ.copy()
+    env["__COMPAT_LAYER"] = "RunAsInvoker"
+    if extra_path:
+        env["PATH"] = extra_path + os.pathsep + env["PATH"]
+    return subprocess.Popen(cmd, env=env, cwd=cwd)
+
 def launch_vtube_studio():
     """Launch VTube Studio if it's not already running"""
     if not is_process_running('VTube Studio'):
         print("Launching VTube Studio...")
         vtube_path = r"C:\Program Files (x86)\Steam\steamapps\common\VTube Studio\VTube Studio.exe"
-        
+
         if os.path.exists(vtube_path):
-            # Launch with -nosteam parameter
-            subprocess.Popen([vtube_path, "-nosteam"])
+            popen_unelevated([vtube_path, "-nosteam"])
             return True
-        
+
         print("Could not find VTube Studio. Please make sure it's installed.")
         return False
+    return True
+
+def launch_overlay():
+    """Launch the Spout2 desktop overlay (avatar on the desktop), if present."""
+    if not is_process_running('Spout2OverlayHUD'):
+        overlay = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "tools", "Spout2OverlayHUD.exe")
+        if os.path.exists(overlay):
+            print("Launching desktop overlay...")
+            popen_unelevated([overlay], cwd=os.path.dirname(overlay))
+        else:
+            print("Desktop overlay not found (tools/Spout2OverlayHUD.exe); skipping.")
     return True
 
 def launch_obs():
@@ -32,29 +58,13 @@ def launch_obs():
     if not is_process_running('obs64'):
         print("Launching OBS...")
         obs_dir = r"C:\Program Files\obs-studio\bin\64bit"
-        obs_exe = "obs64.exe"
-        obs_path = os.path.join(obs_dir, obs_exe)
-        
+        obs_path = os.path.join(obs_dir, "obs64.exe")
+
         if os.path.exists(obs_path):
-            # Set up environment variables
-            env = os.environ.copy()
-            # Add OBS directory to PATH
-            env['PATH'] = obs_dir + os.pathsep + env['PATH']
-            
-            # Try to launch OBS with elevated privileges if needed
-            try:
-                # First try normal launch
-                subprocess.Popen([obs_path], env=env)
-            except PermissionError:
-                print("Trying to launch OBS with elevation...")
-                try:
-                    # Try with elevation
-                    subprocess.Popen(['runas', '/user:Administrator', obs_path], env=env)
-                except Exception as e:
-                    print(f"Failed to launch OBS with elevation: {str(e)}")
-                    return False
+            # OBS wants to be started from its own bin directory
+            popen_unelevated([obs_path], cwd=obs_dir, extra_path=obs_dir)
             return True
-        
+
         print("Could not find OBS. Please make sure it's installed.")
         return False
     return True
@@ -88,6 +98,9 @@ async def main():
         print("VTube Studio did not start properly. Exiting...")
         return
     
+    # Desktop overlay (avatar floating on the desktop via Spout2)
+    launch_overlay()
+
     # Launch OBS (optional — skip with --no-obs, and never a hard failure)
     if "--no-obs" not in sys.argv:
         if launch_obs():
