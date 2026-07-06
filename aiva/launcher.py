@@ -41,18 +41,6 @@ def launch_vtube_studio():
         return False
     return True
 
-def launch_overlay():
-    """Launch the Spout2 desktop overlay (avatar on the desktop), if present."""
-    if not is_process_running('Spout2OverlayHUD'):
-        overlay = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                               "tools", "Spout2OverlayHUD.exe")
-        if os.path.exists(overlay):
-            print("Launching desktop overlay...")
-            popen_unelevated([overlay], cwd=os.path.dirname(overlay))
-        else:
-            print("Desktop overlay not found (tools/Spout2OverlayHUD.exe); skipping.")
-    return True
-
 def launch_obs():
     """Launch OBS if it's not already running"""
     if not is_process_running('obs64'):
@@ -98,8 +86,7 @@ async def main():
         print("VTube Studio did not start properly. Exiting...")
         return
     
-    # Desktop overlay (avatar floating on the desktop via Spout2)
-    launch_overlay()
+    # (The desktop overlay is started and stopped by Aiva herself in main.py.)
 
     # Launch OBS (optional — skip with --no-obs, and never a hard failure)
     if "--no-obs" not in sys.argv:

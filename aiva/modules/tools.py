@@ -118,6 +118,25 @@ def _place_on_monitor(hwnd, idx):
         ctypes.windll.user32.MoveWindow(hwnd, x, y, w, h, True)
 
 
+def ensure_overlay_running():
+    """Start the desktop overlay if it isn't already (called at Aiva boot)."""
+    if not os.path.exists(_OVERLAY_EXE):
+        print("Desktop overlay not found (tools/Spout2OverlayHUD.exe); skipping.")
+        return False
+    if _overlay_running():
+        return False
+    subprocess.Popen([_OVERLAY_EXE], cwd=os.path.dirname(_OVERLAY_EXE))
+    print("Desktop overlay started")
+    return True
+
+
+def close_overlay():
+    """Close the desktop overlay (called at Aiva shutdown)."""
+    if _overlay_running():
+        subprocess.run('taskkill /IM Spout2OverlayHUD.exe /F', shell=True,
+                       capture_output=True)
+
+
 def _monitor_description():
     """Human hint for the tool schema, computed from the real layout."""
     descs = []

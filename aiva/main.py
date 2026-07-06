@@ -68,7 +68,7 @@ from pipecat.workers.runner import WorkerRunner
 from modules.memory import Memory
 from modules.persona import build_system_prompt
 from modules.terminals import TerminalManager
-from modules.tools import TOOL_SCHEMAS, register_tools
+from modules.tools import TOOL_SCHEMAS, close_overlay, ensure_overlay_running, register_tools
 from modules.vtube_studio import VTubeStudio
 
 
@@ -453,6 +453,8 @@ async def main():
     mic = MicController(ambient=ambient)
     terminals = TerminalManager()
 
+    ensure_overlay_running()  # the avatar overlay lives and dies with her
+
     vtube = VTubeStudio()
     await vtube.connect()  # non-fatal if VTube Studio isn't running
     register_tools(llm, vtube, mic, terminals)
@@ -625,6 +627,7 @@ async def main():
 
         _print_usage_summary(mic, usage)
         terminals.shutdown()
+        close_overlay()
         memory.close()
         await vtube.close()
 
