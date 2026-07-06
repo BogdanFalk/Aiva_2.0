@@ -82,6 +82,12 @@ def _overlay_is_topmost(hwnd):
     return bool(ctypes.windll.user32.GetWindowLongW(hwnd, -20) & 0x8)
 
 
+def _overlay_running():
+    out = subprocess.check_output(
+        'tasklist /FI "IMAGENAME eq Spout2OverlayHUD.exe" /FO CSV', shell=True, text=True)
+    return "Spout2OverlayHUD" in out
+
+
 async def _restart_overlay():
     """The only reliable way to regain always-on-top: the overlay creates
     itself topmost, and Windows refuses cross-process topmost promotion."""
@@ -89,6 +95,13 @@ async def _restart_overlay():
 
     subprocess.run('taskkill /IM Spout2OverlayHUD.exe /F', shell=True,
                    capture_output=True)
+    # wait for the old instance to fully die, or the new one trips the
+    # app's single-instance mutex and pops an "already running?" dialog
+    for _ in range(15):
+        if not _overlay_running():
+            break
+        await asyncio.sleep(0.3)
+
     subprocess.Popen([_OVERLAY_EXE], cwd=os.path.dirname(_OVERLAY_EXE))
     for _ in range(20):
         await asyncio.sleep(0.4)
