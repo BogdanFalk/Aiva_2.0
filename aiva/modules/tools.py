@@ -240,22 +240,40 @@ def make_terminal_handlers(terminals):
     async def close_terminal(params: FunctionCallParams):
         await params.result_callback(terminals.close_session(params.arguments.get("name", "main")))
 
+    def _spawn_window(args_wt, fallback_ps):
+        """Open a visible terminal window: Windows Terminal, else PowerShell."""
+        try:
+            subprocess.Popen(args_wt)
+            return True
+        except OSError:
+            subprocess.Popen(f'start powershell -NoExit -Command "{fallback_ps}"', shell=True)
+            return True
+
     async def show_terminal(params: FunctionCallParams):
         name = params.arguments.get("name", "main")
+        # forgiving lookup: fall back to the only session/job if the name is off
+        if name not in terminals.jobs and name not in terminals.sessions:
+            if len(terminals.sessions) == 1:
+                name = next(iter(terminals.sessions))
+            elif len(terminals.jobs) == 1:
+                name = next(iter(terminals.jobs))
+            else:
+                await params.result_callback({"success": False, "error": f"nothing named '{name}'",
+                                              "open": terminals.list_sessions()})
+                return
         try:
             if name in terminals.jobs:
-                log = terminals.jobs[name]["log_path"]
-                subprocess.Popen(["wt", "nt", "--title", f"Aiva: {name}", "powershell",
-                                  "-NoExit", "-Command", f"Get-Content -Wait '{log}'"])
-            elif name in terminals.sessions:
-                subprocess.Popen(["wt", "nt", "--title", f"Aiva: {name}",
-                                  "-d", terminals.sessions[name]["cwd"]])
+                log = terminals.jobs[name]["log_path"].replace("\\", "/")
+                _spawn_window(["wt", "nt", "--title", f"Aiva: {name}", "powershell",
+                               "-NoExit", "-Command", f"Get-Content -Wait '{log}'"],
+                              f"Get-Content -Wait '{log}'")
             else:
-                await params.result_callback({"success": False, "error": f"nothing named '{name}'"})
-                return
+                cwd = terminals.sessions[name]["cwd"].replace("\\", "/")
+                _spawn_window(["wt", "nt", "--title", f"Aiva: {name}", "-d", cwd],
+                              f"Set-Location '{cwd}'")
             await params.result_callback({"success": True, "shown": name})
-        except FileNotFoundError:
-            await params.result_callback({"success": False, "error": "Windows Terminal (wt) not available"})
+        except Exception as e:
+            await params.result_callback({"success": False, "error": f"couldn't open a window: {e}"})
 
     async def claude_code(params: FunctionCallParams):
         await params.result_callback(await terminals.start_claude(
