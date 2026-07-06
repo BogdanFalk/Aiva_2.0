@@ -306,6 +306,31 @@ def _require_env(*names):
         sys.exit(1)
 
 
+def _play_ready_chime():
+    """Two soft rising blips through the DEFAULT output (the user's speakers,
+    not Aiva's voice cable) — audible proof of life once the pipeline is up."""
+    import math
+    import struct
+    import tempfile
+    import wave
+    import winsound
+
+    sr = 44100
+
+    def tone(freq, dur, vol=0.35):
+        n = int(sr * dur)
+        return [vol * math.sin(2 * math.pi * freq * t / sr) * (1 - t / n) for t in range(n)]
+
+    samples = tone(660, 0.12) + tone(880, 0.20)
+    path = os.path.join(tempfile.gettempdir(), "aiva_ready_chime.wav")
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(b"".join(struct.pack("<h", int(s * 32767)) for s in samples))
+    winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+
+
 def _print_usage_summary(mic: MicController, usage: UsageTracker):
     """Session cost estimate (rates: mid-2026, see plan)."""
     stt_min = mic.stt_seconds / 60
@@ -569,6 +594,7 @@ async def main():
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
     try:
+        _play_ready_chime()
         await runner.run()
     finally:
         for t in (watcher, idle_task, flush_task, sleep_face_task):
