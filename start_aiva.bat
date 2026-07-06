@@ -1,5 +1,5 @@
 @echo off
-title Aiva
+title AivaConsole
 rem Boots VTube Studio and Aiva in ambient wake-word mode (OBS skipped;
 rem remove --no-obs below if you want OBS back in the chain).
 cd /d "%~dp0aiva"

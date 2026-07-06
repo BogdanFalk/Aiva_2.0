@@ -1,5 +1,12 @@
 $batPath = "C:\Users\Extre\Desktop\Work\UnseenMedia\Aiva_2.0\start_aiva.bat"
-$windowTitleMatch = "Aiva"
+# Matches the console title set by start_aiva.bat ("title AivaConsole").
+# Deliberately NOT "Aiva": on Win11 PowerShell runs inside Windows Terminal,
+# whose window takes the SHORTCUT'S name as its title — a shortcut named
+# "Aiva" would make this script find and focus its own host window instead
+# of launching. Never name the shortcut "AivaConsole".
+$windowTitleMatch = "AivaConsole"
+$log = "$env:TEMP\aiva_launcher.log"
+"[$(Get-Date -Format 'HH:mm:ss')] launcher started (PID $PID)" | Out-File $log -Encoding utf8
 
 Add-Type @"
 using System;
@@ -59,14 +66,20 @@ public class WinFinder {
 }
 "@
 
-$found = [WinFinder]::FindWindowsByTitle($windowTitleMatch, $PID)
+try {
+    $found = [WinFinder]::FindWindowsByTitle($windowTitleMatch, $PID)
+    "[$(Get-Date -Format 'HH:mm:ss')] search done, found: $($found.Count)" | Out-File $log -Append -Encoding utf8
 
-if ($found.Count -eq 0) {
-    # Launch through the shell (explorer) so the console is ALWAYS visible:
-    # when this script runs from a "-WindowStyle Hidden" shortcut, directly
-    # spawned console children inherit the hidden state and Aiva boots
-    # invisibly.
-    Start-Process explorer.exe -ArgumentList "`"$batPath`""
-} else {
-    [WinFinder]::ForceFocus($found[0])
+    if ($found.Count -eq 0) {
+        # Launch through the shell (explorer) so the console is ALWAYS visible:
+        # a directly spawned console child of a hidden PowerShell inherits the
+        # hidden state and Aiva boots invisibly.
+        Start-Process explorer.exe -ArgumentList "`"$batPath`""
+        "[$(Get-Date -Format 'HH:mm:ss')] launched bat via explorer" | Out-File $log -Append -Encoding utf8
+    } else {
+        [WinFinder]::ForceFocus($found[0])
+        "[$(Get-Date -Format 'HH:mm:ss')] focused existing window $($found[0])" | Out-File $log -Append -Encoding utf8
+    }
+} catch {
+    "[$(Get-Date -Format 'HH:mm:ss')] FAILED: $($_.Exception.Message)`n$($_.ScriptStackTrace)" | Out-File $log -Append -Encoding utf8
 }
