@@ -9,6 +9,7 @@ executes until the user verbally confirms and the model calls
 confirm_pending_command. This gate is non-bypassable.
 """
 
+import asyncio
 import ctypes
 import json
 import os
@@ -19,7 +20,7 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.services.llm_service import FunctionCallParams
 
-from modules import file_operations, utilities
+from modules import computer, file_operations, utilities
 from modules.app_launcher import launch_app as _launch_app_impl
 
 # --- desktop overlay control (Spout2OverlayHUD window) ----------------------
@@ -362,6 +363,91 @@ async def set_avatar_layer(params: FunctionCallParams):
                                   "note": "floating above all windows again"})
 
 
+# --- computer interactivity: sight + mouse/keyboard (Tier 1) ---------------
+
+async def look_at_screen(params: FunctionCallParams):
+    monitor = params.arguments.get("monitor")
+    if monitor is not None:
+        try:
+            monitor = int(monitor)
+        except (TypeError, ValueError):
+            monitor = None
+    try:
+        description = await computer.describe_screen(
+            looking_for=params.arguments.get("looking_for"),
+            monitor_index=monitor,
+        )
+        await params.result_callback({"success": True, "screen": description})
+    except Exception as e:
+        await params.result_callback({"success": False, "error": f"couldn't see the screen: {e}"})
+
+
+async def focus_window(params: FunctionCallParams):
+    title = params.arguments.get("title", "")
+    matched = await asyncio.to_thread(computer.focus_window, title)
+    if matched:
+        await params.result_callback({"success": True, "focused": matched})
+    else:
+        await params.result_callback({"success": False, "error": f"no open window matching '{title}'"})
+
+
+async def click_ui_element(params: FunctionCallParams):
+    name = params.arguments.get("name", "")
+    if not name:
+        await params.result_callback({"success": False, "error": "no element name given"})
+        return
+    ok, detail = await asyncio.to_thread(
+        computer.click_ui_element, name, params.arguments.get("control_type"))
+    await params.result_callback({"success": ok, "detail": detail})
+
+
+async def type_text(params: FunctionCallParams):
+    text = params.arguments.get("text", "")
+    if not text:
+        await params.result_callback({"success": False, "error": "no text to type"})
+        return
+    import keyboard
+
+    await asyncio.to_thread(keyboard.write, text, 0.01)
+    await params.result_callback({"success": True, "typed_chars": len(text)})
+
+
+async def press_keys(params: FunctionCallParams):
+    keys = params.arguments.get("keys", "")
+    if not keys:
+        await params.result_callback({"success": False, "error": "no keys given"})
+        return
+    import keyboard
+
+    try:
+        await asyncio.to_thread(keyboard.send, keys)
+        await params.result_callback({"success": True, "pressed": keys})
+    except Exception as e:
+        await params.result_callback({"success": False, "error": f"couldn't press '{keys}': {e}"})
+
+
+async def click_at(params: FunctionCallParams):
+    try:
+        x = int(params.arguments.get("x"))
+        y = int(params.arguments.get("y"))
+    except (TypeError, ValueError):
+        await params.result_callback({"success": False, "error": "need integer x and y"})
+        return
+    await asyncio.to_thread(
+        computer.click_at, x, y,
+        params.arguments.get("button", "left"),
+        bool(params.arguments.get("double", False)))
+    await params.result_callback({"success": True, "clicked_at": [x, y]})
+
+
+async def scroll(params: FunctionCallParams):
+    await asyncio.to_thread(
+        computer.scroll,
+        params.arguments.get("direction", "down"),
+        params.arguments.get("amount", 3))
+    await params.result_callback({"success": True})
+
+
 def make_terminal_handlers(terminals):
     """Terminal/job/Claude-Code handlers close over the TerminalManager."""
 
@@ -640,6 +726,78 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         },
         required=[],
     ),
+    FunctionSchema(
+        name="look_at_screen",
+        description="Look at what's on the user's screen and get a description back. Use this "
+                    "whenever they ask what's on screen, want you to read an error or dialog, "
+                    "check a webpage, or see anything visual — and before clicking with click_at "
+                    "so you know where things are. Optionally say what you're looking for.",
+        properties={
+            "looking_for": {"type": "string",
+                            "description": "What specifically to look for, e.g. 'the error message' or 'is the download finished'"},
+            "monitor": {"type": "integer",
+                        "description": "Which monitor to look at; omit for the main screen. " + _monitor_description()},
+        },
+        required=[],
+    ),
+    FunctionSchema(
+        name="focus_window",
+        description="Bring an open window to the front by part of its title, e.g. 'Chrome', "
+                    "'Notepad', 'Spotify'. Do this before clicking or typing into an app so it's "
+                    "the active window.",
+        properties={"title": {"type": "string", "description": "Part of the window's title"}},
+        required=["title"],
+    ),
+    FunctionSchema(
+        name="click_ui_element",
+        description="Reliably click a button, menu item, link, tab, or checkbox BY ITS VISIBLE "
+                    "NAME in the focused window (e.g. 'Save', 'OK', 'File'). Uses the accessibility "
+                    "tree, not pixel guessing, so ALWAYS prefer this over click_at. Focus the right "
+                    "window first.",
+        properties={
+            "name": {"type": "string", "description": "The exact visible label of the control"},
+            "control_type": {"type": "string",
+                             "description": "Optional hint: Button, MenuItem, CheckBox, Hyperlink, TabItem"},
+        },
+        required=["name"],
+    ),
+    FunctionSchema(
+        name="type_text",
+        description="Type text into whatever field is currently focused, as if typed on the "
+                    "keyboard. NEVER type passwords — if a password is needed, ask the user to "
+                    "type it themselves.",
+        properties={"text": {"type": "string", "description": "The text to type"}},
+        required=["text"],
+    ),
+    FunctionSchema(
+        name="press_keys",
+        description="Press a key or keyboard shortcut, e.g. 'enter', 'ctrl+s', 'alt+f4', "
+                    "'ctrl+c', 'win+d'. Combine modifiers with '+'.",
+        properties={"keys": {"type": "string", "description": "Key or combo like 'ctrl+s'"}},
+        required=["keys"],
+    ),
+    FunctionSchema(
+        name="click_at",
+        description="Move the mouse to exact screen pixel coordinates and click. LAST RESORT for "
+                    "things with no accessible name (canvas apps, games) — prefer click_ui_element. "
+                    "Use look_at_screen first to find where to click.",
+        properties={
+            "x": {"type": "integer", "description": "Horizontal pixel position (virtual-screen coords)"},
+            "y": {"type": "integer", "description": "Vertical pixel position (virtual-screen coords)"},
+            "button": {"type": "string", "enum": ["left", "right"]},
+            "double": {"type": "boolean", "description": "true for a double-click"},
+        },
+        required=["x", "y"],
+    ),
+    FunctionSchema(
+        name="scroll",
+        description="Scroll the mouse wheel up or down at the current cursor position.",
+        properties={
+            "direction": {"type": "string", "enum": ["up", "down"]},
+            "amount": {"type": "integer", "description": "Number of wheel notches (default 3)"},
+        },
+        required=["direction"],
+    ),
 ])
 
 
@@ -671,3 +829,11 @@ def register_tools(llm, vtube, mic=None, terminals=None):
     llm.register_function("set_avatar_layer", set_avatar_layer)
     llm.register_function("vtube_expression", vtube_expression)
     llm.register_function("vtube_move", vtube_move)
+
+    llm.register_function("look_at_screen", look_at_screen)
+    llm.register_function("focus_window", focus_window)
+    llm.register_function("click_ui_element", click_ui_element)
+    llm.register_function("type_text", type_text)
+    llm.register_function("press_keys", press_keys)
+    llm.register_function("click_at", click_at)
+    llm.register_function("scroll", scroll)
