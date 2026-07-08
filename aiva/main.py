@@ -467,6 +467,11 @@ async def main():
     await vtube.connect()  # non-fatal if VTube Studio isn't running
     register_tools(llm, vtube, mic, terminals)
 
+    # open the vision API connection now so her first "look at the screen"
+    # doesn't eat a cold-start handshake on top of the call
+    from modules.computer import prewarm as _prewarm_vision
+    asyncio.create_task(_prewarm_vision())
+
     avatar_hotkeys = [h["name"] for h in await vtube.get_hotkeys()]
     if avatar_hotkeys:
         print(f"Avatar hotkeys available: {len(avatar_hotkeys)}")

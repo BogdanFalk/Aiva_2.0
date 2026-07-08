@@ -37,6 +37,16 @@ def _client():
     return _openai_client
 
 
+async def prewarm():
+    """Open the OpenAI connection at boot (cheap, no tokens) so the FIRST
+    look_at_screen doesn't pay the ~1.5s TLS/handshake cost on top of the
+    vision call. Fire-and-forget; failure is harmless."""
+    try:
+        await _client().models.list()
+    except Exception:
+        pass
+
+
 # --- monitors --------------------------------------------------------------
 
 def list_monitors():
@@ -59,11 +69,20 @@ def list_monitors():
 
 # --- sight -----------------------------------------------------------------
 
-def capture_screen(monitor_index=None, max_edge=1400):
+def capture_screen(monitor_index=None, max_edge=None):
     """Grab a screenshot as JPEG bytes. No monitor = the primary display;
     an index grabs that monitor from the left-to-right list. Downscaled so the
-    long edge is at most max_edge px (keeps the vision call cheap and fast)."""
+    long edge is at most max_edge px.
+
+    Resolution is the ONLY real speed/cost lever for gpt-4.1 vision (the
+    `detail` param is ignored — image tokens scale purely with pixels). 1024
+    px is a good balance: ~1.7s warm, ~1k prompt tokens, still reads most UI
+    text. Bump AIVA_VISION_MAX_EDGE toward 1568 if she can't read tiny errors,
+    or down to 768 for the fastest/cheapest glance."""
     from PIL import ImageGrab
+
+    if max_edge is None:
+        max_edge = int(os.getenv("AIVA_VISION_MAX_EDGE", "1024"))
 
     if monitor_index is None:
         img = ImageGrab.grab()  # primary display
