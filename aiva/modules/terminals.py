@@ -201,6 +201,25 @@ class TerminalManager:
         return {"success": True, "output": output[-OUTPUT_TAIL:] or
                 "(command sent to the terminal; still running or no output — read it again shortly)"}
 
+    async def type_in(self, name, text, submit=True):
+        """Type raw keystrokes into the visible terminal WITHOUT waiting to
+        capture output — for interactive programs (ssh sessions, REPLs, prompts,
+        passwords) whose output PowerShell's transcript can't see. The user
+        reads the result on screen; Aiva reads it with look_at_screen.
+
+        Deliberately does not echo `text` back (it may be a password)."""
+        name = self._resolve(name)
+        s = self.sessions[name]
+        if not self._window_open(name):
+            self._launch_window(name, s["cwd"], s["log_path"])
+            await asyncio.sleep(1.3)
+        ok = await asyncio.to_thread(
+            computer.send_command_to_window, s["title"], text, 0.35, submit)
+        if not ok:
+            return {"success": False, "error": "couldn't focus the terminal window to type"}
+        return {"success": True,
+                "note": "typed into the terminal — use look_at_screen to read what it shows"}
+
     def _track_job(self, job_name, session, cmd, proc, announce_done, claude=False):
         job = {"proc": proc, "cmd": cmd, "session": session, "status": "running",
                "result": "", "claude_session_id": None, "cost": None, "started": time.time(),

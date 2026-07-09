@@ -185,10 +185,12 @@ def focus_window(title_substring):
     return title
 
 
-def send_command_to_window(title, command, settle=0.35):
-    """Focus the window whose title contains `title` and type `command` + Enter,
-    exactly as a person would. Used to drive a real, user-visible terminal.
-    Returns True only if the window was focused (so the keystrokes landed there).
+def send_command_to_window(title, command, settle=0.35, enter=True):
+    """Focus the window whose title contains `title` and type `command` (then
+    Enter, unless enter=False), exactly as a person would. Used to drive a real,
+    user-visible terminal — including interactive programs inside it (ssh, REPLs,
+    password prompts). Returns True only if the window was focused (so the
+    keystrokes landed there).
     """
     import keyboard
 
@@ -203,7 +205,8 @@ def send_command_to_window(title, command, settle=0.35):
     time.sleep(settle)
     focus_window(title)  # re-assert focus immediately before typing
     keyboard.write(command, delay=0.005)
-    keyboard.send("enter")
+    if enter:
+        keyboard.send("enter")
     return True
 
 

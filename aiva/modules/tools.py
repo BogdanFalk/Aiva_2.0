@@ -574,6 +574,13 @@ def make_terminal_handlers(terminals):
             params.arguments.get("command", ""),
         ))
 
+    async def type_in_terminal(params: FunctionCallParams):
+        await params.result_callback(await terminals.type_in(
+            params.arguments.get("terminal", "main"),
+            params.arguments.get("text", ""),
+            params.arguments.get("submit", True),
+        ))
+
     async def read_terminal(params: FunctionCallParams):
         await params.result_callback(terminals.read_session(params.arguments.get("name", "main")))
 
@@ -642,8 +649,8 @@ def make_terminal_handlers(terminals):
             resume_id=params.arguments.get("resume_session_id"),
         ))
 
-    return (open_terminal, run_in_terminal, read_terminal, list_terminals,
-            close_terminal, show_terminal, claude_code)
+    return (open_terminal, run_in_terminal, type_in_terminal, read_terminal,
+            list_terminals, close_terminal, show_terminal, claude_code)
 
 
 def make_memory_handler(memory):
@@ -796,6 +803,22 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
             "command": {"type": "string", "description": "PowerShell command to run"},
         },
         required=["terminal", "command"],
+    ),
+    FunctionSchema(
+        name="type_in_terminal",
+        description="Type raw keystrokes into a visible terminal WITHOUT capturing output. Use "
+                    "this to work inside a program running in the terminal — an SSH session, a "
+                    "Python or database REPL, or any prompt (including a password prompt). Then "
+                    "call look_at_screen to read what happened, since these programs' output "
+                    "isn't captured like ordinary commands. (For normal PowerShell commands, use "
+                    "run_in_terminal instead.)",
+        properties={
+            "terminal": {"type": "string", "description": "Name of the terminal"},
+            "text": {"type": "string",
+                     "description": "Text/keystrokes to send — a command inside the ssh session, or a password"},
+            "submit": {"type": "boolean", "description": "Press Enter after typing (default true)"},
+        },
+        required=["terminal", "text"],
     ),
     FunctionSchema(
         name="read_terminal",
@@ -976,10 +999,11 @@ def register_tools(llm, vtube, mic=None, terminals=None, memory=None):
         llm.register_function("remember", make_memory_handler(memory))
 
     if terminals is not None:
-        (open_terminal, run_in_terminal, read_terminal, list_terminals,
-         close_terminal, show_terminal, claude_code) = make_terminal_handlers(terminals)
+        (open_terminal, run_in_terminal, type_in_terminal, read_terminal,
+         list_terminals, close_terminal, show_terminal, claude_code) = make_terminal_handlers(terminals)
         llm.register_function("open_terminal", open_terminal)
         llm.register_function("run_in_terminal", run_in_terminal)
+        llm.register_function("type_in_terminal", type_in_terminal)
         llm.register_function("read_terminal", read_terminal)
         llm.register_function("list_terminals", list_terminals)
         llm.register_function("close_terminal", close_terminal)
