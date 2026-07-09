@@ -14,20 +14,25 @@ import sqlite3
 from datetime import datetime
 
 FACT_EXTRACTION_PROMPT = """You maintain the long-term memory of Aiva, a voice assistant. \
-From the conversation transcript, extract durable facts about the user worth remembering \
-across sessions: their name, preferences, pets, family, work, projects, recurring habits.
+From the conversation transcript, extract durable things worth remembering across sessions:
+- Facts about the user: their name, pets, family, work, projects, recurring habits.
+- STANDING INSTRUCTIONS the user gives about how Aiva should behave or do things — phrases like \
+"always...", "from now on...", "whenever you...", "I prefer...", "don't ever...". These are \
+important: capture them as durable instructions even though they are about Aiva's behavior.
 
 The transcript comes from speech recognition and CONTAINS MISHEARINGS. Be skeptical: \
 only extract the user's name if they explicitly introduced themselves ("my name is..."); \
 words resembling "Aiva", "Eva", "Ava" or "Geneva" are almost always the assistant's own \
-name misheard, never the user's. When in doubt, extract nothing.
+name misheard, never the user's. When in doubt about a fact, extract nothing — but DO err \
+toward capturing explicit standing instructions.
 
-Do NOT extract: one-off requests, small talk, anything about Aiva herself, or facts \
-already in the known list (unless the conversation contradicts them — then restate the \
-corrected fact).
+Do NOT extract: one-off requests ("open notepad now"), small talk, trivia about Aiva, or \
+items already in the known list (unless the conversation contradicts them — then restate the \
+corrected version).
 
-Reply with JSON: {"facts": [{"category": "preference|person|work|project|other", "fact": "..."}]}
-Each fact must be one short self-contained sentence. Reply {"facts": []} if nothing qualifies."""
+Reply with JSON: {"facts": [{"category": "instruction|preference|person|work|project|other", "fact": "..."}]}
+Each fact must be one short self-contained sentence, phrased so it makes sense with no context \
+(e.g. "Always bring terminals to the front after opening them."). Reply {"facts": []} if nothing qualifies."""
 
 
 class Memory:
@@ -78,6 +83,20 @@ class Memory:
             added += cur.rowcount
         self.conn.commit()
         return added
+
+    def remember(self, fact, category="instruction"):
+        """Persist ONE durable fact/instruction immediately (deduped).
+
+        Used by the `remember` tool the moment the user asks Aiva to remember
+        something — so it survives even a hard kill, unlike end-of-session
+        extraction which only runs on a clean shutdown."""
+        fact = (fact or "").strip()
+        if not fact:
+            return 0
+        existed = self.conn.execute(
+            "SELECT 1 FROM facts WHERE fact = ?", (fact,)).fetchone()
+        self.upsert_facts([{"category": category, "fact": fact}])
+        return 0 if existed else 1  # 1 only when genuinely new
 
     async def extract_facts(self, openai_client, model, messages):
         """One cheap LLM call: transcript -> new durable facts -> upsert."""

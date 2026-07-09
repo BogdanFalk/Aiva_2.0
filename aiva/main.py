@@ -461,12 +461,13 @@ async def main():
     # --- avatar + tools ------------------------------------------------------
     mic = MicController(ambient=ambient)
     terminals = TerminalManager()
+    memory = Memory()  # created here so the remember tool can write to it
 
     await ensure_overlay_running()  # her body lives and dies with her, where she last stood
 
     vtube = VTubeStudio()
     await vtube.connect()  # non-fatal if VTube Studio isn't running
-    register_tools(llm, vtube, mic, terminals)
+    register_tools(llm, vtube, mic, terminals, memory)
 
     # open the vision API connection now so her first "look at the screen"
     # doesn't eat a cold-start handshake on top of the call
@@ -482,7 +483,6 @@ async def main():
     await hide_vtube_studio()
 
     # --- memory + context ----------------------------------------------------
-    memory = Memory()
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     facts = memory.load_facts()
     if facts:

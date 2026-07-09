@@ -646,6 +646,24 @@ def make_terminal_handlers(terminals):
             close_terminal, show_terminal, claude_code)
 
 
+def make_memory_handler(memory):
+    """The remember handler closes over the shared Memory instance."""
+
+    async def remember(params: FunctionCallParams):
+        note = (params.arguments.get("note") or "").strip()
+        if not note:
+            await params.result_callback({"success": False, "error": "nothing to remember"})
+            return
+        category = params.arguments.get("category", "instruction")
+        # write on THIS (the event-loop) thread — the sqlite connection is
+        # single-thread; don't hand it to a worker thread
+        added = memory.remember(note, category)
+        await params.result_callback({"success": True, "remembered": note,
+                                      "already_knew": added == 0})
+
+    return remember
+
+
 def make_sleep_handler(mic):
     """Voice-commanded standby: closes her ears until the wake word."""
 
@@ -825,6 +843,20 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         required=["job", "project_dir", "task", "mode"],
     ),
     FunctionSchema(
+        name="remember",
+        description="Save something to your long-term memory so you still know it after a restart. "
+                    "Call this THE MOMENT the user tells you to remember something, states a "
+                    "preference, or gives a standing instruction — 'always...', 'from now on...', "
+                    "'whenever you...', 'I prefer...', 'remember that...'. Phrase the note as a "
+                    "self-contained sentence that will make sense with no other context.",
+        properties={
+            "note": {"type": "string",
+                     "description": "The durable thing to remember, e.g. 'Always bring terminals to the front after opening them.'"},
+            "category": {"type": "string", "enum": ["instruction", "preference", "person", "work", "project", "other"]},
+        },
+        required=["note"],
+    ),
+    FunctionSchema(
         name="go_to_sleep",
         description="Go into standby: your eyes close and you stop listening until the user "
                     "says the wake word. Use when the user says 'go to sleep', 'goodnight', "
@@ -935,10 +967,13 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
 ])
 
 
-def register_tools(llm, vtube, mic=None, terminals=None):
+def register_tools(llm, vtube, mic=None, terminals=None, memory=None):
     """Register every tool handler on the LLM service."""
     vtube_expression, vtube_move = make_vtube_handlers(vtube)
     llm.register_function("go_to_sleep", make_sleep_handler(mic))
+
+    if memory is not None:
+        llm.register_function("remember", make_memory_handler(memory))
 
     if terminals is not None:
         (open_terminal, run_in_terminal, read_terminal, list_terminals,

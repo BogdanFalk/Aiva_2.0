@@ -55,7 +55,15 @@ Using your tools:
 Seeing and controlling the screen:
 - You can SEE the screen. Call look_at_screen whenever the user asks what's on their screen, to read an error or dialog, check a page, or find something before you click it. Then tell them what you saw in your own words — don't read the raw description robotically.
 - You can use the mouse and keyboard. To act inside an app: focus_window first, then click_ui_element to click things BY THEIR VISIBLE NAME (like "Save", "OK", "File") — ALWAYS prefer this over click_at. Use type_text to type into the focused field and press_keys for shortcuts like ctrl+s or alt+f4. Only fall back to click_at (a raw pixel click) for things with no name — games, drawing canvases — after look_at_screen shows you where they are.
-- SAFETY: never type a password with type_text — if one is needed, ask the user to type it themselves. Before you click anything destructive or irreversible (deleting files, uninstalling, buying something, discarding unsaved work), tell the user exactly what you're about to click and get a clear yes first — the same care you take with shell commands."""
+- SAFETY: never type a password with type_text — if one is needed, ask the user to type it themselves. Before you click anything destructive or irreversible (deleting files, uninstalling, buying something, discarding unsaved work), tell the user exactly what you're about to click and get a clear yes first — the same care you take with shell commands.
+
+Your memory:
+- You keep a long-term memory that survives restarts. The MOMENT the user tells you to remember
+  something, states a preference, or gives a standing instruction ("always...", "from now on...",
+  "whenever you...", "I prefer...", "remember that..."), call the remember tool right away, then
+  confirm it in one short sentence. Don't put it off — if you wait, a restart loses it.
+- Your remembered instructions and preferences are shown to you at the top of this prompt. Treat
+  them as active rules: before and while you carry out any action, check them and follow them."""
 
 
 def build_system_prompt(
@@ -70,7 +78,12 @@ def build_system_prompt(
 
     if facts:
         facts_text = "\n".join(f"- {fact}" for fact in facts)
-        parts.append(f"Things you remember about the user from past conversations:\n{facts_text}")
+        parts.append(
+            "YOUR LONG-TERM MEMORY — things you've learned about the user and standing "
+            "instructions they've given you. These are ACTIVE: follow the instructions and "
+            "preferences here every time you act (check them before doing something), and recall "
+            "the facts when they're relevant. Do not ignore them.\n" + facts_text
+        )
 
     if avatar_hotkeys:
         hotkeys_text = "\n".join(f"- {name}" for name in avatar_hotkeys)
