@@ -527,7 +527,28 @@ async def main():
     worker = PipelineWorker(
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+        # Aiva is a long-running companion whose sleep/wake WE manage (ambient
+        # mode). Pipecat's built-in idle monitor defaults to cancelling the
+        # whole worker after 300s with no BotSpeaking/UserSpeaking frame — but
+        # while she's asleep MicController drops all audio, so no such frame
+        # ever flows and she'd kill herself ~5 min after the last word. Disable
+        # it entirely; she only stops when told to (Ctrl+Alt+X / go_to_sleep).
+        idle_timeout_secs=None,
     )
+
+    # If the pipeline ever ends for a reason other than us asking it to, say so
+    # loudly — a silent clean exit (like the old idle-timeout self-cancel) is
+    # otherwise indistinguishable from a normal shutdown.
+    @worker.event_handler("on_pipeline_finished")
+    async def _on_finished(_worker, frame):
+        reason = getattr(frame, "reason", None)
+        print(f"\n[PIPELINE ENDED] {type(frame).__name__}"
+              + (f" reason={reason}" if reason else ""))
+
+    @worker.event_handler("on_pipeline_error")
+    async def _on_pipeline_error(_worker, frame):
+        print(f"\n[PIPELINE ERROR] {getattr(frame, 'error', '?')} "
+              f"(fatal={getattr(frame, 'fatal', False)})")
 
     async def announce(text: str):
         """Voice path for background-job news: inject a system note and

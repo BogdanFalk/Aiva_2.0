@@ -472,13 +472,16 @@ def make_terminal_handlers(terminals):
     async def close_terminal(params: FunctionCallParams):
         await params.result_callback(terminals.close_session(params.arguments.get("name", "main")))
 
-    def _spawn_window(args_wt, fallback_ps):
-        """Open a visible terminal window: Windows Terminal, else PowerShell."""
+    def _spawn_window(args_wt, fallback_ps, title):
+        """Open a visible terminal window: Windows Terminal, else PowerShell.
+        Both paths carry `title` so it can be pulled to the foreground after."""
         try:
             subprocess.Popen(args_wt)
             return True
         except OSError:
-            subprocess.Popen(f'start powershell -NoExit -Command "{fallback_ps}"', shell=True)
+            subprocess.Popen(
+                f"start powershell -NoExit -Command "
+                f"\"$host.UI.RawUI.WindowTitle='{title}'; {fallback_ps}\"", shell=True)
             return True
 
     async def show_terminal(params: FunctionCallParams):
@@ -494,16 +497,24 @@ def make_terminal_handlers(terminals):
                                               "open": terminals.list_sessions()})
                 return
         try:
+            title = f"Aiva: {name}"
             if name in terminals.jobs:
                 log = terminals.jobs[name]["log_path"].replace("\\", "/")
-                _spawn_window(["wt", "nt", "--title", f"Aiva: {name}", "powershell",
+                _spawn_window(["wt", "nt", "--title", title, "powershell",
                                "-NoExit", "-Command", f"Get-Content -Wait '{log}'"],
-                              f"Get-Content -Wait '{log}'")
+                              f"Get-Content -Wait '{log}'", title)
             else:
                 cwd = terminals.sessions[name]["cwd"].replace("\\", "/")
-                _spawn_window(["wt", "nt", "--title", f"Aiva: {name}", "-d", cwd],
-                              f"Set-Location '{cwd}'")
-            await params.result_callback({"success": True, "shown": name})
+                _spawn_window(["wt", "nt", "--title", title, "-d", cwd],
+                              f"Set-Location '{cwd}'", title)
+            # the window takes a beat to appear — poll briefly, then focus it
+            focused = False
+            for _ in range(12):
+                await asyncio.sleep(0.25)
+                if await asyncio.to_thread(computer.focus_window, title):
+                    focused = True
+                    break
+            await params.result_callback({"success": True, "shown": name, "focused": focused})
         except Exception as e:
             await params.result_callback({"success": False, "error": f"couldn't open a window: {e}"})
 
