@@ -498,15 +498,16 @@ def make_terminal_handlers(terminals):
                 return
         try:
             title = f"Aiva: {name}"
+            # Both jobs and sessions are watched by tailing their log file, so
+            # the window mirrors what Aiva does (a session's log is its live
+            # command transcript; a job's is its output).
             if name in terminals.jobs:
                 log = terminals.jobs[name]["log_path"].replace("\\", "/")
-                _spawn_window(["wt", "nt", "--title", title, "powershell",
-                               "-NoExit", "-Command", f"Get-Content -Wait '{log}'"],
-                              f"Get-Content -Wait '{log}'", title)
             else:
-                cwd = terminals.sessions[name]["cwd"].replace("\\", "/")
-                _spawn_window(["wt", "nt", "--title", title, "-d", cwd],
-                              f"Set-Location '{cwd}'", title)
+                log = terminals.sessions[name]["log_path"].replace("\\", "/")
+            tail = f"Get-Content -Wait -Encoding utf8 '{log}'"
+            _spawn_window(["wt", "nt", "--title", title, "powershell", "-NoExit",
+                           "-Command", tail], tail, title)
             # the window takes a beat to appear — poll briefly, then focus it
             focused = False
             for _ in range(12):

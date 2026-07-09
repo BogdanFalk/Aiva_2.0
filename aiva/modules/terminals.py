@@ -34,8 +34,30 @@ class TerminalManager:
         directory = os.path.expanduser(directory or "~")
         if not os.path.isdir(directory):
             return {"success": False, "error": f"directory doesn't exist: {directory}"}
-        self.sessions[name] = {"cwd": directory, "history": [], "created": time.time()}
+        # Each session keeps a live transcript log. run() appends every command
+        # and its output here; show_terminal tails it, so the window the user
+        # watches actually mirrors what Aiva runs in this session.
+        log_path = os.path.join(self._log_dir, f"session-{name}.log")
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(f"# Aiva terminal '{name}'  ({directory})\n"
+                        f"# live transcript of what Aiva runs here\n\n")
+        except OSError:
+            pass
+        self.sessions[name] = {"cwd": directory, "history": [], "created": time.time(),
+                               "log_path": log_path}
         return {"success": True, "terminal": name, "cwd": directory}
+
+    def _append_session_log(self, name, command, output):
+        """Mirror a command + its output into the session's transcript log."""
+        s = self.sessions.get(name)
+        if not s or not s.get("log_path"):
+            return
+        try:
+            with open(s["log_path"], "a", encoding="utf-8") as f:
+                f.write(f"PS {s['cwd']}> {command}\n{output.rstrip()}\n\n")
+        except OSError:
+            pass
 
     def close_session(self, name):
         self.sessions.pop(name, None)
@@ -79,12 +101,15 @@ class TerminalManager:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=FOREGROUND_TIMEOUT)
             text = out.decode("utf-8", errors="replace")
             s["history"].append((command, text))
+            self._append_session_log(name, command, text)
             return {"success": proc.returncode == 0, "returncode": proc.returncode,
                     "output": text[-OUTPUT_TAIL:]}
         except asyncio.TimeoutError:
             job_name = f"{name}-{len(self.jobs) + 1}"
             self._track_job(job_name, name, command, proc, announce_done=True)
             s["history"].append((command, "(still running as background job)"))
+            self._append_session_log(
+                name, command, f"(long-running — moved to background job '{job_name}')")
             return {"success": True, "status": "running_in_background", "job": job_name,
                     "note": "taking a while — moved to a background job; you'll be told when it finishes"}
 
