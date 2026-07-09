@@ -167,6 +167,58 @@ async def ensure_overlay_running():
     return True
 
 
+def _vtube_pids():
+    """PIDs of running VTube Studio processes."""
+    out = subprocess.check_output(
+        'tasklist /FI "IMAGENAME eq VTube Studio.exe" /FO CSV', shell=True, text=True)
+    pids = set()
+    for line in out.splitlines()[1:]:
+        parts = line.strip('"').split('","')
+        if len(parts) > 1 and parts[1].isdigit():
+            pids.add(int(parts[1]))
+    return pids
+
+
+async def hide_vtube_studio():
+    """Hide VTube Studio's window AND its taskbar button (SW_HIDE).
+
+    The avatar is viewed through the Spout overlay, so the VTS window itself is
+    never needed on screen. VTube Studio keeps rendering the Spout feed while
+    hidden (it's a Unity app with run-in-background on). Set AIVA_HIDE_VTUBE=0
+    to disable — e.g. if the avatar ever freezes when the window is hidden.
+    """
+    import asyncio
+
+    if os.getenv("AIVA_HIDE_VTUBE", "1") != "1":
+        return False
+
+    user32 = ctypes.windll.user32
+    SW_HIDE = 0
+    for _ in range(15):  # the window can lag behind the process at startup
+        pids = _vtube_pids()
+        if not pids:
+            return False  # VTube Studio isn't running — nothing to hide
+
+        hidden = []
+        proc_type = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, lparam):
+            wpid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if (wpid.value in pids and user32.IsWindowVisible(hwnd)
+                    and user32.GetWindowTextLengthW(hwnd)):
+                user32.ShowWindow(hwnd, SW_HIDE)
+                hidden.append(hwnd)
+            return 1
+
+        user32.EnumWindows(proc_type(_cb), 0)
+        if hidden:
+            print(f"VTube Studio window hidden ({len(hidden)} window(s), taskbar too)")
+            return True
+        await asyncio.sleep(0.4)
+    return False
+
+
 def close_vtube_studio():
     """Kill VTube Studio (called at Aiva shutdown)."""
     subprocess.run('taskkill /IM "VTube Studio.exe" /F', shell=True, capture_output=True)

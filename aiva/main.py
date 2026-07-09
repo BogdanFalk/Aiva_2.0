@@ -73,6 +73,7 @@ from modules.tools import (
     close_overlay,
     close_vtube_studio,
     ensure_overlay_running,
+    hide_vtube_studio,
     register_tools,
 )
 from modules.vtube_studio import VTubeStudio
@@ -475,6 +476,10 @@ async def main():
     avatar_hotkeys = [h["name"] for h in await vtube.get_hotkeys()]
     if avatar_hotkeys:
         print(f"Avatar hotkeys available: {len(avatar_hotkeys)}")
+
+    # tuck the VTube Studio window off-screen and off the taskbar — the avatar
+    # is shown through the Spout overlay, so its own window is never needed
+    await hide_vtube_studio()
 
     # --- memory + context ----------------------------------------------------
     memory = Memory()
