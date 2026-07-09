@@ -557,10 +557,16 @@ def make_terminal_handlers(terminals):
     """Terminal/job/Claude-Code handlers close over the TerminalManager."""
 
     async def open_terminal(params: FunctionCallParams):
-        await params.result_callback(terminals.open_session(
-            params.arguments.get("name", "main"),
-            params.arguments.get("directory", "~"),
-        ))
+        name = params.arguments.get("name", "main")
+        result = terminals.open_session(name, params.arguments.get("directory", "~"))
+        if result.get("success"):
+            # it's a real window — bring it to the front so the user sees it
+            title = f"Aiva: {name}"
+            for _ in range(12):
+                await asyncio.sleep(0.3)
+                if await asyncio.to_thread(computer.focus_window, title):
+                    break
+        await params.result_callback(result)
 
     async def run_in_terminal(params: FunctionCallParams):
         await params.result_callback(await terminals.run(
@@ -591,38 +597,41 @@ def make_terminal_handlers(terminals):
 
     async def show_terminal(params: FunctionCallParams):
         name = params.arguments.get("name", "main")
-        # forgiving lookup: fall back to the only session/job if the name is off
-        if name not in terminals.jobs and name not in terminals.sessions:
-            if len(terminals.sessions) == 1:
-                name = next(iter(terminals.sessions))
-            elif len(terminals.jobs) == 1:
-                name = next(iter(terminals.jobs))
-            else:
-                await params.result_callback({"success": False, "error": f"nothing named '{name}'",
-                                              "open": terminals.list_sessions()})
-                return
         try:
-            title = f"Aiva: {name}"
-            # Both jobs and sessions are watched by tailing their log file, so
-            # the window mirrors what Aiva does (a session's log is its live
-            # command transcript; a job's is its output).
+            # A headless job (Claude Code / background) has no window of its own
+            # — open one that tails its live output log.
             if name in terminals.jobs:
+                title = f"Aiva: {name}"
                 log = terminals.jobs[name]["log_path"].replace("\\", "/")
-            else:
-                log = terminals.sessions[name]["log_path"].replace("\\", "/")
-            tail = f"Get-Content -Wait -Encoding utf8 '{log}'"
-            _spawn_window(["wt", "nt", "--title", title, "powershell", "-NoExit",
-                           "-Command", tail], tail, title)
-            # the window takes a beat to appear — poll briefly, then focus it
+                tail = f"Get-Content -Wait -Encoding utf8 '{log}'"
+                _spawn_window(["wt", "nt", "--title", title, "powershell", "-NoExit",
+                               "-Command", tail], tail, title)
+                await asyncio.sleep(0.6)
+                await asyncio.to_thread(computer.focus_window, title)
+                await params.result_callback({"success": True, "shown": name})
+                return
+
+            # A session IS a real visible window already — just bring it forward.
+            if name not in terminals.sessions:
+                if len(terminals.sessions) == 1:
+                    name = next(iter(terminals.sessions))
+                else:
+                    await params.result_callback({"success": False, "error": f"nothing named '{name}'",
+                                                  "open": terminals.list_sessions()})
+                    return
+            s = terminals.sessions[name]
+            if not terminals._window_open(name):  # user closed it — reopen
+                terminals._launch_window(name, s["cwd"], s["log_path"])
+                await asyncio.sleep(1.3)
             focused = False
             for _ in range(12):
-                await asyncio.sleep(0.25)
-                if await asyncio.to_thread(computer.focus_window, title):
+                if await asyncio.to_thread(computer.focus_window, s["title"]):
                     focused = True
                     break
+                await asyncio.sleep(0.25)
             await params.result_callback({"success": True, "shown": name, "focused": focused})
         except Exception as e:
-            await params.result_callback({"success": False, "error": f"couldn't open a window: {e}"})
+            await params.result_callback({"success": False, "error": f"couldn't show the terminal: {e}"})
 
     async def claude_code(params: FunctionCallParams):
         await params.result_callback(await terminals.start_claude(
@@ -747,8 +756,10 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="open_terminal",
-        description="Open a named terminal session in a directory. Terminals remember their "
-                    "working directory and command history — use descriptive names like 'aiva-repo'.",
+        description="Open a real, visible Windows Terminal running PowerShell that the user can "
+                    "SEE and type into themselves. It's brought to the front automatically. Run "
+                    "commands in it with run_in_terminal (they appear in this window). Use "
+                    "descriptive names like 'aiva-repo'.",
         properties={
             "name": {"type": "string", "description": "Short name for this terminal"},
             "directory": {"type": "string", "description": "Working directory, e.g. a project path"},
@@ -757,13 +768,13 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="run_in_terminal",
-        description="Run a shell command in a named terminal — USE THIS whenever the user wants "
-                    "to see commands run in a terminal they opened. The command and its output "
-                    "appear live in that terminal's window (once shown with show_terminal). Pass "
-                    "the SAME terminal name you opened/showed. Fast commands return their output; "
-                    "slow ones become background jobs you'll be notified about.",
+        description="Run a command in a visible terminal by TYPING it into that window (as if the "
+                    "user typed it) and reading back the output. The user sees the command run in "
+                    "their terminal and can type there too. USE THIS for anything the user wants to "
+                    "watch — pass the SAME terminal name you opened. Note: this focuses/types into "
+                    "that window, so it briefly takes over the keyboard.",
         properties={
-            "terminal": {"type": "string", "description": "Name of the terminal you opened (the one being watched)"},
+            "terminal": {"type": "string", "description": "Name of the terminal you opened"},
             "command": {"type": "string", "description": "PowerShell command to run"},
         },
         required=["terminal", "command"],
@@ -789,8 +800,8 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="show_terminal",
-        description="Open a visible terminal window on the user's screen showing a session's "
-                    "directory or a job's live output, so they can watch.",
+        description="Bring a terminal's window back to the front (terminals are already visible; "
+                    "use this to re-focus one, or to pop up a background job's live output).",
         properties={"name": {"type": "string", "description": "Terminal or job name"}},
         required=["name"],
     ),

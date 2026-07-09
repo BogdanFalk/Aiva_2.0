@@ -22,6 +22,7 @@ import base64
 import ctypes
 import io
 import os
+import time
 from ctypes import wintypes
 
 _openai_client = None
@@ -182,6 +183,28 @@ def focus_window(title_substring):
     finally:
         user32.AttachThreadInput(our_tid, tgt_tid, False)
     return title
+
+
+def send_command_to_window(title, command, settle=0.35):
+    """Focus the window whose title contains `title` and type `command` + Enter,
+    exactly as a person would. Used to drive a real, user-visible terminal.
+    Returns True only if the window was focused (so the keystrokes landed there).
+    """
+    import keyboard
+
+    focused = False
+    for _ in range(8):
+        if focus_window(title):
+            focused = True
+            break
+        time.sleep(0.2)
+    if not focused:
+        return False
+    time.sleep(settle)
+    focus_window(title)  # re-assert focus immediately before typing
+    keyboard.write(command, delay=0.005)
+    keyboard.send("enter")
+    return True
 
 
 # --- reliable clicking (UI Automation via pywinauto) -----------------------
