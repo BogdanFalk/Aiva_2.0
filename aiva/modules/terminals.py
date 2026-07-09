@@ -34,6 +34,7 @@ class TerminalManager:
         # name -> {cwd, history, created, title, log_path, startup}
         self.sessions = {}
         self.jobs = {}       # name -> headless Claude/background job
+        self._active = None  # the terminal most recently opened/used
         self._announce = announce
         self._log_dir = os.path.join(tempfile.gettempdir(), "aiva_terminals")
         os.makedirs(self._log_dir, exist_ok=True)
@@ -130,19 +131,27 @@ class TerminalManager:
         self._launch_window(name, directory, log_path)
         self.sessions[name] = {"cwd": directory, "history": [], "created": time.time(),
                                "title": self._title(name), "log_path": log_path}
+        self._active = name
         return {"success": True, "terminal": name, "cwd": directory,
                 "note": "opened a real PowerShell window the user can see and type in too"}
 
     def _resolve(self, name):
-        """Map a possibly-wrong name to a real session so a command never runs
-        outside a visible terminal: exact match, else the sole session, else a
-        freshly opened one."""
+        """Map a name to an EXISTING session — run_in_terminal / type_in_terminal
+        act on a terminal that's already open, so this never spawns a new window
+        when one exists. Prefer the exact match, then the terminal she's actively
+        using (handles 'the same terminal' / a mis-remembered name), then any
+        open one. Only open a fresh terminal if there are none at all."""
         if name in self.sessions:
-            return name
-        if len(self.sessions) == 1:
-            return next(iter(self.sessions))
-        self.open_session(name, "~")
-        return name
+            resolved = name
+        elif self._active and self._active in self.sessions:
+            resolved = self._active
+        elif self.sessions:
+            resolved = next(reversed(self.sessions))  # most recently opened
+        else:
+            self.open_session(name, "~")
+            resolved = name
+        self._active = resolved
+        return resolved
 
     def close_session(self, name):
         s = self.sessions.pop(name, None)
@@ -153,6 +162,8 @@ class TerminalManager:
                         ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
             except Exception:
                 pass
+        if self._active == name:  # don't leave _active pointing at a dead session
+            self._active = next(reversed(self.sessions)) if self.sessions else None
         job = self.jobs.get(name)
         if job and job["status"] == "running":
             job["proc"].kill()
