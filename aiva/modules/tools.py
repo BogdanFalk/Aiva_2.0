@@ -708,7 +708,10 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="run_command",
-        description="Stage a Windows shell command for execution. It does NOT run yet: the user must confirm first.",
+        description="Stage a one-off Windows shell command for execution. It does NOT run yet: "
+                    "the user must confirm first. This runs INVISIBLY and never appears in any "
+                    "terminal window — if the user opened/showed a terminal and wants to watch "
+                    "commands run there, use run_in_terminal instead, not this.",
         properties={"command": {"type": "string", "description": "The shell command to stage"}},
         required=["command"],
     ),
@@ -754,10 +757,13 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="run_in_terminal",
-        description="Run a shell command in a named terminal. Fast commands return their output; "
-                    "slow ones automatically become background jobs and you'll be notified when done.",
+        description="Run a shell command in a named terminal — USE THIS whenever the user wants "
+                    "to see commands run in a terminal they opened. The command and its output "
+                    "appear live in that terminal's window (once shown with show_terminal). Pass "
+                    "the SAME terminal name you opened/showed. Fast commands return their output; "
+                    "slow ones become background jobs you'll be notified about.",
         properties={
-            "terminal": {"type": "string", "description": "Terminal name"},
+            "terminal": {"type": "string", "description": "Name of the terminal you opened (the one being watched)"},
             "command": {"type": "string", "description": "PowerShell command to run"},
         },
         required=["terminal", "command"],

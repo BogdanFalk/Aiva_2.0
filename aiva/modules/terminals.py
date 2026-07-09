@@ -88,10 +88,19 @@ class TerminalManager:
     # --- commands -----------------------------------------------------------
 
     async def run(self, name, command):
-        """Run in the named session; auto-converts to a job if slow."""
+        """Run in the named session; auto-converts to a job if slow.
+
+        Forgiving about the name so a command never silently runs outside a
+        visible terminal: an unknown name falls back to the only open session,
+        or opens a fresh one — it never errors back (which used to make Aiva
+        retry via the invisible run_command path)."""
         s = self.sessions.get(name)
         if not s:
-            return {"success": False, "error": f"no terminal named '{name}' — open it first"}
+            if len(self.sessions) == 1:
+                name = next(iter(self.sessions))
+            else:
+                self.open_session(name, "~")
+            s = self.sessions[name]
 
         proc = await asyncio.create_subprocess_exec(
             "powershell", "-NoProfile", "-Command", command,
