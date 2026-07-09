@@ -158,16 +158,32 @@ def _visible_windows():
     return out
 
 
-def focus_window(title_substring):
-    """Bring the first visible window whose title contains title_substring
-    (case-insensitive) to the foreground. Returns the matched title or None."""
-    user32 = ctypes.windll.user32
+def hwnd_for_title(title_substring):
+    """Handle of the first visible window whose title contains the substring,
+    or None. Use this to grab a terminal's handle right after opening it (while
+    its title is still ours), then track it by handle — the title changes when
+    programs like ssh run inside it."""
     needle = title_substring.lower()
-    match = next((w for w in _visible_windows() if needle in w[1].lower()), None)
-    if not match:
-        return None
-    hwnd, title = match
+    for hwnd, t in _visible_windows():
+        if needle in t.lower():
+            return hwnd
+    return None
 
+
+def window_alive(hwnd):
+    """True if the handle is still a live, visible window."""
+    if not hwnd:
+        return False
+    u = ctypes.windll.user32
+    return bool(u.IsWindow(hwnd) and u.IsWindowVisible(hwnd))
+
+
+def focus_hwnd(hwnd):
+    """Bring a window to the foreground BY HANDLE (survives title changes).
+    Returns True if the handle was live and focus was attempted."""
+    if not window_alive(hwnd):
+        return False
+    user32 = ctypes.windll.user32
     SW_RESTORE = 9
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, SW_RESTORE)
@@ -182,7 +198,41 @@ def focus_window(title_substring):
         user32.SetForegroundWindow(hwnd)
     finally:
         user32.AttachThreadInput(our_tid, tgt_tid, False)
-    return title
+    return True
+
+
+def focus_window(title_substring):
+    """Bring the first visible window whose title contains title_substring
+    (case-insensitive) to the foreground. Returns the matched title or None.
+    For terminals, prefer focus_hwnd — their titles change when ssh/REPLs run."""
+    match = next((w for w in _visible_windows()
+                  if title_substring.lower() in w[1].lower()), None)
+    if not match:
+        return None
+    focus_hwnd(match[0])
+    return match[1]
+
+
+def send_keys_to_hwnd(hwnd, text, settle=0.35, enter=True):
+    """Focus a window BY HANDLE and type `text` (then Enter unless enter=False),
+    like a person. Handle-based so it keeps working after ssh/REPLs rename the
+    window. Returns True only if the window was focused."""
+    import keyboard
+
+    focused = False
+    for _ in range(8):
+        if focus_hwnd(hwnd):
+            focused = True
+            break
+        time.sleep(0.2)
+    if not focused:
+        return False
+    time.sleep(settle)
+    focus_hwnd(hwnd)  # re-assert focus immediately before typing
+    keyboard.write(text, delay=0.005)
+    if enter:
+        keyboard.send("enter")
+    return True
 
 
 def send_command_to_window(title, command, settle=0.35, enter=True):

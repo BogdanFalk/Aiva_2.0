@@ -56,19 +56,35 @@ class TerminalManager:
                     f"Start-Transcript -Path '{log_path}' -Append | Out-Null\n"
                     f"Clear-Host\n")
         try:
-            subprocess.Popen(["wt", "new-tab", "--title", self._title(name),
+            # -w new forces its OWN window (not a tab in a shared one) so its
+            # handle is unambiguous
+            subprocess.Popen(["wt", "-w", "new", "new-tab", "--title", self._title(name),
                               "powershell", "-NoExit", "-NoProfile", "-File", startup])
         except OSError:  # Windows Terminal not installed — plain PowerShell console
             subprocess.Popen(f'start powershell -NoExit -NoProfile -File "{startup}"',
                              shell=True)
         return startup
 
-    def _window_open(self, name):
-        title = self._title(name).lower()
-        try:
-            return any(title in t.lower() for _, t in computer._visible_windows())
-        except Exception:
-            return False
+    async def _ensure_window(self, name):
+        """Return a LIVE window handle for the session, launching the window if
+        needed and capturing its handle while the title is still ours (before
+        ssh/REPLs rename it). Tracked by handle thereafter, so a retitled window
+        is never mistaken for a closed one — the bug that spawned a new terminal
+        on every post-ssh command."""
+        s = self.sessions[name]
+        if computer.window_alive(s.get("hwnd")):
+            return s["hwnd"]
+        # no live handle yet: adopt an existing window with our title, else launch
+        if not computer.hwnd_for_title(self._title(name)):
+            self._launch_window(name, s["cwd"], s["log_path"])
+        for _ in range(20):
+            await asyncio.sleep(0.3)
+            hwnd = computer.hwnd_for_title(self._title(name))
+            if hwnd:
+                s["hwnd"] = hwnd
+                return hwnd
+        s["hwnd"] = None
+        return None
 
     def _transcript_len(self, log_path):
         try:
@@ -128,9 +144,10 @@ class TerminalManager:
             open(log_path, "w").close()
         except OSError:
             pass
-        self._launch_window(name, directory, log_path)
+        # the window is launched (and its handle captured) lazily by
+        # _ensure_window, so open + first-use never double-launch
         self.sessions[name] = {"cwd": directory, "history": [], "created": time.time(),
-                               "title": self._title(name), "log_path": log_path}
+                               "title": self._title(name), "log_path": log_path, "hwnd": None}
         self._active = name
         return {"success": True, "terminal": name, "cwd": directory,
                 "note": "opened a real PowerShell window the user can see and type in too"}
@@ -157,9 +174,13 @@ class TerminalManager:
         s = self.sessions.pop(name, None)
         if s:
             try:
-                for hwnd, t in computer._visible_windows():
-                    if s["title"].lower() in t.lower():
-                        ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                hwnd = s.get("hwnd")
+                if computer.window_alive(hwnd):  # by handle — title may have changed (ssh)
+                    ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                else:  # fall back to title match if we never captured a handle
+                    for h, t in computer._visible_windows():
+                        if s["title"].lower() in t.lower():
+                            ctypes.windll.user32.PostMessageW(h, WM_CLOSE, 0, 0)
             except Exception:
                 pass
         if self._active == name:  # don't leave _active pointing at a dead session
@@ -196,13 +217,12 @@ class TerminalManager:
         output from the transcript. The user sees it run in that window."""
         name = self._resolve(name)
         s = self.sessions[name]
-
-        if not self._window_open(name):  # user closed it — reopen
-            self._launch_window(name, s["cwd"], s["log_path"])
-            await asyncio.sleep(1.3)
+        hwnd = await self._ensure_window(name)
+        if not hwnd:
+            return {"success": False, "error": "couldn't open or find the terminal window"}
 
         before = self._transcript_len(s["log_path"])
-        ok = await asyncio.to_thread(computer.send_command_to_window, s["title"], command)
+        ok = await asyncio.to_thread(computer.send_keys_to_hwnd, hwnd, command, 0.35, True)
         if not ok:
             return {"success": False,
                     "error": "couldn't focus the terminal window to type the command"}
@@ -220,12 +240,10 @@ class TerminalManager:
 
         Deliberately does not echo `text` back (it may be a password)."""
         name = self._resolve(name)
-        s = self.sessions[name]
-        if not self._window_open(name):
-            self._launch_window(name, s["cwd"], s["log_path"])
-            await asyncio.sleep(1.3)
-        ok = await asyncio.to_thread(
-            computer.send_command_to_window, s["title"], text, 0.35, submit)
+        hwnd = await self._ensure_window(name)
+        if not hwnd:
+            return {"success": False, "error": "couldn't open or find the terminal window"}
+        ok = await asyncio.to_thread(computer.send_keys_to_hwnd, hwnd, text, 0.35, submit)
         if not ok:
             return {"success": False, "error": "couldn't focus the terminal window to type"}
         return {"success": True,

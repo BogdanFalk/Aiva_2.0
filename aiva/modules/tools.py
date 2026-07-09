@@ -560,12 +560,11 @@ def make_terminal_handlers(terminals):
         name = params.arguments.get("name", "main")
         result = terminals.open_session(name, params.arguments.get("directory", "~"))
         if result.get("success"):
-            # it's a real window — bring it to the front so the user sees it
-            title = f"Aiva: {name}"
-            for _ in range(12):
-                await asyncio.sleep(0.3)
-                if await asyncio.to_thread(computer.focus_window, title):
-                    break
+            # launch the window and capture its handle now (title still ours),
+            # then bring it to the front so the user sees it
+            hwnd = await terminals._ensure_window(name)
+            if hwnd:
+                await asyncio.to_thread(computer.focus_hwnd, hwnd)
         await params.result_callback(result)
 
     async def run_in_terminal(params: FunctionCallParams):
@@ -626,17 +625,9 @@ def make_terminal_handlers(terminals):
                     await params.result_callback({"success": False, "error": f"nothing named '{name}'",
                                                   "open": terminals.list_sessions()})
                     return
-            s = terminals.sessions[name]
-            if not terminals._window_open(name):  # user closed it — reopen
-                terminals._launch_window(name, s["cwd"], s["log_path"])
-                await asyncio.sleep(1.3)
-            focused = False
-            for _ in range(12):
-                if await asyncio.to_thread(computer.focus_window, s["title"]):
-                    focused = True
-                    break
-                await asyncio.sleep(0.25)
-            await params.result_callback({"success": True, "shown": name, "focused": focused})
+            hwnd = await terminals._ensure_window(name)  # reopen if closed; by handle
+            focused = bool(hwnd) and await asyncio.to_thread(computer.focus_hwnd, hwnd)
+            await params.result_callback({"success": True, "shown": name, "focused": bool(focused)})
         except Exception as e:
             await params.result_callback({"success": False, "error": f"couldn't show the terminal: {e}"})
 
