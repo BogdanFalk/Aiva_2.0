@@ -179,13 +179,48 @@ def _vtube_pids():
     return pids
 
 
-async def hide_vtube_studio():
-    """Hide VTube Studio's window AND its taskbar button (SW_HIDE).
+def _taskbar_delete_tab(hwnd):
+    """Remove a window's taskbar button LIVE via ITaskbarList::DeleteTab —
+    without hiding the window. Runs its own COM apartment (call from a thread).
 
-    The avatar is viewed through the Spout overlay, so the VTS window itself is
-    never needed on screen. VTube Studio keeps rendering the Spout feed while
-    hidden (it's a Unity app with run-in-background on). Set AIVA_HIDE_VTUBE=0
-    to disable — e.g. if the avatar ever freezes when the window is hidden.
+    WS_EX_TOOLWINDOW stops the shell handing out a *new* button, but the button
+    a window already has only clears on a hide/show cycle — and hiding VTube
+    Studio is exactly what freezes it. DeleteTab drops the existing button with
+    the window still shown.
+    """
+    import comtypes
+    from comtypes import COMMETHOD, GUID, HRESULT, IUnknown
+    from comtypes.client import CreateObject
+
+    class ITaskbarList(IUnknown):
+        _iid_ = GUID("{56FDF342-FD6D-11d0-958A-006097C9A090}")
+        _methods_ = [
+            COMMETHOD([], HRESULT, "HrInit"),
+            COMMETHOD([], HRESULT, "AddTab", (["in"], wintypes.HWND, "hwnd")),
+            COMMETHOD([], HRESULT, "DeleteTab", (["in"], wintypes.HWND, "hwnd")),
+            COMMETHOD([], HRESULT, "ActivateTab", (["in"], wintypes.HWND, "hwnd")),
+            COMMETHOD([], HRESULT, "SetActiveAlt", (["in"], wintypes.HWND, "hwnd")),
+        ]
+
+    comtypes.CoInitialize()
+    try:
+        tb = CreateObject("{56FDF344-FD6D-11d0-958A-006097C9A090}", interface=ITaskbarList)
+        tb.HrInit()
+        tb.DeleteTab(hwnd)
+    finally:
+        comtypes.CoUninitialize()
+
+
+async def hide_vtube_studio():
+    """Stash VTube Studio's window off-screen and off the taskbar WITHOUT
+    hiding it.
+
+    VTube Studio (Unity) pauses its render loop when its window is truly hidden
+    (SW_HIDE) — which freezes the Spout feed the avatar overlay shows. So we
+    keep the window SHOWN (Unity keeps rendering, avatar keeps animating) but
+    move it far off-screen and drop its taskbar button live via
+    ITaskbarList::DeleteTab. The user never sees it. AIVA_HIDE_VTUBE=0 disables
+    this entirely (leaves the window on screen).
     """
     import asyncio
 
@@ -193,13 +228,19 @@ async def hide_vtube_studio():
         return False
 
     user32 = ctypes.windll.user32
-    SW_HIDE = 0
+    GWL_EXSTYLE = -20
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_APPWINDOW = 0x00040000
+    SWP_NOSIZE = 0x0001
+    SWP_NOZORDER = 0x0004
+    SWP_NOACTIVATE = 0x0010
+
     for _ in range(15):  # the window can lag behind the process at startup
         pids = _vtube_pids()
         if not pids:
-            return False  # VTube Studio isn't running — nothing to hide
+            return False  # VTube Studio isn't running — nothing to stash
 
-        hidden = []
+        targets = []
         proc_type = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HWND, wintypes.LPARAM)
 
         def _cb(hwnd, lparam):
@@ -207,13 +248,25 @@ async def hide_vtube_studio():
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
             if (wpid.value in pids and user32.IsWindowVisible(hwnd)
                     and user32.GetWindowTextLengthW(hwnd)):
-                user32.ShowWindow(hwnd, SW_HIDE)
-                hidden.append(hwnd)
+                targets.append(hwnd)
             return 1
 
         user32.EnumWindows(proc_type(_cb), 0)
-        if hidden:
-            print(f"VTube Studio window hidden ({len(hidden)} window(s), taskbar too)")
+        if targets:
+            for hwnd in targets:
+                # keep it SHOWN (Unity keeps rendering) but park it off-screen
+                user32.SetWindowPos(hwnd, 0, -32000, -32000, 0, 0,
+                                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                # tool-window style so the shell won't re-add a taskbar button
+                ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+                # and remove the button it already has, live (no hide, no freeze)
+                try:
+                    await asyncio.to_thread(_taskbar_delete_tab, hwnd)
+                except Exception as e:
+                    print(f"(VTS taskbar button removal failed, non-fatal: {e})")
+            print(f"VTube Studio parked off-screen ({len(targets)} window(s), off the taskbar)")
             return True
         await asyncio.sleep(0.4)
     return False
