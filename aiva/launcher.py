@@ -15,31 +15,17 @@ def is_process_running(process_name):
 def popen_unelevated(cmd, cwd=None, extra_path=None):
     """Launch an exe forcing it to run WITHOUT elevation.
 
-    VTube Studio.exe and obs64.exe carry a RUNASADMIN compatibility flag on
-    this machine, which makes plain CreateProcess fail with WinError 740
-    (and would otherwise demand a UAC click on every boot). Setting
-    __COMPAT_LAYER=RunAsInvoker overrides the flag for this launch only —
-    neither app needs admin rights for anything Aiva does.
+    obs64.exe carries a RUNASADMIN compatibility flag on this machine, which
+    makes plain CreateProcess fail with WinError 740 (and would otherwise
+    demand a UAC click on every boot). Setting __COMPAT_LAYER=RunAsInvoker
+    overrides the flag for this launch only — OBS doesn't need admin rights
+    for anything Aiva does.
     """
     env = os.environ.copy()
     env["__COMPAT_LAYER"] = "RunAsInvoker"
     if extra_path:
         env["PATH"] = extra_path + os.pathsep + env["PATH"]
     return subprocess.Popen(cmd, env=env, cwd=cwd)
-
-def launch_vtube_studio():
-    """Launch VTube Studio if it's not already running"""
-    if not is_process_running('VTube Studio'):
-        print("Launching VTube Studio...")
-        vtube_path = r"C:\Program Files (x86)\Steam\steamapps\common\VTube Studio\VTube Studio.exe"
-
-        if os.path.exists(vtube_path):
-            popen_unelevated([vtube_path, "-nosteam"])
-            return True
-
-        print("Could not find VTube Studio. Please make sure it's installed.")
-        return False
-    return True
 
 def launch_obs():
     """Launch OBS if it's not already running"""
@@ -75,18 +61,8 @@ def wait_for_process(process_name, max_wait=60):
 async def main():
     """Main launcher function"""
     print("Aiva Launcher starting...")
-    
-    # Launch VTube Studio
-    if not launch_vtube_studio():
-        print("Failed to launch VTube Studio. Exiting...")
-        return
-    
-    # Wait for VTube Studio
-    if not wait_for_process('VTube Studio'):
-        print("VTube Studio did not start properly. Exiting...")
-        return
-    
-    # (The desktop overlay is started and stopped by Aiva herself in main.py.)
+
+    # (The avatar renderer is started/adopted by Aiva herself in main.py.)
 
     # Launch OBS (optional — skip with --no-obs, and never a hard failure)
     if "--no-obs" not in sys.argv:

@@ -182,3 +182,20 @@ pyvts_token.txt
 training/
 tools/
 overlay_state.json
+avatar_state.json
+cat_state.json
+inner_state.json
+aiva/assets/
+.restart_marker
+
+# task-runner semi-live check scratch db
+tests/e2e_memory.db
+aiva/library/
+tests/e2e_reading.db
+
+# SQLite WAL sidecars (created while she runs; checkpointed away on clean close)
+*.db-wal
+*.db-shm
+
+# Speaker-recognition model (28MB, user-downloaded; wake-word hey_aiva.onnx stays tracked)
+aiva/models/campplus*.onnx

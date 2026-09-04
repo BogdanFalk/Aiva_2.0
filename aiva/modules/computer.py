@@ -121,9 +121,11 @@ async def describe_screen(looking_for=None, monitor_index=None):
     if looking_for:
         prompt += f" The user specifically wants to know: {looking_for}. If you can't find that, say so."
 
+    from modules.utilities import llm_kwargs
+
     resp = await _client().chat.completions.create(
         model=model,
-        max_tokens=400,
+        **llm_kwargs(model, max_tokens=400),
         messages=[{
             "role": "user",
             "content": [

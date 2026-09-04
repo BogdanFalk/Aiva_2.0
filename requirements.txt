@@ -4,10 +4,24 @@ PyAudio==0.2.14
 
 # Aiva modules
 python-dotenv==1.2.2
-pyvts==0.3.3
 requests==2.34.2
 psutil==7.2.2
 keyboard==0.13.5
 openwakeword==0.6.0
 scipy==1.17.1
 pywinauto==0.6.9  # reliable "click by name" via the Windows accessibility tree
+
+# Avatar renderer (modules/avatar_renderer.py): Live2D via our own GL window
+live2d-py==0.7.0.4
+PyQt5==5.15.11    # PyQt6/PySide6 have a translucent-background bug (live2d-py #98)
+PyOpenGL==3.1.7
+
+# Reading books (modules/library.py): PDF text extraction; EPUB/TXT/MD use the stdlib
+pypdf==6.16.2
+
+# Speaker recognition (modules/speakers.py): CPU voiceprints via ONNX + kaldi fbank (no torch).
+# onnxruntime + numpy were already transitive (openwakeword / local-smart-turn) — pin them now
+# that we depend on them directly.
+kaldi-native-fbank==1.22.3
+onnxruntime==1.24.4
+numpy==2.4.6

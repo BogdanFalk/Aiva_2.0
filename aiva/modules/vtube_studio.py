@@ -69,9 +69,40 @@ class VTubeStudio:
             self.connected = False
             return False
 
-    async def move_model(self, x=0, y=0, rotation=0, size=0):
-        """Move the model to a specific position"""
+    async def get_model_position(self):
+        """Live model placement {positionX, positionY, rotation, size}, or None."""
         try:
+            if not await self.ensure_connected():
+                return None
+            response = await self.vts.request(
+                self.vts.vts_request.BaseRequest("CurrentModelRequest")
+            )
+            data = response.get("data", {})
+            if response.get("messageType") == "APIError" or not data.get("modelLoaded"):
+                return None
+            return data.get("modelPosition")
+        except Exception as e:
+            print(f"Error reading model position: {e}")
+            self.connected = False
+            return None
+
+    async def move_model(self, x=None, y=None, rotation=None, size=None):
+        """Move/resize the model. Omitted values KEEP their current setting.
+
+        MoveModelRequest is absolute, so gaps must be filled from the live
+        position first — defaulting them to 0 used to recenter the model and
+        reset its zoom (absolute size 0 is big), which is why "move left"
+        would randomly blow the avatar up to giant size.
+        """
+        try:
+            if x is None or y is None or rotation is None or size is None:
+                pos = await self.get_model_position()
+                if not pos:
+                    return False  # can't fill the gaps safely; refuse the move
+                x = pos["positionX"] if x is None else x
+                y = pos["positionY"] if y is None else y
+                rotation = pos["rotation"] if rotation is None else rotation
+                size = pos["size"] if size is None else size
             if not await self.ensure_connected():
                 return False
             request_msg = self.vts.vts_request.requestMoveModel(

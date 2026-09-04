@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 def format_time(hour, minute):
     """Format time in a natural way"""
@@ -90,3 +90,36 @@ def get_weather(city=None, day="today"):
             return {"error": f"couldn't get the forecast for {city}"}
     except Exception as e:
         return {"error": f"error getting weather: {str(e)}"} 
+
+# $ per 1M tokens (input, output), mid-2026 — shared by main.py's usage summary
+# and the task runner's per-task cost budget.
+LLM_RATES = {
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-5.6-sol": (4.00, 20.00),
+    "gpt-5.6-terra": (2.00, 12.00),
+    "gpt-5.6-luna": (0.20, 1.20),
+    "gpt-5.4": (2.50, 15.00),
+    "gpt-5.4-mini": (0.75, 4.50),
+    "gpt-5.4-nano": (0.20, 1.25),
+    "text-embedding-3-small": (0.02, 0.0),
+}
+
+
+def llm_kwargs(model, max_tokens=None, temperature=None):
+    """Chat Completions parameters that differ between the gpt-4.x and gpt-5.x
+    lines. gpt-5.x rejects `max_tokens` (wants `max_completion_tokens`) and, on
+    Chat Completions, only accepts function tools with reasoning_effort 'none'
+    — which is also the sub-second, no-thinking mode a voice assistant wants.
+    `temperature` is accepted alongside effort none (verified 2026-08-26)."""
+    kw = {}
+    if (model or "").startswith("gpt-5"):
+        if max_tokens is not None:
+            kw["max_completion_tokens"] = max_tokens
+        kw["reasoning_effort"] = "none"
+    elif max_tokens is not None:
+        kw["max_tokens"] = max_tokens
+    if temperature is not None:
+        kw["temperature"] = temperature
+    return kw

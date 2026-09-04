@@ -252,7 +252,8 @@ class TerminalManager:
     def _track_job(self, job_name, session, cmd, proc, announce_done, claude=False):
         job = {"proc": proc, "cmd": cmd, "session": session, "status": "running",
                "result": "", "claude_session_id": None, "cost": None, "started": time.time(),
-               "log_path": os.path.join(self._log_dir, f"{job_name}.log")}
+               "log_path": os.path.join(self._log_dir, f"{job_name}.log"),
+               "done_event": asyncio.Event()}
         self.jobs[job_name] = job
         asyncio.create_task(self._watch_job(job_name, announce_done, claude))
         return job
@@ -261,7 +262,8 @@ class TerminalManager:
         job = self.jobs[job_name]
         out, _ = await job["proc"].communicate()
         text = out.decode("utf-8", errors="replace")
-        job["status"] = "done" if job["proc"].returncode == 0 else f"failed ({job['proc'].returncode})"
+        if job["status"] != "killed":  # kill_job already labelled it
+            job["status"] = "done" if job["proc"].returncode == 0 else f"failed ({job['proc'].returncode})"
         job["result"] = text
 
         if claude:
@@ -275,6 +277,7 @@ class TerminalManager:
 
         with open(job["log_path"], "w", encoding="utf-8") as f:
             f.write(job["result"])
+        job["done_event"].set()  # wait_job() callers (the task runner) wake up here
 
         if announce_done and self._announce:
             mins = (time.time() - job["started"]) / 60
@@ -286,6 +289,31 @@ class TerminalManager:
                 f"[Briefly tell the user it's done and summarize the outcome in one or two spoken sentences.]"
             )
 
+    async def wait_job(self, name, timeout=None):
+        """Await a job's completion. Returns {status, result, cost, claude_session_id}
+        or None if it isn't known / didn't finish within `timeout` seconds."""
+        job = self.jobs.get(name)
+        if not job:
+            return None
+        try:
+            await asyncio.wait_for(job["done_event"].wait(), timeout)
+        except asyncio.TimeoutError:
+            return None
+        return {"status": job["status"], "result": job["result"], "cost": job["cost"],
+                "claude_session_id": job["claude_session_id"]}
+
+    def kill_job(self, name):
+        """Kill a running job (task cancelled / timed out). True if something died."""
+        job = self.jobs.get(name)
+        if not job or job["status"] != "running":
+            return False
+        job["status"] = "killed"
+        try:
+            job["proc"].kill()
+        except ProcessLookupError:
+            pass
+        return True
+
     def _job_output(self, name):
         j = self.jobs.get(name)
         if not j:
@@ -296,7 +324,8 @@ class TerminalManager:
 
     # --- Claude Code ---------------------------------------------------------
 
-    async def start_claude(self, job_name, project_dir, prompt, mode="plan", resume_id=None):
+    async def start_claude(self, job_name, project_dir, prompt, mode="plan", resume_id=None,
+                           announce_done=True):
         project_dir = os.path.expanduser(project_dir)
         if not os.path.isdir(project_dir):
             return {"success": False, "error": f"project dir doesn't exist: {project_dir}"}
@@ -319,7 +348,7 @@ class TerminalManager:
         proc.stdin.close()
 
         self._track_job(job_name, None, f"claude[{mode}]: {prompt[:60]}", proc,
-                        announce_done=True, claude=True)
+                        announce_done=announce_done, claude=True)
         return {"success": True, "status": "started", "job": job_name, "mode": mode,
                 "note": "Claude Code is working — this takes minutes; you'll be told when it's done"}
 
