@@ -56,6 +56,23 @@ def test_books_and_reading_section_always_present():
     assert "Books and reading:" in p and "study_book" in p and "drop_trait" in p and "recall_reading" in p
 
 
+def test_web_and_space_section_always_present():
+    p = build_system_prompt()
+    assert "Finding things online, and your space:" in p
+    for tool in ("search_web", "read_page", "look_at_image", "save_to_space", "hand_over"):
+        assert tool in p
+    # the hard guardrail must be stated
+    assert "never buy" in p.lower()
+
+
+def test_your_space_block_only_when_fed_and_guarded():
+    assert "YOUR SPACE" not in build_system_prompt()
+    p = build_system_prompt(space=["image: a blue star hairclip — loved the charm (from shop.example.com)"])
+    assert "YOUR SPACE" in p and "blue star hairclip" in p
+    block = p.split("YOUR SPACE")[1]
+    assert "Never recite" in block
+
+
 def test_inner_blocks_present_only_when_fed_and_guarded():
     p = build_system_prompt()
     assert "HOW YOU FEEL RIGHT NOW" not in p and "WHAT YOU FIND YOURSELF WANTING" not in p

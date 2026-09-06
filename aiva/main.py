@@ -115,14 +115,16 @@ from modules.inner import ExperienceBus, InnerBrain, InnerState, SelfEngine
 from modules.persona import baseline_traits, build_system_prompt
 from modules.paralinguistics import AffectConfig, VocalAffect
 from modules.preferences import Preferences
+from modules.space import SpaceMemory
 from modules.speakers import SpeakerConfig, SpeakerMemory, SpeakerRecognizer
+from modules.web import WebClient, WebConfig
 from modules.task_memory import TaskMemory, embed_text
 from modules.tasks import TaskRunner, ToolBox, openai_llm_call
 from modules.terminals import TerminalManager
 from modules.tools import (TOOL_SCHEMAS, execute_shell, register_becoming_tools,
                            register_preference_tools, register_reading_tools,
                            register_self_tools, register_speaker_tools, register_task_tools,
-                           register_tools)
+                           register_tools, register_web_tools)
 from modules.reading import BookMemory, ReadingEngine, StudyLimits, embed_long
 from modules.becoming import Becoming
 from modules.utilities import LLM_RATES as _LLM_RATES
@@ -1072,6 +1074,37 @@ async def main():
     task_runner._reading = becoming.relevant_for  # lessons reach task planning (used if supported)
     becoming.fade()  # let unused traits/lessons decay a little at boot
 
+    # --- her reach to the web + her own space for what she gathers -----------------
+    # search/read/look-at-image + a curated "space" (aiva/space) she keeps finds in, mirroring the
+    # library. She finds and shows; there is deliberately no buy/sign-in/send tool.
+    _SPACE_DIR = os.getenv("AIVA_SPACE_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "space")
+    os.makedirs(_SPACE_DIR, exist_ok=True)
+    space_mem = SpaceMemory(memory.conn, embed=lambda t: embed_text(oai, t), log=log_event)
+    web_client = WebClient(WebConfig.from_env(), log=log_event)
+    _web_llm = openai_llm_call(oai, os.getenv("AIVA_WEB_MODEL") or task_model, label="web")
+
+    async def _summarize_page(text, *, focus=None):
+        """Summarise a fetched page off the voice model's token bucket (label='web')."""
+        prompt = ("Summarize this web page for Aiva in two to four plain spoken sentences — no "
+                  "markdown, no lists. Lead with what it actually says; keep any key name or number "
+                  "exact.")
+        if focus:
+            prompt += f" She wants to know: {focus}."
+        try:
+            reply = await _web_llm([{"role": "system", "content": prompt},
+                                    {"role": "user", "content": (text or "")[:8000]}],
+                                   max_tokens=300, temperature=0.3)
+            return (reply.text or "").strip() or (text or "")[:600]
+        except Exception:
+            return (text or "")[:600]
+
+    register_web_tools(llm, web_client, space_mem, describe_image=computer.describe_image,
+                       summarize=_summarize_page, space_dir=_SPACE_DIR,
+                       open_file=file_operations.open_file, log=log_event)
+    print(f"Web reach {'ON' if web_client.available() else 'OFF (set TAVILY_API_KEY)'} · "
+          f"space at {os.path.basename(_SPACE_DIR)}")
+
     # --- her nervous system: one shared mood + a private diary + her own wishes ----
     # (docs/PLAN-selfhood-and-eval.md) Everything below emits onto ONE experience bus;
     # the self loop integrates it into her mood and, when earned, her diary/desires.
@@ -1214,6 +1247,7 @@ async def main():
             voice=blocks.get("voice"), reading_lessons=blocks.get("lessons"),
             mood_line=pd["mood_line"], wants=pd["wants"],
             preferences=preferences.prompt_block(),
+            space=space_mem.status_lines(),
             current_speaker=roster["current"], known_speakers=roster["known"])
 
     messages = [

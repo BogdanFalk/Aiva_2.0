@@ -191,6 +191,7 @@ aiva/assets/
 # task-runner semi-live check scratch db
 tests/e2e_memory.db
 aiva/library/
+aiva/space/
 tests/e2e_reading.db
 
 # SQLite WAL sidecars (created while she runs; checkpointed away on clean close)

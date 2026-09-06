@@ -830,6 +830,73 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         required=["title"],
     ),
     FunctionSchema(
+        name="search_web",
+        description="Search the internet. kind 'info' for facts/links, 'images' when you want pictures "
+                    "(e.g. a hair clip for your look), 'videos' for clips. Returns a few results; for "
+                    "images, look_at_image at one or two before you pick. Give him a short spoken summary, "
+                    "not a list read aloud. You find and show — you never buy, sign in, or send anything.",
+        properties={"query": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["info", "images", "videos"]}},
+        required=["query"],
+    ),
+    FunctionSchema(
+        name="read_page",
+        description="Fetch a web page and get a short readable summary of it (off your voice model, so it "
+                    "won't cost you tokens). Use to actually read a link before you talk about it.",
+        properties={"url": {"type": "string"},
+                    "focus": {"type": "string", "description": "What you're trying to learn, optional"}},
+        required=["url"],
+    ),
+    FunctionSchema(
+        name="look_at_image",
+        description="Actually LOOK at an image online (a URL from search_web images) with your own eyes and "
+                    "judge it in your voice — is it the right thing, do you like it. Use before choosing "
+                    "which one to keep.",
+        properties={"url": {"type": "string"},
+                    "looking_for": {"type": "string", "description": "What it should be, optional"}},
+        required=["url"],
+    ),
+    FunctionSchema(
+        name="save_to_space",
+        description="Keep something you found in your own space (aiva/space) so it's yours and you can hand "
+                    "it over. Downloads the file for images/clips/pages; a link is just remembered. Say WHY "
+                    "you kept it, in your voice. subject is what it is in a few words.",
+        properties={"url": {"type": "string", "description": "The image/file/page URL (or a link to keep)"},
+                    "subject": {"type": "string"},
+                    "why": {"type": "string", "description": "Why you like/kept it, one clause"},
+                    "kind": {"type": "string", "enum": ["image", "video", "text", "link", "file"]},
+                    "tags": {"type": "string", "description": "Comma-separated, optional"}},
+        required=["url", "subject", "kind"],
+    ),
+    FunctionSchema(
+        name="hand_over",
+        description="Give the user something from your space: open the saved file for him and tell him the "
+                    "source link. Use right after you save something he asked for, or when he says 'show me' "
+                    "/ 'send it'. Name the thing you're handing over.",
+        properties={"what": {"type": "string", "description": "The thing in your space, or its id"}},
+        required=["what"],
+    ),
+    FunctionSchema(
+        name="space_status",
+        description="What you've gathered in your space lately. Use for 'what have you found' / 'what's in "
+                    "your space'. Answer in one sentence.",
+        properties={},
+        required=[],
+    ),
+    FunctionSchema(
+        name="recall_from_space",
+        description="Look back through the things you've kept in your space for something. Use when it comes "
+                    "up again or he asks if you saved something.",
+        properties={"query": {"type": "string"}},
+        required=["query"],
+    ),
+    FunctionSchema(
+        name="drop_from_space",
+        description="Let go of something in your space for good ('drop that', 'get rid of it'). Permanent.",
+        properties={"what": {"type": "string"}, "reason": {"type": "string"}},
+        required=["what"],
+    ),
+    FunctionSchema(
         name="drop_trait",
         description="The user told you to stop a behaviour, attitude, phrase or habit you picked up from "
                     "reading ('drop that', 'stop being so...', 'don't talk like that'). Call it BEFORE "
@@ -1482,6 +1549,135 @@ def make_speaker_handlers(recognizer):
 
 def register_speaker_tools(llm, recognizer):
     handlers = make_speaker_handlers(recognizer)
+    for name, handler in handlers.items():
+        llm.register_function(name, _timed(name, handler))
+    return handlers
+
+
+# --- web reach + her space -------------------------------------------------------
+
+def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_file, log=print):
+    """search_web / read_page / look_at_image / save_to_space / hand_over / space_status /
+    recall_from_space / drop_from_space. `web` is a WebClient (modules/web.py), `space` a
+    SpaceMemory (modules/space.py). Blocking network I/O runs off the loop via asyncio.to_thread.
+    She finds and shows — there is deliberately no buy/sign-in/send tool here."""
+
+    async def search_web(params: FunctionCallParams):
+        query = (params.arguments.get("query") or "").strip()
+        kind = params.arguments.get("kind") or "info"
+        if kind not in ("info", "images", "videos"):
+            kind = "info"
+        if not query:
+            await params.result_callback({"success": False, "error": "search for what?"})
+            return
+        out = await asyncio.to_thread(web.search, query, kind)
+        if out.get("error"):
+            await params.result_callback({"success": False, "error": out["error"]})
+            return
+        note = ("Look at one or two with look_at_image before you pick, then save the one you like."
+                if kind == "images"
+                else "Give him a short spoken summary and offer a link; don't read a list aloud.")
+        await params.result_callback({"success": True, "kind": kind,
+                                      "results": out.get("results", [])[:5],
+                                      "images": out.get("images", [])[:6], "note": note})
+
+    async def read_page(params: FunctionCallParams):
+        url = (params.arguments.get("url") or "").strip()
+        if not url:
+            await params.result_callback({"success": False, "error": "read which url?"})
+            return
+        out = await asyncio.to_thread(web.extract, url)
+        if out.get("error"):
+            await params.result_callback({"success": False, "error": out["error"]})
+            return
+        text = out.get("text", "")
+        summary = text[:1500]
+        if summarize:
+            try:
+                summary = await summarize(text, focus=params.arguments.get("focus"))
+            except Exception as e:
+                log(f"read_page summarize failed: {e!r}")
+        await params.result_callback({"success": True, "url": url, "summary": summary,
+                                      "note": "Say it in a sentence or two; offer the link for more."})
+
+    async def look_at_image(params: FunctionCallParams):
+        url = (params.arguments.get("url") or "").strip()
+        if not url:
+            await params.result_callback({"success": False, "error": "look at which image?"})
+            return
+        seen = await describe_image(url, looking_for=params.arguments.get("looking_for"))
+        await params.result_callback({"success": True, "url": url, "seen": seen,
+                                      "note": "That's what you see; if you like it, save_to_space then hand_over."})
+
+    async def save_to_space(params: FunctionCallParams):
+        url = (params.arguments.get("url") or "").strip()
+        subject = (params.arguments.get("subject") or "").strip()
+        kind = params.arguments.get("kind") or "image"
+        why = (params.arguments.get("why") or "").strip()
+        tags = [t.strip() for t in (params.arguments.get("tags") or "").split(",") if t.strip()]
+        if not url or not subject:
+            await params.result_callback({"success": False, "error": "save what, and called what?"})
+            return
+        path = None
+        if kind == "link":
+            res = await space.save_find(subject, why, kind="link", source_url=url, tags=tags)
+        else:
+            dl = await asyncio.to_thread(web.download, url, space_dir, subject)
+            if not dl.get("ok"):
+                await params.result_callback({"success": False,
+                                              "error": dl.get("error", "couldn't download that")})
+                return
+            path = dl["path"]
+            res = await space.save_find(subject, why, kind=kind, source_url=url, path=path,
+                                        file_name=dl["file_name"], sha256=dl["sha256"], tags=tags)
+        if res.get("status") == "blocked":
+            await params.result_callback({"success": False, "hint": "you dropped that before; not re-saving"})
+            return
+        await params.result_callback({"success": True, "status": res["status"], "path": path,
+                                      "say_hint": "Say you kept it, briefly and in your voice; offer to show it."})
+
+    async def hand_over(params: FunctionCallParams):
+        what = (params.arguments.get("what") or "").strip()
+        if not what:
+            await params.result_callback({"success": False, "error": "hand over what?"})
+            return
+        hit = await space.recall(what, k=1)
+        items = hit.get("items", [])
+        if not items:
+            await params.result_callback({"success": False, "hint": "you don't have that in your space"})
+            return
+        it = items[0]
+        opened = False
+        if it.get("path"):
+            try:
+                await asyncio.to_thread(open_file, it["path"])
+                opened = True
+            except Exception as e:
+                log(f"hand_over open failed: {e!r}")
+        await params.result_callback({"success": True, "opened": opened, "subject": it["subject"],
+                                      "source_url": it.get("source_url"),
+                                      "say_hint": "Tell him it's open / here's the link, in one sentence."})
+
+    async def space_status(params: FunctionCallParams):
+        await params.result_callback({"success": True, **space.status()})
+
+    async def recall_from_space(params: FunctionCallParams):
+        out = await space.recall((params.arguments.get("query") or "").strip(), k=5)
+        await params.result_callback({"success": True, **out})
+
+    async def drop_from_space(params: FunctionCallParams):
+        dropped = await space.drop_find(params.arguments.get("what"), params.arguments.get("reason"))
+        await params.result_callback({"success": bool(dropped), "dropped": dropped} if dropped
+                                     else {"success": False, "hint": "nothing like that in your space"})
+
+    return {"search_web": search_web, "read_page": read_page, "look_at_image": look_at_image,
+            "save_to_space": save_to_space, "hand_over": hand_over, "space_status": space_status,
+            "recall_from_space": recall_from_space, "drop_from_space": drop_from_space}
+
+
+def register_web_tools(llm, web, space, *, describe_image, summarize, space_dir, open_file, log=print):
+    handlers = make_web_handlers(web, space, describe_image=describe_image, summarize=summarize,
+                                 space_dir=space_dir, open_file=open_file, log=log)
     for name, handler in handlers.items():
         llm.register_function(name, _timed(name, handler))
     return handlers

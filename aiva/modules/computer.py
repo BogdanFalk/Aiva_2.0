@@ -105,13 +105,47 @@ def capture_screen(monitor_index=None, max_edge=None):
     return buf.getvalue()
 
 
+def _vision_model():
+    return os.getenv("AIVA_VISION_MODEL") or os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini")
+
+
+def _data_url_from_file(path):
+    """Read a local image file into a data: URL (mime guessed, defaults to jpeg)."""
+    import mimetypes
+
+    mime, _ = mimetypes.guess_type(path)
+    if not mime or not mime.startswith("image/"):
+        mime = "image/jpeg"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+
+async def _describe(image_url, prompt, max_tokens=400):
+    """The one vision call both the screen and an arbitrary image go through. `image_url` is either
+    a data: URL (local bytes) or a remote http(s) URL — the OpenAI API accepts either."""
+    from modules.utilities import llm_kwargs
+
+    model = _vision_model()
+    resp = await _client().chat.completions.create(
+        model=model,
+        **llm_kwargs(model, max_tokens=max_tokens),
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        }],
+    )
+    return resp.choices[0].message.content.strip()
+
+
 async def describe_screen(looking_for=None, monitor_index=None):
     """Capture the screen and have the vision model describe it. Returns a
     short text description (verbatim on error dialogs / key labels)."""
     jpeg = await asyncio.to_thread(capture_screen, monitor_index)
     b64 = base64.b64encode(jpeg).decode("utf-8")
-    model = os.getenv("AIVA_VISION_MODEL") or os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini")
-
     prompt = (
         "You are Aiva's eyes. Look at this screenshot of the user's Windows screen and "
         "describe what's relevant in 2-4 short sentences, plainly. Quote the exact text of "
@@ -120,21 +154,30 @@ async def describe_screen(looking_for=None, monitor_index=None):
     )
     if looking_for:
         prompt += f" The user specifically wants to know: {looking_for}. If you can't find that, say so."
+    return await _describe(f"data:image/jpeg;base64,{b64}", prompt)
 
-    from modules.utilities import llm_kwargs
 
-    resp = await _client().chat.completions.create(
-        model=model,
-        **llm_kwargs(model, max_tokens=400),
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ],
-        }],
+async def describe_image(url_or_path, looking_for=None):
+    """Look at an image the way describe_screen looks at the screen — for something she FOUND online.
+    Accepts a local file path or an http(s) URL. She describes what it actually is and judges it in
+    her own voice (taste allowed). Returns a short description, or a spoken-safe error string."""
+    s = str(url_or_path or "").strip()
+    if s.lower().startswith(("http://", "https://")):
+        image_url = s
+    else:
+        try:
+            image_url = await asyncio.to_thread(_data_url_from_file, s)
+        except Exception as e:
+            return f"(couldn't open that image: {e})"
+    prompt = (
+        "You are Aiva's eyes. Look at this image and describe what it actually shows in two or three "
+        "short sentences, plainly and with no markdown. Then say, in your own voice, whether YOU like "
+        "it and why — your taste is allowed to be picky."
     )
-    return resp.choices[0].message.content.strip()
+    if looking_for:
+        prompt += (f" You're looking for: {looking_for}. Say how well it fits and flag anything off "
+                   "(wrong thing, watermark, low quality).")
+    return await _describe(image_url, prompt)
 
 
 # --- window focus (Win32) --------------------------------------------------

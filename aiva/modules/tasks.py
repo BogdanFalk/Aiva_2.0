@@ -38,6 +38,10 @@ RUNNER_TOOL_ALLOW = frozenset({
     "click_at", "scroll",
     "open_terminal", "run_in_terminal", "type_in_terminal", "read_terminal",
     "list_terminals", "show_terminal", "get_datetime",
+    # web reach + her space: read-only / reversible (download to her own space), so a "go find me X"
+    # task can run autonomously. Buy/sign-in/send have no tool at all, so they can't happen here.
+    "search_web", "read_page", "look_at_image", "save_to_space", "hand_over",
+    "recall_from_space", "space_status",
 })
 
 DESTRUCTIVE_RE = re.compile(

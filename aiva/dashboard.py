@@ -196,6 +196,7 @@ def collect():
         data["reading"] = _collect_reading(con)
         data["inner"] = _collect_inner(con)
         data["preferences"] = _collect_preferences(con)
+        data["space"] = _collect_space(con)
         data["stats"] = _collect_stats(con)
         data["becoming"] = _collect_becoming(con)
         data["tasks"] = _collect_tasks(con)
@@ -345,6 +346,27 @@ def _collect_preferences(con):
     dropped = _one(con, "SELECT COUNT(*) FROM preferences WHERE status = 'dropped'") or 0
     return {"likes": likes, "dislikes": dislikes, "opinions": opinions,
             "active_total": active_total, "dropped": dropped}
+
+
+def _collect_space(con):
+    """Things she's gathered from the web and kept (finds table). Degrades to empty until the
+    table exists (created the first time she saves a find, post-restart)."""
+    if con is None:
+        return None
+    try:
+        rows = _q(con, "SELECT kind, subject, why, source_url, path, tags, added_ts FROM finds "
+                       "WHERE status = 'kept' ORDER BY updated_ts DESC, id DESC LIMIT 30")
+    except sqlite3.Error:
+        return None
+    items = []
+    for r in rows:
+        items.append({"kind": r["kind"], "subject": r["subject"], "why": r["why"],
+                      "source_url": r["source_url"], "has_file": bool(r["path"]),
+                      "tags": [t for t in (r["tags"] or "").split(",") if t],
+                      "when": _ago(r["added_ts"])})
+    kept = _one(con, "SELECT COUNT(*) FROM finds WHERE status = 'kept'") or 0
+    dropped = _one(con, "SELECT COUNT(*) FROM finds WHERE status = 'dropped'") or 0
+    return {"items": items, "kept": kept, "dropped": dropped}
 
 
 def _collect_stats(con, days=7):
@@ -808,6 +830,24 @@ function render(d){
     grp('Likes', pf.likes); grp('Dislikes', pf.dislikes); grp('Opinions', pf.opinions);
   } else {
     html += `<div class="empty">No preferences yet — her baseline tastes seed the first time you fully restart her (Ctrl+Alt+X), then they genuinely evolve from what she reads, does and talks about.</div>`;
+  }
+  html += `</section>`;
+
+  // her space — things she gathered from the web
+  const sp = d.space;
+  const spCnt = sp ? `${sp.kept||0} kept${sp.dropped?` · ${sp.dropped} dropped`:''}` : 'web finds';
+  html += `<section><h2>Her space <span class="cnt">${spCnt}</span></h2>`;
+  if(sp && (sp.items||[]).length){
+    sp.items.forEach(it=>{
+      const src = it.source_url ? `<a href="${esc(it.source_url)}" target="_blank" rel="noreferrer" style="color:var(--muted)">source</a>` : '';
+      const file = it.has_file ? 'saved file' : 'link';
+      const tags = (it.tags||[]).length ? ' · '+it.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('') : '';
+      html += `<div class="item"><div class="t">${pill(it.kind)} ${esc(it.subject)}</div>`
+        + (it.why?`<div class="d" style="color:var(--ink)">“${esc(it.why)}”</div>`:'')
+        + `<div class="d">${file} · ${esc(it.when||'')}${src?' · '+src:''}${tags}</div></div>`;
+    });
+  } else {
+    html += `<div class="empty">Nothing gathered yet — she keeps things here when she finds something online she likes. Set TAVILY_API_KEY and restart to switch her web reach on.</div>`;
   }
   html += `</section>`;
 

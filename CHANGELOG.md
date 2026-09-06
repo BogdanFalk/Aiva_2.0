@@ -9,6 +9,17 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **She can reach the internet, and keeps a curated "space" for what she finds** (`modules/web.py`,
+  `modules/space.py`). New tools `search_web` (info/images/videos via Tavily), `read_page` (fetch +
+  summarise off the voice model's token bucket), `look_at_image` (she actually *sees* an online image
+  with her vision and judges it), `save_to_space`/`hand_over` (download → keep → open the file for you +
+  give the source link), `space_status`/`recall_from_space`/`drop_from_space`. Finds live in `aiva/space/`
+  and a `finds` table (deduped by sha256/subject, recalled by embedding, vetoable), shown on the
+  dashboard ("Her space"). She can fetch on request *and* on her own initiative (tied to her wishes).
+  **Hard guardrail: she finds and shows — she never buys, signs in, pays, or sends; there's no such
+  tool.** Downloads are gated to image/text/pdf/mp4 with a size cap (`AIVA_WEB_MAX_MB`) and the file
+  extension comes from the content-type, so an executable can never be written. Config: `TAVILY_API_KEY`
+  + `AIVA_WEB_*` / `AIVA_SPACE_DIR`. `python -m modules.space --show` audits her finds.
 - **Her own likes, dislikes, and opinions — that genuinely evolve** (`modules/preferences.py`). A new
   mutable self-model with *signed* polarity (a real dislike, not just an absent like), a `taste` and
   an `opinion` kind, formed from *any* experience (not just reading). Her frozen baseline tastes
