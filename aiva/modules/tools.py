@@ -971,6 +971,16 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         required=["mode"],
     ),
     FunctionSchema(
+        name="what_can_i_do",
+        description="Check your own powers when you're not sure how (or whether) you can do something "
+                    "— for a wish of yours or a question of his. Tells you which power fits and whether "
+                    "you can just do it, should ask first, or can't. Use it to reach for the right tool "
+                    "instead of guessing or saying you can't; then act or answer in your own words.",
+        properties={"intention": {"type": "string",
+                                  "description": "What you're trying to do, plainly; optional"}},
+        required=[],
+    ),
+    FunctionSchema(
         name="enroll_speaker",
         description="You just heard a voice you didn't recognize and asked whose it was. Call this "
                     "with the name they gave to remember their voice, so you know them next time. "
@@ -1210,6 +1220,11 @@ def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, rest
                          "list_terminals": list_terminals, "close_terminal": close_terminal,
                          "show_terminal": show_terminal, "claude_code": claude_code})
 
+    async def what_can_i_do(params: FunctionCallParams):
+        from modules import capabilities
+        await params.result_callback(
+            {"success": True, **capabilities.for_tool(params.arguments.get("intention"))})
+
     handlers.update({
         "launch_app": launch_app, "create_file": create_file, "open_file": open_file,
         "list_directory": list_directory, "run_command": run_command,
@@ -1219,7 +1234,7 @@ def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, rest
         "avatar_move": avatar_move, "avatar_position": avatar_position,
         "look_at_screen": look_at_screen, "focus_window": focus_window,
         "click_ui_element": click_ui_element, "type_text": type_text, "press_keys": press_keys,
-        "click_at": click_at, "scroll": scroll,
+        "click_at": click_at, "scroll": scroll, "what_can_i_do": what_can_i_do,
     })
     return handlers
 
@@ -1556,11 +1571,16 @@ def register_speaker_tools(llm, recognizer):
 
 # --- web reach + her space -------------------------------------------------------
 
-def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_file, log=print):
+def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_file, limits=None,
+                      log=print):
     """search_web / read_page / look_at_image / save_to_space / hand_over / space_status /
     recall_from_space / drop_from_space. `web` is a WebClient (modules/web.py), `space` a
-    SpaceMemory (modules/space.py). Blocking network I/O runs off the loop via asyncio.to_thread.
-    She finds and shows — there is deliberately no buy/sign-in/send tool here."""
+    SpaceMemory (modules/space.py), `limits` an optional ServiceLimits gating Tavily by its monthly
+    budget. Blocking network I/O runs off the loop via asyncio.to_thread. She finds and shows —
+    there is deliberately no buy/sign-in/send tool here."""
+
+    def _tavily_blocked():
+        return limits is not None and not limits.allow("tavily")
 
     async def search_web(params: FunctionCallParams):
         query = (params.arguments.get("query") or "").strip()
@@ -1570,10 +1590,16 @@ def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_
         if not query:
             await params.result_callback({"success": False, "error": "search for what?"})
             return
+        if _tavily_blocked():
+            await params.result_callback({"success": False, "paused": True,
+                                          "say_hint": "Tell him you're out of web searches for the month."})
+            return
         out = await asyncio.to_thread(web.search, query, kind)
         if out.get("error"):
             await params.result_callback({"success": False, "error": out["error"]})
             return
+        if limits is not None:
+            await limits.record("tavily")
         note = ("Look at one or two with look_at_image before you pick, then save the one you like."
                 if kind == "images"
                 else "Give him a short spoken summary and offer a link; don't read a list aloud.")
@@ -1586,10 +1612,16 @@ def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_
         if not url:
             await params.result_callback({"success": False, "error": "read which url?"})
             return
+        if _tavily_blocked():
+            await params.result_callback({"success": False, "paused": True,
+                                          "say_hint": "Tell him you're out of web reads for the month."})
+            return
         out = await asyncio.to_thread(web.extract, url)
         if out.get("error"):
             await params.result_callback({"success": False, "error": out["error"]})
             return
+        if limits is not None:
+            await limits.record("tavily")
         text = out.get("text", "")
         summary = text[:1500]
         if summarize:
@@ -1675,9 +1707,10 @@ def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_
             "recall_from_space": recall_from_space, "drop_from_space": drop_from_space}
 
 
-def register_web_tools(llm, web, space, *, describe_image, summarize, space_dir, open_file, log=print):
+def register_web_tools(llm, web, space, *, describe_image, summarize, space_dir, open_file,
+                       limits=None, log=print):
     handlers = make_web_handlers(web, space, describe_image=describe_image, summarize=summarize,
-                                 space_dir=space_dir, open_file=open_file, log=log)
+                                 space_dir=space_dir, open_file=open_file, limits=limits, log=log)
     for name, handler in handlers.items():
         llm.register_function(name, _timed(name, handler))
     return handlers

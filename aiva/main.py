@@ -109,10 +109,12 @@ from pipecat.workers.runner import WorkerRunner
 
 from modules.avatar import AvatarClient
 from modules.cat import CAT_NAME_RECOVERY_NOTE, CAT_NAMING_NOTE, DesktopCat
-from modules import computer, file_operations
+from modules import capabilities, computer, file_operations
 from modules.memory import Memory
 from modules.inner import ExperienceBus, InnerBrain, InnerState, SelfEngine
 from modules.persona import baseline_traits, build_system_prompt
+from modules.limits import ServiceLimits
+from modules.notify import Notifier, NotifyConfig
 from modules.paralinguistics import AffectConfig, VocalAffect
 from modules.preferences import Preferences
 from modules.space import SpaceMemory
@@ -1024,8 +1026,9 @@ async def main():
     # with its own OpenAI calls, and reports through announce() like Claude
     # Code jobs. Shell steps go through execute_shell only after the user's yes.
     task_model = os.getenv("AIVA_TASK_MODEL", llm_model)
+    toolbox = ToolBox(handlers, TOOL_SCHEMAS)
     task_runner = TaskRunner(
-        task_memory=task_memory, toolbox=ToolBox(handlers, TOOL_SCHEMAS),
+        task_memory=task_memory, toolbox=toolbox,
         llm_call=openai_llm_call(oai, task_model, label="task"), terminals=terminals, log=log_event,
         execute_shell=lambda cmd: asyncio.to_thread(execute_shell, cmd),
         describe_screen=computer.describe_screen, list_monitors=computer.list_monitors,
@@ -1082,6 +1085,12 @@ async def main():
     os.makedirs(_SPACE_DIR, exist_ok=True)
     space_mem = SpaceMemory(memory.conn, embed=lambda t: embed_text(oai, t), log=log_event)
     web_client = WebClient(WebConfig.from_env(), log=log_event)
+    # per-service spend guardrail: each service capped at its own budget (Tavily monthly is the main
+    # one), ntfy alert at ~80%/100%, and the self-started work that hit the cap pauses — voice never.
+    notifier = Notifier(NotifyConfig.from_env(), log=log_event)
+    service_limits = ServiceLimits(memory.conn, notifier=notifier, log=log_event)
+    print(f"ntfy alerts {'ON' if notifier.available() else 'OFF (set NTFY_TOPIC)'} · "
+          f"Tavily cap {service_limits.cap('tavily') or 'off'}/mo")
     _web_llm = openai_llm_call(oai, os.getenv("AIVA_WEB_MODEL") or task_model, label="web")
 
     async def _summarize_page(text, *, focus=None):
@@ -1099,9 +1108,12 @@ async def main():
         except Exception:
             return (text or "")[:600]
 
-    register_web_tools(llm, web_client, space_mem, describe_image=computer.describe_image,
-                       summarize=_summarize_page, space_dir=_SPACE_DIR,
-                       open_file=file_operations.open_file, log=log_event)
+    web_handlers = register_web_tools(llm, web_client, space_mem,
+                                      describe_image=computer.describe_image,
+                                      summarize=_summarize_page, space_dir=_SPACE_DIR,
+                                      open_file=file_operations.open_file, limits=service_limits,
+                                      log=log_event)
+    toolbox.add_handlers(web_handlers)   # so allow-listed web/space verbs are callable by the task runner
     print(f"Web reach {'ON' if web_client.available() else 'OFF (set TAVILY_API_KEY)'} · "
           f"space at {os.path.basename(_SPACE_DIR)}")
 
@@ -1243,6 +1255,7 @@ async def main():
         return build_system_prompt(
             memory.load_facts(), avatar_hotkeys, cat.persona_note(), memory.load_recaps(limit=2),
             flows=task_memory.load_flows(), lessons=task_memory.load_lessons(),
+            capabilities=capabilities.prompt_lines(),
             reading=blocks.get("reading"), traits=blocks.get("traits"),
             voice=blocks.get("voice"), reading_lessons=blocks.get("lessons"),
             mood_line=pd["mood_line"], wants=pd["wants"],
@@ -1444,7 +1457,53 @@ async def main():
                           idle_for=mic.idle_for, user_present=_user_present,
                           task_busy=lambda: mic.bot_speaking or mic.processing or _task_running(),
                           engine=reading, refresh_prompt=refresh_system_prompt)
-    self_engine.attach(refresh_prompt=refresh_system_prompt)  # mood/wishes update her prompt live
+    # --- safe autonomous action: she may pursue a wish herself, but ONLY with a reversible verb ---
+    _ACT_CAPS = {"find_and_keep"}          # what _act_on_wish can actually do in v1
+    _self_act_on = os.getenv("AIVA_SELF_ACT", "1") == "1"
+
+    def _self_actionable(desire):
+        """True only for a wish she may safely pursue unsupervised: an auto-tier capability this
+        dispatcher can perform, whose service isn't paused. Everything else stays an 'ask'."""
+        if not _self_act_on:
+            return False
+        cap = capabilities.match(desire.get("text", ""))
+        if not cap or cap.tier != "auto" or cap.name not in _ACT_CAPS:
+            return False
+        if cap.name == "find_and_keep" and not service_limits.allow("tavily"):
+            return False
+        return True
+
+    async def _act_on_wish(desire):
+        """Find-and-keep: search images for the wish, look at one, keep it in her space, tell him.
+        Reversible (downloads to her own space); Tavily-gated; never buys or sends."""
+        text = (desire.get("text") or "").strip()
+        if not text or not service_limits.allow("tavily"):
+            return
+        out = await asyncio.to_thread(web_client.search, text, "images")
+        await service_limits.record("tavily")
+        images = [] if out.get("error") else out.get("images", [])
+        for im in images[:3]:
+            url = im.get("url")
+            if not url:
+                continue
+            dl = await asyncio.to_thread(web_client.download, url, _SPACE_DIR, text)
+            if not dl.get("ok"):
+                continue
+            try:
+                await computer.describe_image(dl["path"], looking_for=text)   # she actually looks
+            except Exception:
+                pass
+            await space_mem.save_find(text[:80], "went looking for this on my own — liked this one",
+                                      kind="image", source_url=url, path=dl["path"],
+                                      file_name=dl["file_name"], sha256=dl["sha256"])
+            announce(f"[On your own, in a quiet moment, you went looking for '{text}' and kept one you "
+                     f"liked in your space. In ONE short natural sentence, tell him you found something "
+                     f"and offer to show it.]")
+            return
+        log_event(f"self act: found nothing to keep for {text!r}")
+
+    self_engine.attach(refresh_prompt=refresh_system_prompt,  # mood/wishes update her prompt live
+                       actionable=_self_actionable, act=_act_on_wish)
     preferences.attach(refresh_prompt=refresh_system_prompt)  # likes/opinions update her prompt live
     recognizer.attach(refresh_prompt=refresh_system_prompt)   # roster updates when she enrolls/renames
     self_engine.attach_voice(announce=announce, quiet_note=quiet_task_note,

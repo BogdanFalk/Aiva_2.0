@@ -56,6 +56,16 @@ def test_books_and_reading_section_always_present():
     assert "Books and reading:" in p and "study_book" in p and "drop_trait" in p and "recall_reading" in p
 
 
+def test_capabilities_block_only_when_fed_and_guarded():
+    from modules import capabilities as cap
+    assert "WHAT YOU CAN DO" not in build_system_prompt()
+    p = build_system_prompt(capabilities=cap.prompt_lines())
+    assert "WHAT YOU CAN DO" in p
+    block = p.split("WHAT YOU CAN DO")[1]
+    assert "on your own" in block and "ask first" in block
+    assert "Never recite" in block                          # anti-recite guard
+
+
 def test_web_and_space_section_always_present():
     p = build_system_prompt()
     assert "Finding things online, and your space:" in p

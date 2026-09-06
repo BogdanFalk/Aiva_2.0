@@ -10,6 +10,24 @@ from modules.task_memory import TaskMemory
 from modules.tasks import DESTRUCTIVE_RE, Limits, LLMReply, TaskRunner, ToolBox
 
 
+# --- ToolBox handler-merge (regression: web/space verbs were allow-listed but unreachable) ------
+
+async def test_toolbox_add_handlers_makes_allowlisted_tool_reachable():
+    tb = ToolBox({}, schemas=None)                      # no handlers yet
+    blocked = await tb.call("search_web", {"query": "x"})
+    assert blocked["success"] is False and "not available" in blocked["error"]
+
+    async def fake_search(params):
+        await params.result_callback({"success": True, "results": []})
+    tb.add_handlers({"search_web": fake_search})        # merged after construction, like main.py does
+    ok = await tb.call("search_web", {"query": "x"})
+    assert ok["success"] is True                        # allow-listed AND now has a handler
+
+    # a non-allow-listed tool stays blocked even with a handler present
+    tb.add_handlers({"restart_self": fake_search})
+    assert (await tb.call("restart_self", {}))["success"] is False
+
+
 # --- fakes --------------------------------------------------------------------------
 
 def step(n, title, kind="tool", tool="launch_app", args=None, verify="result", **extra):

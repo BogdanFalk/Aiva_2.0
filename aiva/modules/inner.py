@@ -353,17 +353,20 @@ JOURNAL_PROMPT = (
 )
 
 
-# --- initiative: when she reaches out on her own (Phase 4) --------------------------
-# Two SAFE modes only — speech, never autonomous doing:
+# --- initiative: when she reaches out — or acts — on her own (Phase 4/5) ------------
+# Three modes:
 #   'express' — she volunteers a feeling/thought.
-#   'ask'     — she brings up one of her open wishes.
-# Autonomous 'act' is deliberately NOT here: doing things unprompted needs a vetted,
-# reversible action registry; until then reading-on-her-own stays becoming's job.
+#   'ask'     — she brings up one of her open wishes (or proposes an ASK-tier action).
+#   'act'     — she pursues a wish herself, but ONLY with a safe/reversible capability the injected
+#               `actionable(desire)` predicate approves (auto-tier, runnable, not paused). Anything
+#               that spends/sends/edits his files or her code is never 'act' — it stays an 'ask'.
 INITIATIVE = {
     "idle_express_s": 8 * 60,      # voice-idle this long before she'd volunteer a thought
+    "idle_act_s": 10 * 60,         # before she'd go do a safe thing she wants
     "idle_ask_s": 12 * 60,         # longer before she'd raise a wish
     "min_gap_s": 25 * 60,          # never two initiatives closer than this
     "max_per_day": 4,
+    "max_acts_per_day": 3,         # separate, tighter cap on autonomous doing (it can spend)
     "quiet_hours": (1, 8),         # [1:00, 8:00) she stays quiet
     "boot_grace_s": 5 * 60,        # settle after a (re)start before speaking up
     "present_within_s": 180,       # "he's at the PC" = keyboard/mouse within 3 min
@@ -381,8 +384,9 @@ ASK_NOTE = ("[You've been wanting to {desire}, and it's a good, quiet moment. Br
 
 
 def initiative_decision(ctx, cfg=None):
-    """Pure: None | 'express' | 'ask'. `ctx` is a flat dict of everything that matters, so this
-    is fully truth-table testable. The voice LLM may always be MORE reserved than this, never less."""
+    """Pure: None | 'express' | 'ask' | 'act'. `ctx` is a flat dict of everything that matters, so
+    this is fully truth-table testable. The voice LLM may always be MORE reserved than this, never
+    less. 'act' fires only when an actionable (safe) desire exists — the caller decides what's safe."""
     cfg = cfg or INITIATIVE
     perm = ctx.get("permission", "ask")
     if perm == "never":
@@ -405,6 +409,10 @@ def initiative_decision(ctx, cfg=None):
     if perm == "quiet" and not ctx.get("awake"):   # quiet mode never wakes her to speak
         return None
     idle = ctx.get("voice_idle_s", 0)
+    # doing a safe thing she wants beats just asking about it — but under its own tighter daily cap
+    if (ctx.get("has_actionable_desire") and idle >= cfg["idle_act_s"]
+            and ctx.get("acts_today", 0) < cfg["max_acts_per_day"]):
+        return "act"
     if ctx.get("has_askable_desire") and idle >= cfg["idle_ask_s"]:
         return "ask"
     mood_worth = (abs(ctx.get("valence", 0.0)) >= cfg["express_valence"]
@@ -450,14 +458,21 @@ class SelfEngine:
         self._idle_for = lambda: 0.0
         self._user_present = lambda within=180: None
         self._task_busy = lambda: False
+        # autonomous action (Phase 5), wired in main.py; defaults = she can't act (speech only)
+        self._actionable = lambda desire: False   # is this wish safe to pursue on her own?
+        self._act = None                          # async (desire) -> None: the safe dispatcher
         self._boot_mono = time.monotonic()
         self._create_tables()
 
-    def attach(self, *, refresh_prompt=None, preferences=None):
+    def attach(self, *, refresh_prompt=None, preferences=None, actionable=None, act=None):
         if refresh_prompt:
             self._refresh_prompt = refresh_prompt
         if preferences is not None:
             self.preferences = preferences
+        if actionable is not None:
+            self._actionable = actionable
+        if act is not None:
+            self._act = act
 
     def attach_voice(self, *, announce=None, quiet_note=None, is_awake=None, idle_for=None,
                      user_present=None, task_busy=None):
@@ -812,8 +827,8 @@ class SelfEngine:
         ts = self._get(key)
         return _hours_between(ts, self._now()) * 3600.0 if ts else 1e9
 
-    def _day_count(self):
-        raw = self._get("initiative_day", "") or ""
+    def _day_count(self, key="initiative_day"):
+        raw = self._get(key, "") or ""
         today = self._now()[:10]
         if raw.startswith(today + ":"):
             try:
@@ -822,8 +837,19 @@ class SelfEngine:
                 return 0
         return 0
 
-    def _bump_day_count(self, now):
-        self._set("initiative_day", f"{now[:10]}:{self._day_count() + 1}")
+    def _bump_day_count(self, now, key="initiative_day"):
+        self._set(key, f"{now[:10]}:{self._day_count(key) + 1}")
+
+    def _actionable_desire(self):
+        """The top open wish, if it's one she may safely pursue on her own; else None."""
+        top = self._top_desire()
+        if top and self._act is not None:
+            try:
+                if self._actionable(top):
+                    return top
+            except Exception:
+                return None
+        return None
 
     def set_initiative(self, mode):
         mode = (mode or "").strip().lower()
@@ -851,6 +877,8 @@ class SelfEngine:
             "valence": self.state.valence, "arousal": self.state.arousal, "social": self.state.social,
             "focus": bool(self.state.focus),
             "has_askable_desire": self._top_desire() is not None,
+            "has_actionable_desire": self._actionable_desire() is not None,
+            "acts_today": self._day_count("act_day"),
             "secs_since_last_initiative": self._secs_since("last_initiative_ts"),
             "initiatives_today": self._day_count(),
             "secs_since_boot": time.monotonic() - self._boot_mono,
@@ -867,6 +895,8 @@ class SelfEngine:
         now = self._now()
         self._set("last_initiative_ts", now)
         self._bump_day_count(now)
+        if what == "act":
+            return await self._do_act(now)
         if what == "ask":
             d = self._top_desire()
             note = ASK_NOTE.format(desire=d["text"] if d else "something you've been meaning to bring up")
@@ -881,6 +911,31 @@ class SelfEngine:
             self.log(f"self initiative announce failed: {e!r}")
         self.log(f"self initiative: {what}")
         return what
+
+    async def _do_act(self, now):
+        """She pursues a safe wish herself. The desire is consumed and felt (a self_act experience
+        event → mood/diary/preferences) BEFORE dispatch, so she doesn't re-pick it and the doing
+        actually shapes her. The injected `_act` does the work + tells him about it."""
+        d = self._actionable_desire()
+        if not d:
+            return None
+        self._bump_day_count(now, "act_day")
+        self.conn.execute("UPDATE desires SET status='acted', last_touched_ts=? WHERE id=?",
+                          (now, d["id"]))
+        self.conn.commit()
+        try:
+            self.bus.emit("self_act", "self", f"went after something I wanted: {d['text']}",
+                          valence=0.25, arousal=0.1, salience=0.6)
+        except Exception as e:
+            self.log(f"self_act emit failed: {e!r}")
+        try:
+            res = self._act(d)
+            if hasattr(res, "__await__"):
+                await res
+        except Exception as e:
+            self.log(f"self act failed: {e!r}")
+        self.log(f"self initiative: act ({d['text']!r})")
+        return "act"
 
 
 # --- audit / smoke ------------------------------------------------------------------

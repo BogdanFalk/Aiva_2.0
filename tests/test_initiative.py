@@ -108,6 +108,31 @@ def test_always_relaxes_cap():
                                         initiatives_today=INITIATIVE["max_per_day"])) == "express"
 
 
+# -- pure decision: the 'act' branch -----------------------------------------------
+
+def test_actionable_desire_prefers_act_over_ask():
+    ctx = base_ctx(has_actionable_desire=True, has_askable_desire=True)
+    assert initiative_decision(ctx) == "act"
+
+
+def test_act_needs_more_idle_than_express():
+    # idle between express and act thresholds → express, not act
+    idle = (INITIATIVE["idle_express_s"] + INITIATIVE["idle_act_s"]) // 2
+    ctx = base_ctx(has_actionable_desire=True, voice_idle_s=idle, valence=0.6)
+    assert initiative_decision(ctx) == "express"
+
+
+def test_act_daily_cap_falls_back_to_ask():
+    ctx = base_ctx(has_actionable_desire=True, has_askable_desire=True,
+                   acts_today=INITIATIVE["max_acts_per_day"])
+    assert initiative_decision(ctx) == "ask"           # out of acts → she just asks instead
+
+
+def test_act_respects_quiet_hours_and_never():
+    assert initiative_decision(base_ctx(has_actionable_desire=True, hour=3)) is None
+    assert initiative_decision(base_ctx(has_actionable_desire=True, permission="never")) is None
+
+
 # -- initiative_tick ---------------------------------------------------------------
 
 def make_engine(clock):
@@ -169,3 +194,35 @@ async def test_announce_may_be_async():
                      user_present=lambda within=180: True)
     eng.state.valence = 0.7
     assert await eng.initiative_tick() == "express" and len(said) == 1
+
+
+async def test_tick_acts_on_a_safe_wish_then_consumes_and_feels_it():
+    clock = Clock()
+    eng = make_engine(clock)
+    said, acted = [], []
+    eng.attach_voice(announce=lambda note: said.append(note),
+                     idle_for=lambda: 20 * 60, user_present=lambda within=180: True)
+    # everything is actionable; the dispatcher just records the wish it was handed
+    async def fake_act(desire):
+        acted.append(desire["text"])
+    eng.attach(actionable=lambda d: True, act=fake_act)
+    await eng.add_desire("find a cozy desktop wallpaper", "make")
+
+    what = await eng.initiative_tick()
+    assert what == "act" and acted == ["find a cozy desktop wallpaper"]
+    # the wish is consumed (status 'acted', no longer open) so she won't re-pick it
+    assert eng.list_desires(status="open") == []
+    assert any(d["text"] == "find a cozy desktop wallpaper" for d in eng.list_desires(status="acted"))
+    # and she FELT it — a self_act experience event was emitted
+    ev = eng.bus.drain()
+    assert any(e["kind"] == "self_act" for e in ev)
+
+
+async def test_tick_without_act_hook_does_not_act():
+    eng = make_engine(Clock())
+    eng.attach_voice(announce=lambda note: None,
+                     idle_for=lambda: 20 * 60, user_present=lambda within=180: True)
+    eng.attach(actionable=lambda d: True)   # actionable says yes, but no _act dispatcher wired
+    await eng.add_desire("find a wallpaper", "make")
+    # with no _act, _actionable_desire() returns None → falls through to 'ask', never 'act'
+    assert await eng.initiative_tick() == "ask"

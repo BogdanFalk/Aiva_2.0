@@ -9,6 +9,23 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **She knows her own powers, and can act on safe wishes herself** — capability self-awareness plus
+  a filled-in autonomous `act` slot. New `modules/capabilities.py` is an intention-indexed map ("want
+  to know → search/read; want something visual → find & keep; want to build → ask") with `auto`/`ask`/
+  `never` tiers; it renders a "WHAT YOU CAN DO" persona block and backs a new `what_can_i_do` tool, so
+  she reaches for — and asks for — the right power instead of staying narrow. The self-loop's
+  `initiative_decision` gains an `"act"` outcome: when a top wish maps to a safe/reversible capability
+  she pursues it on her own (v1: find-and-keep an image to her space), emits a `self_act` experience
+  event (so doing it shapes her mood/diary/preferences — learn-by-doing), and tells you. Anything that
+  spends, touches your files, or edits her own code (Claude Code builds included) stays **ask-first**;
+  `AIVA_SELF_ACT=0` and `set_initiative('quiet'/'never')` switch autonomy off.
+- **Cost guardrail so she can't run away on spend** — `modules/notify.py` (ntfy push) + `modules/
+  limits.py` (`ServiceLimits`). No global dollar budget by design: each metered service is capped at
+  its own budget/free tier (Tavily monthly, `AIVA_TAVILY_MONTHLY_CAP`; optional ElevenLabs/Deepgram
+  monthly caps), you get an **ntfy alert at ~80% and 100%**, and hitting a cap **pauses only her
+  self-started work that uses it** — the live voice never stops. A dashboard **"Limits & what's
+  paused"** panel shows usage vs cap and exactly what's paused and why. Config: `NTFY_TOPIC`/`NTFY_URL`,
+  `AIVA_NTFY`, per-service caps.
 - **She can reach the internet, and keeps a curated "space" for what she finds** (`modules/web.py`,
   `modules/space.py`). New tools `search_web` (info/images/videos via Tavily), `read_page` (fetch +
   summarise off the voice model's token bucket), `look_at_image` (she actually *sees* an online image
@@ -30,6 +47,10 @@ bullets into a new dated section and bump `aiva/version.py`.
   the dashboard ("Where she stands"); `python -m modules.preferences --show` audits them. Formation
   piggybacks the existing journal digest (no new LLM call). New voice tools `note_preference` /
   `drop_preference`. New persona block "WHERE YOU STAND".
+
+### Fixed
+- The web/space tools were whitelisted for the task runner but never merged into its ToolBox, so
+  "find me X" / build tasks couldn't actually call them — `ToolBox.add_handlers` now merges them in.
 
 ### Changed
 - **PERSONALITY split**: her *tastes* moved out of the frozen "Personality Traits:" list into the

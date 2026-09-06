@@ -197,6 +197,7 @@ def collect():
         data["inner"] = _collect_inner(con)
         data["preferences"] = _collect_preferences(con)
         data["space"] = _collect_space(con)
+        data["limits"] = _collect_limits(con)
         data["stats"] = _collect_stats(con)
         data["becoming"] = _collect_becoming(con)
         data["tasks"] = _collect_tasks(con)
@@ -367,6 +368,39 @@ def _collect_space(con):
     kept = _one(con, "SELECT COUNT(*) FROM finds WHERE status = 'kept'") or 0
     dropped = _one(con, "SELECT COUNT(*) FROM finds WHERE status = 'dropped'") or 0
     return {"items": items, "kept": kept, "dropped": dropped}
+
+
+_SVC_LABEL = {"tavily": "Web search & finds", "tts": "Voice (ElevenLabs)",
+              "stt": "Listening (Deepgram)"}
+
+
+def _collect_limits(con):
+    """Per-service usage vs each service's own budget + what's currently PAUSED and why (so runaway
+    spend can't happen silently). Caps come from env; usage/pause from tables she writes at runtime.
+    Degrades to caps-only (used 0) until those tables exist."""
+    if con is None:
+        return None
+    caps = {"tavily": int(os.getenv("AIVA_TAVILY_MONTHLY_CAP", "1000")),
+            "tts": int(os.getenv("AIVA_TTS_MONTHLY_CHARS", "0")),
+            "stt": int(os.getenv("AIVA_STT_MONTHLY_MINUTES", "0"))}
+    period = datetime.now().strftime("%Y-%m")
+    services = []
+    for svc, cap in caps.items():
+        if not cap or cap <= 0:
+            continue
+        used = _one(con, "SELECT used FROM service_usage WHERE service=? AND period=?",
+                    (svc, period)) or 0
+        paused = bool(_one(con, "SELECT 1 FROM service_pause WHERE service=? AND period=?",
+                           (svc, period)))
+        services.append({"service": svc, "label": _SVC_LABEL.get(svc, svc), "used": int(used),
+                         "cap": int(cap), "pct": min(100, int(100 * used / cap)), "paused": paused})
+    paused = _q(con, "SELECT service, reason, resets_ts FROM service_pause WHERE period=?", (period,))
+    for p in paused:
+        p["label"] = _SVC_LABEL.get(p.get("service"), p.get("service"))
+        p["resets"] = (p.get("resets_ts") or "")[:10]
+    return {"services": services, "paused": paused,
+            "book_cost": round(_one(con, "SELECT COALESCE(SUM(cost_usd),0) FROM books") or 0, 2),
+            "task_cost": round(_one(con, "SELECT COALESCE(SUM(cost_usd),0) FROM tasks") or 0, 2)}
 
 
 def _collect_stats(con, days=7):
@@ -848,6 +882,32 @@ function render(d){
     });
   } else {
     html += `<div class="empty">Nothing gathered yet — she keeps things here when she finds something online she likes. Set TAVILY_API_KEY and restart to switch her web reach on.</div>`;
+  }
+  html += `</section>`;
+
+  // limits & what's paused — per-service budgets + why anything self-started stopped
+  const lim = d.limits;
+  html += `<section><h2>Limits & what's paused <span class="cnt">per-service budgets</span></h2>`;
+  if(lim && (lim.paused||[]).length){
+    lim.paused.forEach(p=>{
+      html += `<div class="item" style="border-left:3px solid var(--bad);padding-left:10px"><div class="t" style="color:var(--bad)">⏸ ${esc(p.label)} paused</div><div class="d">${esc(p.reason)}${p.resets?` · resets ${esc(p.resets)}`:''}</div></div>`;
+    });
+  } else {
+    html += `<div class="d" style="color:var(--good)">Nothing paused — everything's within budget.</div>`;
+  }
+  if(lim && (lim.services||[]).length){
+    html += `<div style="margin-top:10px">`;
+    lim.services.forEach(s=>{
+      const col = s.paused?'var(--bad)':s.pct>=80?'var(--warn,#d98a00)':'var(--good)';
+      html += `<div class="item"><div class="t" style="display:flex;justify-content:space-between"><span>${esc(s.label)}</span><span class="dim">${s.used}/${s.cap} this month</span></div>`
+        + `<div style="height:5px;border-radius:3px;background:var(--panel2);margin:5px 0;overflow:hidden"><span style="display:block;height:100%;width:${s.pct}%;background:${col}"></span></div></div>`;
+    });
+    html += `</div>`;
+  }
+  if(lim){
+    html += `<div class="d" style="margin-top:8px;color:var(--dim)">Per-item caps: books $${(lim.book_cost||0).toFixed(2)} total · tasks $${(lim.task_cost||0).toFixed(2)} total. No global budget — each service is capped at its own free tier, and only her self-started work pauses (her voice never stops).</div>`;
+  } else {
+    html += `<div class="empty">Limits come online after a restart.</div>`;
   }
   html += `</section>`;
 

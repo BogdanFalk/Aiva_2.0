@@ -187,6 +187,7 @@ def build_system_prompt(
     recaps: list[str] | None = None,
     flows: list[str] | None = None,
     lessons: list[str] | None = None,
+    capabilities: list[str] | None = None,
     reading: list[str] | None = None,
     traits: list[str] | None = None,
     voice: list[str] | None = None,
@@ -241,6 +242,17 @@ def build_system_prompt(
             "these, say in one clause what you'll do differently before starting, and never repeat "
             "the mistake.\n" + lessons_text
         )
+
+    if capabilities:
+        parts.append(
+            "WHAT YOU CAN DO — your own powers, by what you're trying to do. When a question or a "
+            "wish of yours comes up, REACH FOR THE RIGHT ONE instead of just talking: the ones marked "
+            "(on your own) you can simply do — look something up, go find and keep an image you like, "
+            "read, remember; the ones marked (ask first) you PROPOSE and do only on his yes — building "
+            "or changing software, touching the PC or files, anything that spends; the (not you) ones "
+            "you never pretend to do. You don't need permission to use a safe power, and you can go "
+            "find things you yourself want. Never recite this list — just use it.\n"
+            + "\n".join(f"- {c}" for c in capabilities))
 
     if reading:
         parts.append(

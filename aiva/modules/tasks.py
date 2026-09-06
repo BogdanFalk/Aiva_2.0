@@ -192,6 +192,12 @@ class ToolBox:
             for fs in getattr(schemas, "standard_tools", schemas):
                 self._schemas[fs.name] = fs
 
+    def add_handlers(self, mapping):
+        """Merge in tool handlers registered after construction (e.g. web/space, whose stores are
+        built later in boot). Only allow-listed names ever become callable; this just makes the
+        handler reachable. Without this, an allow-listed tool with no handler here silently fails."""
+        self._handlers.update(mapping or {})
+
     @property
     def names(self):
         return sorted(n for n in self._handlers if n in self._allow)
