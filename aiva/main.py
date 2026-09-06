@@ -849,6 +849,42 @@ def _print_usage_summary(mic: MicController, usage: UsageTracker, llm_model: str
     print("-------------------------")
 
 
+def _launch_dashboard():
+    """Open her read-only dashboard in the background at boot (separate process). Skips if one is
+    already listening on the port — so a restart (exit 42) doesn't spawn a duplicate or pop a new
+    browser tab, since the previous one is still up. Toggles: AIVA_DASHBOARD_AUTOSTART=0 to disable,
+    AIVA_DASHBOARD_OPEN=0 to run it without opening a browser tab."""
+    if os.getenv("AIVA_DASHBOARD_AUTOSTART", "1") != "1":
+        return
+    import socket
+    import subprocess
+
+    port = int(os.getenv("AIVA_DASHBOARD_PORT", "8760"))
+    try:
+        with socket.socket() as s:
+            s.settimeout(0.3)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                print(f"Dashboard already running at http://127.0.0.1:{port}")
+                return
+    except OSError:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    args = [sys.executable, "dashboard.py"]
+    if os.getenv("AIVA_DASHBOARD_OPEN", "1") == "1":
+        args.append("--open")
+    try:
+        os.makedirs(os.path.join(here, "logs"), exist_ok=True)
+        log = open(os.path.join(here, "logs", f"dashboard-{datetime.now():%Y%m%d}.log"), "a",
+                   encoding="utf-8")
+        subprocess.Popen(
+            args, cwd=here, stdout=log, stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=False)
+        print(f"Dashboard launched at http://127.0.0.1:{port}")
+    except OSError as e:
+        print(f"Dashboard: couldn't launch ({e})")
+
+
 async def main():
     _require_env("OPENAI_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "DEEPGRAM_API_KEY")
 
@@ -981,6 +1017,7 @@ async def main():
     from modules import metrics as _metrics
     from modules.metrics import Metrics
     _metrics.set_recorder(Metrics(memory.conn))  # operations profiler (dashboard Statistics)
+    _launch_dashboard()  # open her read-only dashboard in the background (skips if already up)
     # one OpenAI client for everything out-of-band: embeddings, task planning
     # (the pipeline's LLM service keeps its own)
     from openai import AsyncOpenAI

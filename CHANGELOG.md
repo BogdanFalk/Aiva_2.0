@@ -48,6 +48,10 @@ bullets into a new dated section and bump `aiva/version.py`.
   piggybacks the existing journal digest (no new LLM call). New voice tools `note_preference` /
   `drop_preference`. New persona block "WHERE YOU STAND".
 
+- **Her dashboard opens in the background at boot** — `main.py` launches the read-only dashboard
+  (and a browser tab) when she starts, skipping it if one's already up so a restart doesn't spawn a
+  duplicate or re-pop the tab. Toggles: `AIVA_DASHBOARD_AUTOSTART`, `AIVA_DASHBOARD_OPEN`.
+
 ### Fixed
 - The web/space tools were whitelisted for the task runner but never merged into its ToolBox, so
   "find me X" / build tasks couldn't actually call them — `ToolBox.add_handlers` now merges them in.
