@@ -1128,6 +1128,11 @@ async def main():
     service_limits = ServiceLimits(memory.conn, notifier=notifier, log=log_event)
     print(f"ntfy alerts {'ON' if notifier.available() else 'OFF (set NTFY_TOPIC)'} · "
           f"Tavily cap {service_limits.cap('tavily') or 'off'}/mo")
+    if notifier.available() and os.getenv("AIVA_NTFY_ON_START", "1") == "1":
+        # boot ping (fire-and-forget so it never blocks startup); the marker is still here until 1277
+        _boot_kind = "restarted" if os.path.exists(_RESTART_MARKER) else "is awake"
+        asyncio.create_task(notifier.notify_async(
+            f"Aiva {_boot_kind} (v{_aiva_version}).", title="Aiva", tags=["robot"]))
     _web_llm = openai_llm_call(oai, os.getenv("AIVA_WEB_MODEL") or task_model, label="web")
 
     async def _summarize_page(text, *, focus=None):

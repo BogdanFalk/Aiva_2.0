@@ -48,6 +48,8 @@ bullets into a new dated section and bump `aiva/version.py`.
   piggybacks the existing journal digest (no new LLM call). New voice tools `note_preference` /
   `drop_preference`. New persona block "WHERE YOU STAND".
 
+- **Boot ping over ntfy** — she sends a push to your topic when she comes up ("Aiva is awake" /
+  "restarted"), fire-and-forget so it never blocks startup. Toggle `AIVA_NTFY_ON_START`.
 - **Her dashboard opens in the background at boot** — `main.py` launches the read-only dashboard
   (and a browser tab) when she starts, skipping it if one's already up so a restart doesn't spawn a
   duplicate or re-pop the tab. Toggles: `AIVA_DASHBOARD_AUTOSTART`, `AIVA_DASHBOARD_OPEN`.
