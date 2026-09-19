@@ -1307,7 +1307,7 @@ footer{color:var(--dim);font-size:12px;margin-top:24px;text-align:center}
 .cbtn:disabled,.cbtn:disabled:hover{opacity:.4;cursor:default;border-color:var(--line);background:var(--bg2)}
 .controls.down{opacity:.75}
 .controls .cnote{font-size:12px;color:var(--warn);flex-basis:100%}
-.say{display:flex;gap:8px;align-items:center;margin:0 0 12px}
+.say{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 12px}
 .say input{flex:1;font:inherit;font-size:14px;padding:10px 14px;border-radius:999px;border:1px solid var(--line);
   background:var(--bg2);color:var(--ink);outline:none}
 .say input:focus{border-color:var(--accent)}
