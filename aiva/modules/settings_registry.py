@@ -121,6 +121,13 @@ SETTINGS = (
     S("AIVA_AFFECT_SALIENCE_BASE", "Voice & audio", "float", 0.2, "Smallest weight a vocal-affect reading carries.", "house", min=0.0, max=1.0),
     S("AIVA_AFFECT_SALIENCE_MAX", "Voice & audio", "float", 0.7, "Largest weight a vocal-affect reading carries.", "house", min=0.0, max=1.0),
     S("AIVA_AFFECT_NOTABLE", "Voice & audio", "float", 0.12, "How far off your baseline your voice must be before it counts.", "house", min=0.0, max=1.0),
+    S("AIVA_EMOTION_HEARING", "Voice & audio", "bool", True, "Send each of your turns' audio to an OpenAI audio model to hear how you sound (tired, amused, a laugh, a sigh); it never delays her reply.", "house"),
+    S("AIVA_EMOTION_MODEL", "Voice & audio", "str", "gpt-audio-mini", "The OpenAI audio model that listens for how you sound (gpt-audio-mini, gpt-audio, gpt-audio-1.5).", "house"),
+    S("AIVA_EMOTION_MIN_SECS", "Voice & audio", "float", 0.8, "Turns shorter than this many seconds aren't sent to the emotion model.", "house", min=0.0, max=30.0),
+    S("AIVA_EMOTION_MAX_SECS", "Voice & audio", "float", 15.0, "Only the last this-many seconds of a turn are sent to the emotion model.", "house", min=1.0, max=60.0),
+    S("AIVA_EMOTION_TIMEOUT_S", "Voice & audio", "float", 10.0, "Give up on an emotion reading after this many seconds.", "house", min=1.0, max=120.0),
+    S("AIVA_EMOTION_NOTE_CONFIDENCE", "Voice & audio", "float", 0.7, "How sure the emotion model must be before she gets a note about how you sound.", "sisters", min=0.0, max=1.0),
+    S("AIVA_EMOTION_NOTE_TTL_S", "Voice & audio", "float", 120.0, "A reading that arrives after her reply is noted on your next turn only if it's this fresh, in seconds.", "sisters", min=0.0, max=3600.0),
 
     # --- Avatar & body ---------------------------------------------------------------------------
     S("AIVA_AVATAR_MODEL", "Avatar & body", "str", None, "Aiva's Live2D model file.", "aiva", restart=("aiva",) + _BODY, default_note="assets/avatar/ariu/ariu.model3.json"),
@@ -245,6 +252,7 @@ SETTINGS = (
     S("AIVA_TAVILY_MONTHLY_CAP", "Limits & spend caps", "int", 1000, "Web searches per month before her self-started searching pauses.", restart=("aiva", "saga", "dashboard"), min=0, max=1000000),
     S("AIVA_TTS_MONTHLY_CHARS", "Limits & spend caps", "int", 0, "Your ElevenLabs monthly characters, for alerts only; 0 turns alerts off.", restart=("aiva", "saga", "dashboard"), min=0, max=100000000),
     S("AIVA_STT_MONTHLY_MINUTES", "Limits & spend caps", "int", 0, "Your Deepgram monthly minutes, for alerts only; 0 turns alerts off.", "all", restart=("house", "aiva", "saga", "dashboard"), min=0, max=10000000),
+    S("AIVA_EMOTION_MONTHLY_CALLS", "Limits & spend caps", "int", 0, "Monthly emotion-hearing calls before you get an alert (never paused); 0 turns alerts off.", "all", restart=("house", "aiva", "saga", "dashboard"), min=0, max=10000000),
 
     # --- Notifications ---------------------------------------------------------------------------
     S("AIVA_NTFY", "Notifications", "bool", True, "Send phone alerts through ntfy.", "all"),

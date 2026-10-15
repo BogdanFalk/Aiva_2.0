@@ -87,6 +87,7 @@ class Floor:
         self._queue = []
         self._turns = {}                      # id → Turn, recent only
         self._waiting = {}                    # absent slug → his line for her, until she arrives
+        self.last_user_turn_id = None         # the newest user line's first turn (late emotion readings)
         self._reported = set()                # user turn ids whose errand was already reported back
         self._fs = FloorState()
         self._addr = AddressState()
@@ -291,6 +292,7 @@ class Floor:
         """One final user transcript → decide who he meant, log it, queue her turn (two for
         'both'), tell the other sister what she overheard, and grant if the floor is free.
         Returns the Decision (None when the line was empty)."""
+        self.last_user_turn_id = None
         text = (text or "").strip()
         if not text:
             return None
@@ -351,6 +353,7 @@ class Floor:
         first = self._new_turn(now, mind=minds[0], kind="user", audible=True, addressee=HIM, text=text,
                                cue=cue, source_text=text, speaker_vec=speaker_vec, affect=affect,
                                wake_hint=wake_hint)
+        self.last_user_turn_id = first.id
         if absent_slug is not None:
             self._waiting[absent_slug] = {"by": minds[0], "text": text, "turn": first.id, "at": now}
         turns = [first]
@@ -384,6 +387,26 @@ class Floor:
                  + (f" (errand to {errand})" if errand else ""))
         self._kick(now)
         return d
+
+    def late_affect(self, turn_id, emotion, now=None):
+        """A late emotion-hearing reading for user turn `turn_id` (it finished after the turn went
+        out). A sister whose turn for that line is still QUEUED gets it folded into that turn's
+        affect (so it rides the grant like an in-time reading); every other present sister gets a
+        `proto.Affect` update. Returns {slug: "queued"|"sent"}."""
+        from modules.emotion_hearing import late_affect, merge_affect
+        if not emotion or turn_id is None:
+            return {}
+        now = now if now is not None else self._now()
+        out = {}
+        for t in self._queue:
+            if t.kind in ("user", "both_second") and turn_id in (t.id, t.reply_to):
+                t.affect = merge_affect(t.affect, emotion)
+                out[t.mind] = "queued"
+        aff = late_affect(emotion)
+        for slug in self._present():
+            if slug not in out and self._send(slug, proto.Affect(turn=turn_id, affect=aff), now):
+                out[slug] = "sent"
+        return out
 
     async def _ask_arbiter(self, text) -> Optional[Decision]:
         tail = list(reversed(self.memory.recent_transcript(limit=8)))

@@ -6,7 +6,7 @@ budget / free tier, and when one is exhausted she pauses only the SELF-STARTED w
 is visible on the dashboard with its reason, so nothing stops silently.
 
 - 'tavily' (web search/finds) is a PAUSING service: at cap, her web finds pause until the month resets.
-- 'tts'/'stt' are ALERT-ONLY: counted and alerted, never paused (pausing them would mute her).
+- 'tts'/'stt'/'emotion' are ALERT-ONLY: counted and alerted, never paused (pausing them would mute her).
 
 Monthly counters key on period=YYYY-MM and auto-reset. State on Memory.conn (event-loop thread only).
 `record` is async so the ntfy POST is awaited off the loop.
@@ -22,6 +22,7 @@ SERVICE_LABEL = {
     "tavily": "Web search & finds",
     "tts": "Voice (ElevenLabs)",
     "stt": "Listening (Deepgram)",
+    "emotion": "Hearing how you sound (OpenAI audio)",
     # per-character TTS counters (uncapped: counted for the dashboard, never alert or pause —
     # the capped/alerting aggregate is "tts")
     "tts.aiva": "Voice — Aiva",
@@ -49,6 +50,7 @@ def caps_from_env():
         "tavily": int(os.getenv("AIVA_TAVILY_MONTHLY_CAP", "1000")),
         "tts": int(os.getenv("AIVA_TTS_MONTHLY_CHARS", "0")),
         "stt": int(os.getenv("AIVA_STT_MONTHLY_MINUTES", "0")),
+        "emotion": int(os.getenv("AIVA_EMOTION_MONTHLY_CALLS", "0")),
     }
 
 

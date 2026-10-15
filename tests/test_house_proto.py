@@ -22,6 +22,8 @@ def test_every_type_round_trips():
         p.Reject(reason="duplicate"),
         p.TurnMsg(turn=4, kind="user", audible=True, addressee="him", text="hello", cue=None, wake_hint="saga"),
         p.Overheard(turn=4, line='[He said to Saga: "hello"]'),
+        p.Affect(turn=4, affect={"arousal": -0.2, "valence": 0.1, "label": "tired",
+                                 "emotion": {"labels": [{"name": "fatigue", "confidence": 0.8}], "bursts": []}}),
         p.Interrupt(turn=4), p.State(awake=False, mic_muted=True, present=[]),
         p.Absent(slug="saga", name="Saga"), p.Ping(), p.Shutdown(reason="quit"),
     ]
@@ -73,7 +75,7 @@ def test_direction_tables_cover_the_plan():
     assert {c.T for c in p.CHARACTER_TO_HOUSE} == {"hello", "response", "tool", "speaking", "said", "event",
                                                    "want_floor", "mode", "sleep", "wake", "restart", "control",
                                                    "say", "pong", "bye"}
-    assert {c.T for c in p.HOUSE_TO_CHARACTER} == {"welcome", "reject", "turn", "overheard", "interrupt", "mode",
+    assert {c.T for c in p.HOUSE_TO_CHARACTER} == {"welcome", "reject", "turn", "overheard", "affect", "interrupt", "mode",
                                                    "state", "absent", "ping", "shutdown"}
     assert p.PROTOCOL == 1
 

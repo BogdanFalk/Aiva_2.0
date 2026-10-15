@@ -75,6 +75,7 @@ from modules.avatar_ipc import read_state as _read_avatar_state
 from modules.becoming import Becoming, SELF_FORMING_BASELINE_DESC
 from modules.cat import CAT_NAME_RECOVERY_NOTE, CAT_NAMING_NOTE, DesktopCat
 from modules.ear import MicController, device_index, list_audio_devices  # noqa: F401 (tests import MicController)
+from modules.emotion_hearing import EmotionConfig, describe as describe_emotion, emotion_note
 from modules.eventlog import EventLog
 from modules.house_client import HouseClient
 from modules.house_link import HouseLink, LipSyncTap, MindWatcher, PrivacyGate, UsageTracker
@@ -1028,6 +1029,23 @@ async def main():
     cat.attach_announcer(loop, cat_announce)
 
     # --- messages from the house ----------------------------------------------------------------------
+    emotion_cfg = EmotionConfig.from_env()
+    late_emotion = {"note": None, "at": 0.0}     # a confident late reading, for his NEXT turn
+
+    def _emit_voice_affect(affect):
+        """One `voice_affect` event on her bus: the DSP energy and/or the audio model's labels."""
+        emo = affect.get("emotion") or None
+        heard = describe_emotion(emo) if emo else ""
+        try:
+            experience.emit("voice_affect", "conversation",
+                            f"he sounded {heard or affect.get('label', '')}",
+                            arousal=float(affect.get("arousal", 0.0)), valence=float(affect.get("valence", 0.0)),
+                            social=0.0, salience=float(affect.get("salience", 0.3)),
+                            payload=({"labels": emo.get("labels", []), "bursts": emo.get("bursts", []),
+                                      "model": emo.get("model")} if emo else None))
+        except Exception as e:
+            log_event(f"vocal affect emit error: {e!r}")
+
     async def _turn_notes(msg):
         """Speaker identity (her own roster) + vocal affect, from the vectors the house forwarded."""
         notes = []
@@ -1042,12 +1060,16 @@ async def main():
                 log_event(f"speaker id error: {e!r}")
         affect = getattr(msg, "affect", None)
         if affect:
-            try:
-                experience.emit("voice_affect", "conversation", f"he sounded {affect.get('label', '')}",
-                                arousal=float(affect.get("arousal", 0.0)), valence=float(affect.get("valence", 0.0)),
-                                social=0.0, salience=float(affect.get("salience", 0.3)))
-            except Exception as e:
-                log_event(f"vocal affect emit error: {e!r}")
+            _emit_voice_affect(affect)
+        if isinstance(msg, proto.TurnMsg) and msg.kind in ("user", "both_second"):
+            note = emotion_note((affect or {}).get("emotion"), emotion_cfg.note_confidence)
+            fresh = time.monotonic() - late_emotion["at"] <= emotion_cfg.note_ttl_s
+            if note is None and late_emotion["note"] and fresh:
+                note = late_emotion["note"]
+            late_emotion["note"] = None
+            if note:
+                notes.append(note)
+                log_event(f"emotion note: {note}")
         return notes
 
     async def on_house_message(msg):
@@ -1082,6 +1104,13 @@ async def main():
             notes = await _turn_notes(msg)
             link.add_overheard(msg.line, notes=notes)
             speaking_state["last_activity"] = time.monotonic()
+        elif isinstance(msg, proto.Affect):
+            # how he sounded on a turn that already went out: felt now, noted on his next turn
+            affect = msg.affect or {}
+            _emit_voice_affect(affect)
+            note = emotion_note(affect.get("emotion"), emotion_cfg.note_confidence, late=True)
+            late_emotion["note"], late_emotion["at"] = note, time.monotonic()
+            log_event(f"late affect for turn {msg.turn}: {describe_emotion(affect.get('emotion')) or '-'}")
         elif isinstance(msg, proto.Interrupt):
             log_event("interrupted by the house")
             await link.interrupt()

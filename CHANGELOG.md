@@ -9,6 +9,18 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **She hears how you sound, not just how loud.** Per user turn the house sends the turn's audio
+  (last 15 s, as WAV) to an OpenAI audio model (`AIVA_EMOTION_MODEL`, default `gpt-audio-mini`) in
+  the background and gets back a few emotions from a fixed vocabulary (fatigue, amusement,
+  frustration, warmth...), vocal bursts (laugh, sigh, yawn, groan...) and valence/arousal
+  (`modules/emotion_hearing.py`). It never delays her reply: a reading that's in before the turn
+  goes out rides on it; a later one (the usual case, ~1.5 s) is folded into a still-queued turn or
+  sent as the new `affect` house message. Her `voice_affect` event now carries the labels and
+  bursts, and a confident reading (`AIVA_EMOTION_NOTE_CONFIDENCE`, 0.7) gives her a short note —
+  on this turn, or "a moment ago he sounded..." on your next one. Skips turns under 0.8 s and
+  unverified wakes; `AIVA_EMOTION_HEARING` toggles it; `AIVA_EMOTION_MONTHLY_CALLS` is an
+  alert-only cap; calls show as `llm.emotion` in Statistics (audio prices in `AUDIO_IN_RATES` are
+  estimates).
 - **The house hears with Deepgram Flux, which also decides when you've finished talking.**
   `AIVA_STT=flux` (the new default; `nova` keeps the old nova-3 + Silero VAD + smart-turn path) —
   Flux's end-of-turn (`AIVA_FLUX_EOT_THRESHOLD`, default 0.7; `AIVA_FLUX_EOT_TIMEOUT_MS`, default

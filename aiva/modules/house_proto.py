@@ -206,6 +206,16 @@ class Overheard(Msg):
 
 
 @dataclass(kw_only=True)
+class Affect(Msg):
+    """A late reading of how he sounded on user turn `turn` (the emotion-hearing side-call
+    finished after that turn had already gone out). `affect` is the model's contribution only
+    (`emotion_hearing.late_affect`): arousal/valence/salience/label + `emotion`. Never runs her LLM."""
+    T: ClassVar[str] = "affect"
+    turn: int
+    affect: dict
+
+
+@dataclass(kw_only=True)
 class Interrupt(Msg):
     T: ClassVar[str] = "interrupt"
     turn: int
@@ -241,7 +251,7 @@ class Shutdown(Msg):
 
 CHARACTER_TO_HOUSE = (Hello, Response, Tool, Speaking, Said, Event, WantFloor, Mode, Sleep, Wake, Restart, Control,
                       Say, Pong, Bye)
-HOUSE_TO_CHARACTER = (Welcome, Reject, TurnMsg, Overheard, Interrupt, Mode, State, Absent, Ping, Shutdown)
+HOUSE_TO_CHARACTER = (Welcome, Reject, TurnMsg, Overheard, Affect, Interrupt, Mode, State, Absent, Ping, Shutdown)
 MESSAGE_TYPES = {cls.T: cls for cls in CHARACTER_TO_HOUSE + HOUSE_TO_CHARACTER}
 
 

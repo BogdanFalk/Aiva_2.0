@@ -8,10 +8,11 @@ verified transcript must contain a name), the ONE turn detector in the stage agg
 `flux` = Deepgram Flux's own end-of-turn, no local VAD; `nova` = nova-3 + Silero VAD + smart-turn), the Floor (who speaks, who overhears, private sister talk, caps), the socket
 server the sisters connect to, global hotkeys, the conversation log in aiva/house.db, and the
 read-only dashboard. It computes the speaker voiceprint and vocal affect ONCE per user turn and
-forwards them so each sister matches against her own roster.
+forwards them so each sister matches against her own roster. It also starts the emotion-hearing
+side-call (`modules/emotion_hearing.py`, an OpenAI audio model) per turn in the background: a
+reading that is in before the turn goes out rides on it, a later one is sent as `proto.Affect`.
 
-It has no LLM of its own except the arbiter side-call (who did he mean, when no name was said)
-and never speaks. Sisters come and go; the house stays up. Exit code 42 = restart (start_house.bat).
+It has no LLM of its own except the arbiter and emotion side-calls, and never speaks. Sisters come and go; the house stays up. Exit code 42 = restart (start_house.bat).
 
 Hotkeys: F9 mute/deafen, F10 interrupt whoever is speaking, AIVA_HOTKEY_SISTER_TALK (default
 Ctrl+Alt+P) flip sister talk private/audible, Ctrl+Alt+R restart the sisters, Ctrl+Alt+X quit all.
@@ -70,6 +71,7 @@ from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransp
 from pipecat.workers.runner import WorkerRunner
 
 from modules import character, house_proto as proto, metrics as _metrics
+from modules.emotion_hearing import EmotionConfig, EmotionHearing, describe as describe_emotion, merge_affect
 from modules.ear import ActivityWatcher, MicController, UserAudioTap, device_index, list_audio_devices, native_rate
 from modules.eventlog import EventLog
 from modules.house_floor import Floor
@@ -222,6 +224,7 @@ async def main():
     # --- the arbiter (only when nobody was named and both sisters are present) -------------------
     from openai import AsyncOpenAI
     arbiter = None
+    oai = None
     if os.getenv("OPENAI_API_KEY"):
         oai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"),
                           max_retries=int(os.getenv("AIVA_LLM_MAX_RETRIES", "5")))
@@ -290,13 +293,25 @@ async def main():
         print("Speaker embedding OFF (set AIVA_SPEAKER_ID=1 and provide the model)")
     vocal_affect = VocalAffect(AffectConfig.from_env(),
                                enabled=os.getenv("AIVA_VOICE_AFFECT", "1") == "1", log=log_event)
-    pending = {"vec": None, "affect": None}
+    # how he SOUNDS, by an OpenAI audio model — a background side-call that never delays her reply
+    emotion = EmotionHearing(EmotionConfig.from_env(), oai, limits=service_limits, log=log_event)
+    if emotion.enabled:
+        print(f"Emotion hearing ON ({emotion.cfg.model})")
+    else:
+        print("Emotion hearing OFF (set AIVA_EMOTION_HEARING=1 and OPENAI_API_KEY)")
+    pending = {"vec": None, "affect": None, "emo": None}
+    emo_tasks = set()
 
     async def _on_user_final(text):
         pcm = tap.take_segment()
-        pending["vec"], pending["affect"] = None, None
+        pending["vec"], pending["affect"], pending["emo"] = None, None, None
         if len(pcm) < int(16000 * 0.3) * 2:
             return
+        if emotion.worth_hearing(pcm) and mic.visibly_awake and not mic.muted:
+            t = asyncio.create_task(emotion.hear(pcm))       # started first, awaited by nobody here
+            emo_tasks.add(t)
+            t.add_done_callback(emo_tasks.discard)
+            pending["emo"] = t
         if vocal_affect.enabled:
             try:
                 pending["affect"] = await asyncio.to_thread(vocal_affect.analyze, pcm)
@@ -313,9 +328,32 @@ async def main():
     async def _on_user_turn(text):
         hint = mic.wake_hint
         mic.wake_hint = None
-        vec, affect = pending["vec"], pending["affect"]
-        pending["vec"], pending["affect"] = None, None
+        vec, affect, emo = pending["vec"], pending["affect"], pending["emo"]
+        pending["vec"], pending["affect"], pending["emo"] = None, None, None
+        if emo is not None and emo.done():
+            # the reading beat the end of turn: it rides this turn (rare with Flux, but free)
+            try:
+                affect = merge_affect(affect, emo.result())
+            except Exception as e:
+                log_event(f"emotion merge failed: {e!r}")
+            emo = None
         await floor.submit_user_turn(text, speaker_vec=vec, affect=affect, wake_hint=hint)
+        turn_id = floor.last_user_turn_id
+        if emo is not None and turn_id is not None:
+            t = asyncio.create_task(_late_emotion(emo, turn_id))
+            emo_tasks.add(t)
+            t.add_done_callback(emo_tasks.discard)
+
+    async def _late_emotion(task, turn_id):
+        """Still listening when the turn went out: fold it into a queued turn or send an update."""
+        try:
+            reading = await task
+        except Exception:
+            return
+        if reading:
+            where = floor.late_affect(turn_id, reading)
+            log_event(f"emotion late for turn {turn_id} ({describe_emotion(reading)}): "
+                      + (", ".join(f"{k}={v}" for k, v in where.items()) or "nobody home"))
 
     def _name_check(text):
         return bool(which_names(text, namesets))

@@ -147,6 +147,13 @@ def test_registered_defaults_are_the_codes_defaults(clean_env):
     caps = caps_from_env()
     assert caps["tavily"] == _d("AIVA_TAVILY_MONTHLY_CAP") and caps["tts"] == _d("AIVA_TTS_MONTHLY_CHARS")
     assert caps["stt"] == _d("AIVA_STT_MONTHLY_MINUTES")
+    assert caps["emotion"] == _d("AIVA_EMOTION_MONTHLY_CALLS")
+
+    from modules.emotion_hearing import EmotionConfig
+    e = EmotionConfig.from_env()
+    assert (e.enabled, e.model) == (_d("AIVA_EMOTION_HEARING"), _d("AIVA_EMOTION_MODEL"))
+    assert (e.min_secs, e.max_secs, e.timeout_s) == (_d("AIVA_EMOTION_MIN_SECS"), _d("AIVA_EMOTION_MAX_SECS"), _d("AIVA_EMOTION_TIMEOUT_S"))
+    assert (e.note_confidence, e.note_ttl_s) == (_d("AIVA_EMOTION_NOTE_CONFIDENCE"), _d("AIVA_EMOTION_NOTE_TTL_S"))
 
 
 def test_readonly_constants_match_their_modules():

@@ -104,6 +104,18 @@ LLM_RATES = {
     "gpt-5.4-mini": (0.75, 4.50),
     "gpt-5.4-nano": (0.20, 1.25),
     "text-embedding-3-small": (0.02, 0.0),
+    # audio-input models (emotion hearing): TEXT token rates. ESTIMATES from OpenAI's public
+    # pricing as last known (2026-10) — check platform.openai.com/docs/pricing and correct.
+    "gpt-audio-mini": (0.60, 2.40),
+    "gpt-audio": (2.50, 10.00),
+    "gpt-audio-1.5": (2.50, 10.00),
+}
+
+# $ per 1M AUDIO input tokens (~10 tokens per second of speech). ESTIMATES, as above.
+AUDIO_IN_RATES = {
+    "gpt-audio-mini": 10.00,
+    "gpt-audio": 32.00,
+    "gpt-audio-1.5": 32.00,
 }
 
 
