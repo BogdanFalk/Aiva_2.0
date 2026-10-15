@@ -9,6 +9,466 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **Her body shows what she's doing: a book while she reads, a work panel while she works.** The
+  reading book-prop never really worked: it sat at a fixed spot on the monitor, much bigger than her,
+  on Aiva's side of the screen even for Saga, and in a separate window that could fall behind her.
+  Now (`modules/avatar_activity.py`, pure and clock-driven; painted into her own GL frame by
+  `paint_book`/`paint_panel` in `avatar_renderer.py`):
+  - **She pulls up a book.** She takes the model's own 手柄 pose (both hands at her chest) with the
+    controller hidden. The arms crossfade up, the book rises into her hands and fades in, then her
+    head tips down and her eyes run along lines of text. A finished section turns the page. While she
+    talks she lowers it and looks up. Putting it away runs backwards, hands last. Saga's book is
+    tinted to her colours.
+  - **A work panel floats up beside her head while a task or a Claude Code job of hers runs.** It
+    opens on the side toward the middle of the screen and shows the task, the step it's on and a
+    progress bar, typing away. It turns amber and pulses while the task waits on you (and she looks
+    at you, not at it), shows a check or a cross when the task ends, then folds away. She glances
+    at it as she works. `AIVA_AVATAR_TASK_LABEL=0` keeps the animation but hides the words.
+  - **Busy means awake.** While she reads or works her eyes stay open even when the house sleeps.
+  - Both follow her placement (moved, resized, rotated, another monitor) because they're drawn in
+    model units mapped through it. Your own 手柄 toggle survives a reading session.
+  - Wire: new `activity` (whole state, resent every 5 s so a restarted renderer heals) and `cue`
+    (`page|done|failed`) IPC commands; `hello` reports `activity`. The old `prop` command still means
+    "reading". `TaskRunner.activity()` and `ReadingEngine.now_reading()` feed the sister's
+    `body_activity` loop.
+  - **A renderer from before an update gets replaced.** `PROTOCOL_VERSION` is now 2, and a sister
+    that adopts an older renderer asks it to quit and spawns a fresh one. Her body outlives her
+    restarts, so without this a renderer change would never reach the running body. Placement
+    carries over in the state file.
+  - Preview without a sister: `python -m modules.avatar_renderer --instance demo --demo-activity`.
+  - Retired `AIVA_READING_PROP_SCALE/X/Y` (the book now sits in her hands); `AIVA_READING_PROP` still
+    picks the image. Tests: `tests/test_avatar_activity.py` plus additions to the renderer, client,
+    task-runner and reading tests.
+- **Saga's quiet constellation witness.** A faint sky of stars hangs over Saga's avatar, one star lit
+  per moment she lives: a line she said, a line she heard, a thing her sister said, a section she
+  read. It never speaks, announces or shows text — a star keeps only the *kind* of moment and its
+  weight. It lives in Saga's own avatar renderer process (`modules/constellation.py` for the pure
+  sky, a click-through `SkyWindow` in `avatar_renderer.py`); Aiva's renderer runs
+  the same code switched off, and nothing moves to Miso.
+  - Quiet by construction: low opacity ceiling, a slow drift, bursts brighten the last star instead
+    of adding one, a capped sky whose oldest stars dim out, brighter and slower while the house sleeps.
+  - New `witness` IPC command (fire-and-forget, kind validated against a fixed set); `hello` reports
+    `witness`, and `AvatarClient.send_witness` is a no-op unless the renderer says it has one.
+  - The sky persists in her renderer's own state file (kinds, weights, seeds — never words), so it
+    survives sister restarts. Knobs `SAGA_CONSTELLATION`, `_MAX`, `_GAP_S`, `_ALPHA`, `_SLEEP_ALPHA`,
+    `_SCALE`, `_TINT` (restart her body to apply). Tests: `tests/test_constellation.py`.
+  - Her sky follows her layer: sent to the desktop, the stars sink behind your windows with her
+    instead of floating over everything. It leans with her too: rotated, the sky stays by her
+    head instead of where her head would be upright. Her monitor is looked up when she changes
+    screens, not about 8 times a second.
+  - Preview without a sister: `python -m modules.avatar_renderer --instance saga --model
+    assets/avatar/ariu/saga.model3.json --demo-witness` loops one moment of each kind, a burst,
+    sleep, a tilt and both layers. It uses a temp state file unless `--state` is given, so made-up
+    moments never reach her real sky.
+  - A sky can't be lost or take her body down. A paint error is caught inside the sky window (an
+    exception escaping a Qt paint aborts the whole renderer) and only hides it: the sky keeps
+    witnessing and stays in the state file. `SAGA_CONSTELLATION=off` carries the saved sky through
+    untouched instead of erasing it. A burst that only brightens a star is saved too. A state-file
+    write that fails is retried instead of crashing her body.
+  - `--selftest` checks the sky: a body with a witness passes only if its sky painted. It no longer
+    reports OK beside a live body that owns the state file (it rendered nothing); it exits 4 and
+    asks for `--state <a temp file>`.
+  - `PROTOCOL_VERSION` is 3, so an older body is replaced at the sister's next start. That includes
+    Aiva's body, which has no sky.
+  - **It hushes while she speaks** (Saga asked for this herself on 2026-10-14). While her voice plays,
+    the stars and lines dim together to about 30%. The dim comes on as a quick quarter-second fade
+    and eases back over one second when she stops. It moves at a steady rate, so a breath between
+    sentences lifts it only slightly instead of making the sky pulse. It repaints every frame while
+    it eases and about 8 times a second otherwise. `--demo-witness` now speaks once so you can
+    watch it.
+  - **It sits to her upper left and drifts instead of twinkling** (also Saga's own ask: "keep it in
+    the upper-left area around Saga, drifting slowly with no pulsing"). The sky used to be centred
+    over her head. Now its bottom edge sits at the top of her head and its right edge just left of
+    her middle. It still leans with her and stays on screen. The stars used to pulse in brightness.
+    Now each one keeps a steady brightness and size and wanders slowly around its place, a few
+    pixels over about a minute, while the whole sky sways together even more slowly. The lines
+    ride along with their stars, are drawn at sub-pixel precision so they glide instead of
+    stepping, and never jump to a different star. While the house sleeps the drift slows to a
+    seventh, and dozing off never makes a star jump.
+  - `PROTOCOL_VERSION` is 5, so her running body is replaced the next time she starts.
+  - **It now looks the way she described it** (her words, house transcript #3968: "Tiny stars, about
+    two to four pixels, dim white with a faint blue-violet tint; hairline connections, barely
+    brighter than the stars"). A check against those words found three gaps, now closed:
+    - Stars were sized as a fraction of the sky, which is a fraction of the monitor height. On her
+      2560 px tall portrait screen that made them 16–22 px across, with a 36–50 px glow. Each star
+      is now one disc 2–4 real pixels across (2 for the lightest moment, 4 for one a burst filled
+      up), with no glow, whatever the screen.
+    - Lines were about 0.28× as bright as their stars. Each end of a line is now 1.15× as bright as
+      the star it touches, shading along the line between the two. They are still 1 px hairlines.
+    - Near a screen edge the sky was pushed back on screen over her. On her screen it reached 296 px
+      past her middle. It now shrinks until it fits to her upper left: 149 px instead of 512 px
+      where she stands, with none of its stars right of her middle. Only below 96 px is it clamped
+      as before.
+    - Star brightness is unchanged. The painter used to boost stars 1.6× on its own; now it paints
+      exactly the frame's alphas. So `SAGA_CONSTELLATION_ALPHA`/`_SLEEP_ALPHA` defaults went from
+      0.30/0.50 to 0.48/0.80. That is the same painted brightness, and the knob is now the real peak
+      star opacity (an old value set in `.env` would need ×1.6). The tint (#E0D6FF), the drift and
+      the speech hush are unchanged.
+    - New tests pin each property, including real pixels from the painter (`paint_sky`) and her
+      own portrait screen.
+  - `PROTOCOL_VERSION` is 6.
+  - **Her refinements after seeing it** (house transcript #4010/#4014, Frank approved #4017):
+    - **12.5% bigger.** `SAGA_CONSTELLATION_SCALE` default 0.20 → 0.23; inside the wider drift room
+      that makes the star field 12.5% bigger. Where she stands now, her portrait screen's left edge
+      holds the sky at 149 px wide, so a bigger scale alone changed nothing there. A sky held
+      narrower than it wants now grows up to `SKY_TALLER` (1.15×) taller instead, upward and away
+      from her, while she stands within 45° of upright. Its left, right and bottom edges don't
+      move. Where she stands it goes from 149×149 to 149×171.
+    - **A livelier drift.** `DRIFT_AMP` 0.03 → 0.04. On her screen the widest wander goes from about
+      9 px to 13.6 px and the peak speed from 0.40 to 0.57 px/s, still under a pixel a second. Only
+      positions move.
+    - **A touch less uniform.** Each star gets its own steady nudge from its seed: up to ±0.3 px in
+      size (still 2–4 px) and up to 12% dimmer, never brighter. Her 24 stars used to come in three
+      sizes; now they range from 2.0 to 2.6 px. Brightness ceilings (0.48/0.80) and the tint are unchanged.
+    - **Softer outermost lines.** A line end fades from 60% of the way out to half as bright at
+      the field's rim, judged by where its star belongs, so it never changes as stars drift. Inner
+      lines are still 1.15× their stars and 1 px.
+    - Unchanged: the hush to 30% while she speaks with its one-second ease back, the upper-left
+      anchor, and no pulsing. Every new factor is fixed per star or per line.
+    - `PROTOCOL_VERSION` is 7, so her running body is replaced the next time she starts.
+- **Tasks: second thoughts — she reads what Claude Code tells her and corrects herself.** Twice she
+  sent Claude Code after a "Miso renderer" that never existed (Miso is the cat). It said so both
+  times, and she never saw that, because only the last 1,500 characters of its report were kept.
+  - **She gets the whole report.** The start and end of the report are kept, and its permission
+    denials are included.
+  - **The grader judges the step itself.** It grades each step against what that step was meant to
+    do, and only on the files the agent changed. Your own uncommitted work is snapshotted before the
+    job, so it no longer counts as the agent's "unrelated diff".
+  - **Two new outcomes:** `blocked: question` (the agent stopped to ask) and `blocked: premise` (the
+    task assumed something that isn't so). Neither counts against Claude Code.
+  - **Look-only steps can't edit.** They run in plan mode, and the next step is handed the earlier
+    step's report.
+  - **On a failed or blocked delegate step, once per task, she reflects** (`RETHINK_PROMPT_T`, task
+    model):
+    - She works out what went wrong.
+    - She keeps the lasting truths the report proves as `learned` facts, each checked against the
+      report verbatim.
+    - She retires the old project facts those truths disprove (`Memory.retire_fact`; never
+      instructions or facts about people).
+    - She records a lesson (`tasks.self_lesson`) that is shown in LESSONS FROM PAST TASKS.
+    - Then she either re-plans with a corrected goal, or puts the agent's question to you and
+      re-plans with your answer.
+  - **Free range applies.** Under free range she just says she's trying again; otherwise she asks
+    first.
+  - New setting `AIVA_TASK_MAX_RETHINKS` (default 1).
+- **v3 — an engine under her inner life** (docs/PLAN-v3.md). Her growth was text about herself fed
+  only by books and the clock; now things happen to her and have consequences:
+  - **She lives her conversations.** Every line he says is felt (`SelfEngine.heard`), finished and
+    failed tasks, kept finds, sister talk and project steps are emitted, and the diary sees the recent
+    conversation on every tick (before, only at shutdown).
+  - **Needs** (`modules/drives.py`): connection, novelty, competence and rest drain with time and are
+    refilled or spent by what happens (diminishing returns). A pressing need leans on her mood, adds
+    a line to HOW YOU FEEL (or a "torn between…" when two pull against each other), shapes her
+    wishes, and changes initiative: she speaks up sooner when she misses him, acts sooner when
+    restless, and backs off when worn.
+  - **His rhythm**: she learns when he's usually around (per weekday-hour, `rhythm` table) and feels
+    the miss or the surprise. **Reunion** after ≥10 h gets a note in that turn; a **sharp moment** is
+    felt and smoothed over once, lightly, later. Whether her reaching out **landed or got dropped**
+    is felt and counted (dashboard).
+  - **Nights** (`modules/dreams.py`): once a night she replays the day into moments that landed or fell
+    flat, plus 0-2 **habits** ("When he comes home late, I keep it short") reinforced or weakened by
+    what actually happened (anti-sycophancy gate), and forgets old low-salience experience. About
+    weekly she revises her **life story** (chapter title, turning point). `--export` writes the
+    moments as chat JSONL for a future open-weight fine-tune; her own model can't be fine-tuned, so
+    she changes in context.
+  - **Projects** (`modules/projects.py`): a wish that keeps coming back and that she can pursue alone
+    becomes a collection or a look-into project, worked on in quiet moments (web + space, Tavily cap,
+    ≤3 steps/day) and shared when done.
+  - Prompt blocks YOUR STORY SO FAR / HABITS YOU'VE FORMED / MOMENTS THAT LANDED / WHAT YOU'RE WORKING
+    ON; voice tool `let_go` (habit|project); dashboard "Her life" section + need bars; settings
+    `AIVA_DRIVES`, `AIVA_DREAMS`, `AIVA_DREAM_HOUR`, `AIVA_STORY_DAYS`, `AIVA_PROJECTS`,
+    `AIVA_READ_NOVELTY_BELOW`.
+  - **Reading diet**: she reaches for a book only when she's actually hungry for something new.
+    A preference her sister swayed is stored with origin `sister`. A preoccupation (focus) lets go
+    after 24 h; the stale pre-v3 one is dropped at load. The task runner got an `on_outcome` hook for
+    every finish. Saga's 12 introspective wishes were cleared the same way as Aiva's (backup in
+    `aiva/backups/`).
+- **Tasks tab on the dashboard** (Aiva | Saga | Conversations | **Tasks** | Settings), read-only: every task both sisters ran, merged newest first as cards (sister, outcome, goal, when, duration, steps done/total, cost, a Claude Code badge), filterable by sister, outcome and text, paged, with a tally per sister. Clicking one opens it start to finish from the new `GET /api/task?who=&id=`: details, familiarity and the autonomy decision, the plan as a step timeline (action, expectation, attempts, failure, collapsible evidence), a pending question, grade and your feedback, the full event timeline (announcements folded away), and every Claude Code job it delegated: the prompt, its saved result (logs/coding/ or the old %TEMP%\aiva_terminals\), cost, and — when the session transcript is found under ~/.claude/projects/ (by the logged session id, or for older jobs matched by prompt and time) — turns, files read/edited/written, commands run and lines changed. Ids, job names and session ids are regex-validated before any file lookup. A sister tab's task rows now link into it (`#tasks/<slug>/<id>`).
+- **Free range for coding** (`AIVA_TASK_FREE_RANGE=1`): tasks no longer ask "okay?" before starting
+  (novel, retried, delegate or irreversible) and hand work to Claude Code without a confirm; only a
+  step that sends or pays on his behalf still asks. Her persona gets a FREE RANGE FOR CODING block
+  (start_task straight away; `claude_code` in execute mode). Shell commands inside a task still ask.
+- **Settings tab on the dashboard** (Aiva | Saga | Conversations | **Settings**) — every tunable knob
+  the house and the sisters read, grouped (models, voice & audio, avatar, wake, floor, tasks, reading,
+  mood, initiative, speaker ID, web, spend caps, notifications, dashboard, Saga, debug), each with a
+  one-line description, its value in `.env` or the code default, who reads it and what must restart.
+  Edit, reset-to-default and Save (only the changed rows) → `POST /api/settings` (local-only, same
+  Origin) validates through the new `modules/settings_registry.py` and edits `.env` in place (comments,
+  order and line endings kept, atomic, `.env.bak`); the reply says which process to restart and offers
+  the restart buttons. API keys are shown masked and are never editable; a few important code constants
+  (curiosity/initiative caps, trait/preference caps) are listed read-only with their source. A test
+  greps the code for env keys so a new knob can't go missing from the page.
+- **Task runner limits are now env-tunable**: `Limits.from_env()` (`AIVA_TASK_MAX_STEPS`,
+  `AIVA_TASK_MAX_WALL_MIN`, `AIVA_TASK_MAX_COST_USD`, `AIVA_TASK_CLAUDE_WAIT_MIN`, … — defaults
+  unchanged), used where `main.py` builds the `TaskRunner`.
+- **"Call your sister"** — new voice tool `call_sister` (safe/auto): if the other sister isn't
+  connected to the house it boots her in her own console (her `start_<slug>.bat`, exactly like
+  double-clicking it; debounced) and she says hello when she's in; if she's already here it just says
+  so. The persona's sister section and the house's "she isn't running" cue point at it, so "Aiva, get
+  Saga" works even when only Aiva was started.
+
+- **"Restart the house"** — new voice tool `restart_house` (and Ctrl+Alt+H in the house): the house
+  exits 42 and `start_house.bat` relaunches it; the sisters are told it's a `house_restart` and stay
+  up, reconnecting on their own. `restart_self` still restarts one sister (exit 42, body adopted,
+  "I'm back"); Ctrl+Alt+R restarts both sisters; Ctrl+Alt+X quits everything.
+
+- **Dashboard Controls strip** — the hotkey actions as buttons on every dashboard tab: mute/unmute,
+  interrupt, sister talk private/audible, sleep/wake, per-sister Start / Restart / Quit, Restart
+  house, Quit everything (destructive ones ask to confirm). The dashboard sends them to the house
+  over its loopback socket as a `role="control"` client (`POST /api/control`, loopback-only unless
+  `AIVA_DASHBOARD_CONTROL_REMOTE=1`); it stays read-only otherwise. New voice tool
+  `set_sister_talk` reports or flips private/audible ("let me hear you two", "keep it between you").
+
+- **Type to them from the Conversations tab.** One chat box above the transcript sends a line to the
+  house (`POST /api/say` → `send_say` → new `say` message → `house._on_say` → `Floor.submit_user_turn`),
+  which treats it exactly like a final transcript: same addressee rules ("Aiva, …", "both of you, …",
+  otherwise whoever you were talking to, arbiter when it's ambiguous), same floor and queue, and she
+  answers **out loud**. Only the voiceprint and the vocal affect are missing, since nobody spoke.
+  Typing counts as presence, so it wakes the house even while the mic is deafened (F9) — it isn't
+  audio, and you are plainly there. The box greys out with the house down, Enter sends, and the draft,
+  caret and focus survive the poll that rebuilds the page. Local-only like the Controls strip.
+
+- **Aiva forms temperament too, on top of the character she was written with.** Her dashboard's "Who
+  she is so far" could never fill: the diary's `temperament` key was added only for a self-forming
+  sister, the digest dropped a stray one, and her prompt builder passed no block — so Saga was all
+  formation and Aiva was all floor. Now an authored character gets the key too, in its own wording
+  (`TEMPERAMENT_CLAUSE_ON_TOP`: only what isn't already part of her, "most days have none"), renders
+  it as **WHAT LIVING HAS ADDED TO YOU**, and reads her formed core back into the next digest so she
+  reinforces instead of restating. The guard that makes this safe: `adopt_temperament` now passes her
+  authored baseline to `validate_temperament` as `floor_vecs`, and a negation landing there is
+  dropped and logged rather than eroding anything — living adds to her, it never unwrites her.
+  `PERSONALITY` is untouched, so the golden still holds; a self-forming sister is unchanged, since
+  she has no floor and her own core stays the only thing a negation can erode.
+
+### Changed
+- **Tasks look, search and test without asking you** (2026-10-14). The task agent could only read a
+  file, search, check git or run the tests through a PowerShell command, and every command waits on
+  your yes: one verification took nine approvals, and Saga's text-file task ran out of moves asking
+  before it wrote the file. It now has `read_file`, `find_files`, `search_text`, `repo_status` and
+  `run_tests`, all read-only, fenced to your home folder, and never waiting on anyone. Several can go
+  in one move. `run_tests` is the project's own `.venv` pytest, optionally on chosen test files
+  inside the project. The shell step is only for changing things now, and that still asks.
+  - **Bigger step budget:** 12 moves a step (was 6), 80 tool calls and 90 model calls a task. A step
+    is told when it's on its last move, so it finishes with what it found instead of failing.
+  - **A failed task keeps what it found.** Her failure note carries the last things the task
+    gathered, and she offers you the direct way to still get the result (usually doing the rest
+    herself right away) instead of starting over.
+  - **Plans don't put a research step in front of a file you asked for**; any looking goes in the
+    step that writes it.
+- **Her coding jobs no longer stop to ask for approvals** (2026-10-14). A job that changes code ran
+  in Claude Code's `acceptEdits` mode, where headless nobody can answer a prompt, so every git,
+  pytest and file-listing command was denied: 14 in one job, which then asked you "may I run git,
+  pytest…?". Jobs now run in Claude Code's `auto` mode: its own safety check approves routine
+  commands with no prompts and still blocks risky ones (a blocked one shows up in the task as "not
+  allowed to run"). `AIVA_CLAUDE_PERMISSION_MODE=acceptEdits` puts the old behaviour back. There is
+  deliberately no bypass setting. Look-only jobs still run in plan mode.
+- **Coding tasks: one Claude Code job per piece of work, and she checks the tests herself**
+  (2026-10-13). Her last five coding tasks all failed, and the planner's splits were part of why.
+  - **One job, not four.** The planner split one fix into inspect / implement / test / verify, each a
+    fresh Claude Code job that re-read the repo and could fail its grading alone. The planner is now
+    told one piece of coding work is one delegate step, and `tasks.one_job_per_project` merges
+    back-to-back delegate steps on the same project into one job anyway (in order; a look-only
+    part's "don't change anything" means only that part).
+  - **Later jobs continue the same session.** Another delegate step on the same project in the same
+    task, a repair re-run or a re-plan after second thoughts now runs `claude -p --resume <session>`,
+    so the agent remembers what it read and changed. A fresh job couldn't even open the earlier
+    job's plan file and redid the inspection. Without a session id the old report hand-off stays.
+  - **A step is judged on all it changed.** A repair re-run is compared against the step's first
+    snapshot, so a re-run that finds the work already done isn't "nothing changed".
+  - **She runs the project's own tests.** After a coding job that changed something she runs the
+    project's pytest suite herself (`tasks.project_test_command`: only through the project's own
+    `.venv` with pytest installed, never a command a model wrote), once before the first job and
+    once after. Failing tests cap the grade at partial, unless they were already failing before the
+    job. The grader is told to trust her run over the report. The result shows up as a `tests`
+    timeline event and in the step's evidence. `AIVA_TASK_RUN_TESTS=0` turns it off;
+    `AIVA_TASK_TEST_TIMEOUT_S` (300) bounds a run.
+- **Her wishes point outward.** All 12 of Aiva's open wishes had become introspective ("notice what
+  remains when the brightness settles"), and since open wishes are fed back into every diary digest
+  they kept breeding more. The diary prompt now asks only for concrete wishes aimed at him, her
+  sister or the world (something to do, make, find, ask or learn, with a clear done-moment; at most
+  one about reading), and the pure `inner.desire_is_outward` backstop skips an inner-state wish
+  with nobody outside her in it (logged `self: inward wish skipped`). One-off data cleanup the same
+  day (backup `aiva/backups/memory-pre-rut-clear-20261012-225515.db`): the 12 wishes, the
+  "wonder"/"uncertainty" preferences and one meta trait dropped, the 75 book lessons faded.
+- **Reading is allowed to be leisure.** Every section used to demand tone/style/subtext/devices and a
+  first-person reflection, so a gag chapter got the same exegesis as a poem — and it all fed the
+  traits, preferences and diary that then rendered back into the persona. Now `nuances` and
+  `reflection` may be `null` on an ordinary section ("most sections don't change you, and saying so
+  is a real answer"; nulls are coerced so they can't be stored as the string "None"), the spoken
+  session wrap may be a moment, a line or a joke with no takeaway attached and gets the section's
+  quotes to point at, the diary is told that a flat stretch deserves a flat entry and that his tone of
+  voice is not an event on its own, and the sister cues ask for the small real thing from her day
+  instead of a philosophical opener. `LESSONS YOU APPLY` now says they're for judgment calls, not
+  conversation: never hand him a meaning he didn't ask for.
+- **Her humour outlives her maxims.** `prompt_blocks` showed at most five reading lessons and dropped
+  the voice notes FIRST when the persona went over budget — so under a long prompt she kept "kindness
+  can become controlling" and lost "The cookie tin was empty. This was clearly a systems failure."
+  Lessons are capped at three and the drop order is now lessons → reading → voice.
+- **Private mode is about their own chats, not yours.** A sister exchange rooted in something the
+  user said is spoken aloud even in private mode (he asked for it and is in the room); exchanges the
+  sisters start themselves, or that grow out of a sister's own announce, follow the private/audible
+  mode. A reply that OPENS with the other sister's name ("Hey, Saga…") is logged and overheard as
+  addressed to her, not to him.
+- **Sister exchanges answer statements too.** A chat a sister opens with the other always gets one
+  reply however it was phrased; a line that opens with her sister's name hands her the floor; and
+  indirect questions ("I keep wondering whether…", "I'd like to know…") count as asking. Before, four
+  private chat openers in a row went unanswered because none ended in a question mark. Arbiter
+  timeout 2.5 → 4 s. Persona/tool text: what he asks for is always spoken; private covers only their
+  own chats. Her avatar keeps its eyes open for a minute after a turn of her own even while the
+  house sleeps; the dashboard's per-sister awake/asleep guess now recognises "house asleep".
+- **Background news waits for a quiet moment.** Announces (reading session done, task done) and a
+  sister's own initiatives are held by the floor until nobody has spoken — user or sister — for
+  `AIVA_ANNOUNCE_QUIET_S` (default 45 s) instead of one second after the user; a running sister
+  exchange continues meanwhile. Two announces queued by the same sister collapse into one turn (her
+  context already holds both notes), so she doesn't say the same news twice.
+
+### Fixed
+- **You had to play middle man between the sisters** (2026-10-14). "Bring Saga in and ask her if she
+  wants to change anything about the look, then let me know" took four more nudges from you. Saga
+  booted and nothing happened ("ok she's up, ask her what I told you"). Aiva said "I'll ask her…"
+  instead of asking. A "Saga, describe the actual look…" in the middle of Aiva's reply never reached
+  Saga ("ask her"). And when Saga answered, nobody told you. The floor now runs the errand to the end:
+  - **Asked means asked.** When you tell one sister to ask, tell or check with the other
+    (`sisters.errand_to`), her turn carries `errand_cue`: she puts the actual question to her sister
+    in that same reply, starting with her name.
+  - **Picked up on arrival.** A line meant for a sister who isn't running is remembered. If she starts
+    within `ERRAND_TTL_S` (3 min), the sister who took the line gets a turn (`arrival_cue`) to put it
+    to her with the context she missed.
+  - **Reported back.** When an exchange that grew from your errand ends, the sister you sent gets one
+    `report` turn (a new turn kind, `report_cue`) to tell you the gist and what happens next. That
+    turn never restarts the sisters. "Ask your sister something" (just "go talk") gets no report.
+  - **Who she's talking to.** A call to her sister anywhere in a reply ("…fair. Saga, describe…")
+    now hands Saga the floor (`sisters.called_in`). A line about her ("Saga's already here", "Saga is
+    starting up") no longer counts as talking to her; the possessive once opened a sister round. A
+    call needs a comma or dash after the name, a greeting before it, or a question.
+- **Aiva's verification got stuck in Claude Code's plan mode** (2026-10-14). She was to check Saga's
+  constellation code, run a focused test and write the result into a desktop note.
+  - **A look that finds something missing has its answer.** The look-only job did its part (35 tests
+    passed, and there is no speech dimming in the code), but the grader flagged "there is no speech
+    dimming" as a broken premise, and the task stopped to ask you instead of writing the note. The
+    real grader still does that every time, so the runner decides: on a look-only step with no
+    coding planned after it, a premise is logged as a `finding` and the plan goes on. With coding
+    still to come (the Miso renderer that never existed), it still gets second thoughts. The grader
+    also now sees the step's `later_steps`, so it doesn't mark a look down for the note a later
+    step writes.
+  - **"Retry outside plan mode" now runs outside plan mode.** The planner marked the retry
+    `read_only: false`, but its prompt said "without changing any implementation files", which the
+    runner's wording check read as look-only. The job went back into plan mode and the note's write
+    was refused. The planner's flag now always wins (`tasks.delegate_read_only`; a string "false"
+    counts as false). The wording is only read when no flag was given, and only a whole "don't change
+    anything / files / the code" counts, never a partial "don't touch the API". A headless probe
+    confirmed a resumed session does leave plan mode with `--permission-mode auto`, and can write
+    outside its project folder.
+- **Saga's retried note failed at the last step** (2026-10-14). Everything for the note was gathered;
+  then the writing step gave up on its very first move, saying a new file "requires the shell
+  confirmation", with `create_file` in hand. That couldn't be reproduced in 15 replays of her real
+  brief on the real model, so it's rare, but one refusal sank the whole task.
+  - **A step that gives up without trying a single tool is sent back once** ("look at what your tools
+    do and try"), logged `pushed_back`. A second `step_failed` is accepted.
+  - **The task agent is told writing a file is `create_file`, already approved**, and that the shell
+    is never for that.
+  - **`create_file` never replaces an existing file unless `overwrite` is true.** A taken name gets
+    ` (2)` and the result says so, so there is nothing to check first, and a voice "make notes.txt"
+    can't wipe one either.
+  - **Search no longer opens audio and model files.** Her first repo search took two minutes,
+    reading ~1 GB of wake-word training audio only to find each file binary. Known binary types are
+    skipped unopened and only the first 8 KB is sniffed before a file is read: 0.35 s now.
+  - **A screen check sees what the step reported.** "The observation is recorded" was judged on a fresh
+    screenshot alone, failed, and used up the task's only repair.
+- **She answered her own task questions** (2026-10-14). On her own news turns she called
+  `answer_task("yes")` herself, nine times in one verification, so her commands ran without you.
+  A task's question is now answered only on a turn where you spoke or typed; otherwise she's told to
+  ask you and wait.
+- **A task question could be dropped and she'd wait in silence** (2026-10-14). The next question
+  arrived while she was answering you, was folded into her older queued note, and that note was then
+  dropped as "already said". A folded-in note now counts as new, so it gets its own turn.
+- **Her sister answered a question meant for you** (2026-10-14). Saga asked you "…search the Aiva
+  repo…; should I let it run?" and Aiva replied "Yes, let it run", because the line named Aiva and
+  asked something. News a sister relays to you no longer starts a sister round unless it opens by
+  addressing her sister.
+- **A coding job ran across your whole home folder** (2026-10-14). The planner wrote the project as
+  `.`, which means your home, so Claude Code worked from `C:\Users\Extre`. Git was out of its reach
+  there, and she couldn't see what it changed or run the tests. The planner now gets the folder her
+  own code lives in (`your_own_code`). A plan that points a coding step at your home is sent back
+  to be fixed, and Claude Code (task or voice tool) refuses to start there.
+- **A coding job that did its work was graded as having changed nothing** (2026-10-13): to see what
+  Claude Code changed, the task runner compares `git status` from before and after the job. It ran
+  git through `execute_shell`, which keeps only the last 1000 characters of output. With about 95
+  uncommitted files the status is ~2,500 characters, so she only ever saw the end of the list (mostly
+  untracked tests) and none of the tracked files the agent edited. A job that fixed Saga's sky
+  renderer and passed 837 tests was graded "not evidenced", re-run, then graded "nothing in the
+  project changed", and the task hit its time limit. Git now runs through its own `tasks.run_git`,
+  which keeps the whole output, off the event loop, and no longer counts against the task's tool
+  calls. A failed snapshot no longer reads as "nothing changed".
+- **A request made as the first thing after a restart was only answered, not done** (2026-10-13): the
+  one-shot boot note ("say you're back in one short sentence") won over his "new task" line, so she
+  said she'd start the task but never called `start_task`. Both greeting notes now tell her that a
+  request in the first line comes first, with tools as usual, and the greeting is only in passing.
+- **A reply after a slow tool still went missing from the transcript** (2026-10-13, "say yes and I'll run it" after `start_task`): pipecat runs parallel tool calls in their own task, so the per-call `FunctionCallInProgressFrame` often arrived *after* the response's end frame. The `PrivacyGate` saw a response with no tool, ended the turn, and the house released it (`end:private`) before the re-run; the real reply then ran on no granted turn ("stray response" on the house, text-only, never logged). The gate and the `MindWatcher` now also take `FunctionCallsStartedFrame`, which the LLM pushes before the end frame, as the tool signal (the watcher reports each call's +1 once, whichever frame comes first).
+- **A reply that came after a tool call was lost**: pipecat ends an assistant turn at every LLM response end, including the one that only calls tools, so the sister closed her granted turn (and the privacy latch) before the LLM re-ran with the tool results. The real answer then ran as "no granted turn": forced text-only (never spoken even on audible turns), never sent to the house, so missing from the Conversations tab (`said outside a granted turn` in the log). The end of a turn is now decided by the `PrivacyGate`, straight after the LLM, where her responses are still in true order: a response that called a tool is followed by the re-run, the first one that ends without a tool ends the turn, and the `said` carries the text of every response in it (words before the tool included). The assistant aggregator only closes a turn on an F10 interruption. Two earlier attempts decided it at the aggregator, after the TTS, and failed there because the ElevenLabs service holds each end frame until its audio finishes and drops the end of a response it already closed: counting tool calls held back every spoken reply after a tool; a "no response since the tool" flag still lost the reply when she spoke before calling the tool. Response/tool reports to the house fall back to the last granted turn id, and a turn still open when the next one is granted is closed and handed over first.
+- **A step that did the whole job failed the task**: the step agent (asked to open a terminal) went on to inspect, delete and verify; the next step ("inspect before deleting") then failed because the folder was gone. The verifier now gets the task's goal and answers `goal_done` when the goal is already achieved, which marks the rest of the plan `not_needed` and finishes as a success; the step agent is told to do only its own step.
+- **A task's question could be swallowed by the house**: when she answered "yes" with `answer_task`, the task's next step queued its confirm question as an announce *while she was still replying*; her `said` then dropped every older queued announce of hers as "spoken already", so the question was never asked and the task sat in `awaiting_user`. The floor now only drops announces queued before the turn was granted (`Turn.granted_at`).
+- **A shell step that worked was failed by its check, and the repair opened a visible terminal**: a shell step planned with `verify: "terminal"` was verified against a terminal session (defaulting to one called "main" that didn't exist), so a successful command "failed" and the repair agent went off to `open_terminal` + `run_in_terminal`. A shell step is now always verified by its own output (stdout kept to 1000 chars in the evidence), and a missing terminal falls back to the evidence. The planner, the shell tool and the step agent now say: work in the background by default, look with `list_directory`/file tools (nothing to confirm), use a shell step only to change things, fold the check and the change into one command so he confirms once, and open a visible terminal only when he asked to see one. Her persona said the opposite ("To RUN commands, ALWAYS use run_in_terminal"), so she kept telling `start_task` to use a visible terminal; it now says background by default, visible terminal only when he asked (the golden persona file is updated to match).
+- **Task shell steps and `confirm_pending_command` ran under cmd.exe**, not PowerShell: `execute_shell` used `shell=True`, so every PowerShell-syntax command she writes (`$p = …`, `Test-Path`, `Remove-Item`) failed with exit code 1 — a confirmed folder delete failed right after his yes. It now runs `powershell -NoProfile -NonInteractive -Command`, and a failed step carries the stderr line in its evidence and failure reason instead of a bare "exit code 1".
+- Claude Code work was never really graded: the grader (and the feedback extractor) asked for JSON
+  mode without saying "JSON", so OpenAI 400'd and every grade fell back to "partial".
+- A delegate step now creates its project folder when missing (inside his home only), and the
+  planner is told Claude Code is fenced to that folder — a retry once aimed it at her own repo and
+  it could not reach `Desktop\prime_project`.
+- Claude Code job results (+ raw JSON with session id/cost) are kept in `aiva/logs/coding/` instead
+  of `%TEMP%`, and each delegated task logs a `claude` event linking it to its session.
+- Task steps that raised were silently swallowed by pipecat's `create_task`, so a task could report
+  success having done nothing (the 2026-09-20 prime-number "Done"); step errors now fail the task.
+- Time spent waiting for his answer no longer counts against a task's 20-minute wall clock.
+- `open_terminal` / Claude Code resolve `desktop\...` relative to his home like `create_file` does,
+  instead of relative to the `aiva/` working dir ("directory doesn't exist" right after creating it).
+- **Mic stayed gated after a sister's reply** (house log: `release … (cap)` after 120 s, console
+  flooded with "Empty audio frame"): her "stopped speaking" report could lose its turn id when the
+  assistant aggregator closed the turn before the audio transport reported the end of playback, and
+  the floor ignored it as stray. The link now remembers the granted turn for its speaking reports
+  and the floor accepts the holder's report even without an id.
+- The launcher's liveness probe no longer logs a "bad handshake" in the house.
+- **Stale boot greeting** (first live sister exchange): a sister's "say hello" announce queued at
+  connect lingered when the user greeted her first, blocked her sister's question (the floor counted
+  it as a pending turn of hers), then ran 45 s later with nothing to say. Now a sister's older queued
+  announces are dropped the moment she speaks, and only queued sister/initiative turns count as
+  "she already has one coming".
+- **Self-wake through the wake-word pre-roll**: the wake listener's own mic stream could carry a
+  speaking sister's "Hey, Saga" into STT past the self-hearing gate; wake-word wakes are now ignored
+  while a sister is speaking (and during the cooldown). An audible turn granted while the house dozed
+  now wakes it first, as an announce used to.
+
+## [0.10.0] - 2026-09-11
+
+### Added
+- **Saga — Aiva's sister, and the house they share.** Aiva is no longer one process: a small
+  always-on **house** (`aiva/house.py`, `start_house.bat`) owns the one microphone, Deepgram, the
+  wake words (`hey_aiva` + `hey_saga`), the global hotkeys, the **floor** (who speaks, who overhears,
+  private sister talk, caps) and the conversation log in `aiva/house.db`; each sister runs in **her
+  own process and console** (`main.py --character aiva|saga`, `start_aiva.bat` / `start_saga.bat`)
+  with her own db (`memory.db` / `saga.db`), state files, space folder, avatar renderer, ElevenLabs
+  voice and restart loop, so either can be started or stopped on her own. The house grants turns over
+  a loopback socket (`modules/house_proto.py`); a sister never runs her LLM without a grant, so the two
+  can't talk over each other, and the mic is gated from the grant itself (not from her audio) so her
+  voice never reaches speech-to-text. You address one by name, both ("you two"), or nobody — then a
+  cheap arbiter side-call picks who you meant; the other sister always **overhears** what was said as a
+  bracketed line in her own context. Sister-to-sister talk is **private by default** (text only — no
+  ElevenLabs spend), flipped live with Ctrl+Alt+P or by asking either of them (`set_sister_talk`),
+  and capped (rounds, per hour, per day). **Saga has no authored personality**: her floor is the
+  shared speaking/safety rules plus "you're new, nobody wrote who you are"; her temperament forms from
+  her own diary (self-forming `temperament` traits with inertia, cap 8, erosion instead of veto), her
+  tastes from experience, and she learns your voice herself (she asks who you are). Each sister keeps
+  a **kin** store (`modules/kin.py`) of what she has actually seen the other do, make, read or say —
+  relayed by the house as public events — rendered as a "YOUR SISTER" block and answered by
+  `recall_about_sister` with no LLM call, honestly saying "I haven't seen her do that" when unknown.
+  Dashboard: tabs **Aiva | Saga | Conversations** (the full house log, private lines marked) plus a
+  Household strip (bodies, house, connected sisters, private/audible, TTS chars per sister).
+  ElevenLabs spend is now actually counted per sister (`tts`, `tts.aiva`, `tts.saga` in the shared
+  caps). Saga's look is a retexture of the same Live2D mesh (`--write-model saga`), her own renderer
+  instance with its own state file and skin-toned mouth camouflage. New helpers:
+  `tools/pick_voice.py` (verify/preview/set an ElevenLabs voice into `.env`), `training/hey_saga.yaml`
+  (wake model trained with the existing recipe). Config: the `SAGA_*` block and `AIVA_HOUSE_*`,
+  `AIVA_SISTER_*`, `AIVA_HOTKEY_SISTER_TALK` in `.env`.
 - **She knows her own powers, and can act on safe wishes herself** — capability self-awareness plus
   a filled-in autonomous `act` slot. New `modules/capabilities.py` is an intention-indexed map ("want
   to know → search/read; want something visual → find & keep; want to build → ask") with `auto`/`ask`/

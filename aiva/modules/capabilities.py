@@ -28,6 +28,7 @@ SAFE_TOOLS = frozenset({
     "recall_from_space", "study_book", "reading_status", "recall_reading", "add_to_wishlist",
     "remember", "note_desire", "note_preference", "recall_journal", "what_can_i_do",
     "cat_status", "feed_cat", "pet_cat", "play_with_cat", "avatar_expression",
+    "recall_about_sister", "call_sister", "set_sister_talk",
 })
 
 
@@ -77,6 +78,19 @@ CAPABILITIES = (
         ("cat_status", "feed_cat", "pet_cat", "play_with_cat"),
         ("cat", "miso", "feed", "pet", "kitten")),
     Capability(
+        "know_sister", "want to know what my sister can do or has done",
+        "look back at what I've actually seen my sister do, make or say, and tell you honestly if I "
+        "haven't", "auto",
+        ("recall_about_sister",),
+        ("sister", "aiva", "saga", "she can", "her")),
+    Capability(
+        "call_sister", "want my sister here",
+        "call my sister over — boot her up in her own window if she's off, or just get her attention",
+        "auto",
+        ("call_sister",),
+        ("call", "wake", "bring", "boot", "start", "fetch", "get", "sister", "aiva", "saga",
+         "get her", "call her")),
+    Capability(
         "build_software", "want to make or change software, or build a tool",
         "build or change software by planning it with Claude Code — I pitch the plan first, then do "
         "it on your yes", "ask",
@@ -122,7 +136,14 @@ def _norm(text):
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()).split())
 
 
-def match(wish_text):
+def active(exclude=()):
+    """The registry minus the powers a character doesn't have (`Character.capability_exclude`,
+    e.g. a sister without the cat). Order preserved."""
+    ex = set(exclude or ())
+    return [c for c in CAPABILITIES if c.name not in ex]
+
+
+def match(wish_text, exclude=()):
     """Best capability for a wish, by keyword overlap. Conservative: returns None when nothing
     clearly matches (the caller then keeps it to speech, not autonomous action)."""
     norm = _norm(wish_text)                      # ordered, so multi-word keywords match by adjacency
@@ -130,28 +151,28 @@ def match(wish_text):
     if not words:
         return None
     best, best_score = None, 0
-    for c in CAPABILITIES:
+    for c in active(exclude):
         score = sum(1 for kw in c.keywords if (kw in norm if " " in kw else kw in words))
         if score > best_score:
             best, best_score = c, score
     return best if best_score >= 1 else None
 
 
-def prompt_lines():
+def prompt_lines(exclude=()):
     """The 'WHAT YOU CAN DO' block body: one line per power, tagged with what she may just do vs
     ask about. Persona wraps this with the header + guidance."""
-    return [f"{c.blurb} ({_TIER_LABEL[c.tier]})" for c in CAPABILITIES]
+    return [f"{c.blurb} ({_TIER_LABEL[c.tier]})" for c in active(exclude)]
 
 
-def for_tool(intention=None):
+def for_tool(intention=None, exclude=()):
     """Structured answer for the `what_can_i_do` tool. With an intention, lead with the matched
     power; always list them so she can speak about the rest naturally."""
-    matched = match(intention) if intention else None
+    matched = match(intention, exclude) if intention else None
     return {
         "matched": ({"name": matched.name, "blurb": matched.blurb, "tier": matched.tier}
                     if matched else None),
         "capabilities": [{"intention": c.intention, "blurb": c.blurb, "tier": c.tier}
-                         for c in CAPABILITIES],
+                         for c in active(exclude)],
         "note": "Answer in a sentence or two, in your own voice — say what you'd do (or that you'd "
                 "need to ask first, or that it's not something you do). Don't recite the whole list.",
     }

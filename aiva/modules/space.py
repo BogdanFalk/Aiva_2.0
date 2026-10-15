@@ -43,11 +43,14 @@ def _domain(url):
 
 
 class SpaceMemory:
-    def __init__(self, conn: sqlite3.Connection, *, embed=None, log=print, now=None):
+    def __init__(self, conn: sqlite3.Connection, *, embed=None, log=print, now=None, on_saved=None):
         self.conn = conn
         self._embed = embed              # async (text) -> vec | None
         self.log = log
         self._now = now or _now
+        # on_saved(subject, kind, why): fired once per genuinely NEW find (not updates) — the hook
+        # the house uses to tell her sister what she made/kept (kin). Sync or async; never raises.
+        self._on_saved = on_saved
         self._create_tables()
 
     def _create_tables(self):
@@ -107,9 +110,11 @@ class SpaceMemory:
         return None
 
     async def save_find(self, subject, why="", *, kind="image", source_url=None, path=None,
-                        file_name=None, tags=None, sha256=None, status="kept", meta=None):
+                        file_name=None, tags=None, sha256=None, status="kept", meta=None,
+                        match_meaning=True):
         """Add a find, or reinforce/update a near-duplicate. A vetoed (dropped) match stays gone.
-        Returns {"status": saved|updated|blocked, "id", "subject"}."""
+        `match_meaning=False` dedupes by file hash only (a project collection keeps many images on one
+        theme). Returns {"status": saved|updated|blocked, "id", "subject"}."""
         subject = (subject or "").strip()
         if not subject:
             return {"status": "blocked", "reason": "no subject"}
@@ -124,7 +129,7 @@ class SpaceMemory:
             if r:
                 dup = {"id": r[0], "status": r[1]}
         vec = await self._vec(subject)               # identity of a find is its subject
-        if dup is None:
+        if dup is None and match_meaning:
             dup = self._match(subject, why, tags, vec)
         if dup and dup["status"] == "dropped":
             return {"status": "blocked", "id": dup["id"], "subject": subject}
@@ -142,6 +147,13 @@ class SpaceMemory:
             (kind, subject, why, source_url, path, file_name, sha256, ",".join(tags), status, now,
              now, json.dumps(meta or {}, ensure_ascii=False), pack_vec(vec)))
         self.conn.commit()
+        if self._on_saved is not None:
+            try:
+                res = self._on_saved(subject, kind, why)
+                if hasattr(res, "__await__"):
+                    await res
+            except Exception as e:
+                self.log(f"space: on_saved hook failed ({e!r})")
         return {"status": "saved", "id": cur.lastrowid, "subject": subject}
 
     def list_finds(self, status="kept", kind=None, limit=50):

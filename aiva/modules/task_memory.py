@@ -28,6 +28,7 @@ import struct
 import uuid
 from datetime import datetime
 
+from modules.persona import named
 from modules.utilities import llm_kwargs
 
 # --- thresholds (logged per task so they can be tuned from aiva/logs) --------
@@ -141,10 +142,13 @@ def _ago(ts):
 # --- the memory ------------------------------------------------------------------
 
 class TaskMemory:
-    def __init__(self, conn: sqlite3.Connection, embed=None, name_variants=()):
+    def __init__(self, conn: sqlite3.Connection, embed=None, name_variants=(), name="Aiva"):
         self.conn = conn
         self._embed = embed              # async callable(text) -> vector | None
         self._names = tuple(name_variants)
+        self.name = name
+        self.grade_prompt = named(GRADE_PROMPT_T, name)
+        self.feedback_prompt = named(FEEDBACK_EXTRACTION_PROMPT_T, name)
         self._create_tables()
 
     def _create_tables(self):
@@ -175,8 +179,14 @@ class TaskMemory:
                 embedding BLOB,
                 llm_calls INTEGER NOT NULL DEFAULT 0,
                 tool_calls INTEGER NOT NULL DEFAULT 0,
-                cost_usd REAL NOT NULL DEFAULT 0
+                cost_usd REAL NOT NULL DEFAULT 0,
+                self_lesson TEXT
             )""")
+        # self_lesson (2026-10-13): what she worked out herself when a step went wrong — added to
+        # existing dbs in place; NULL on every older row
+        have = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)")}
+        if "self_lesson" not in have:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN self_lesson TEXT")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_ts)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_family ON tasks(family)")
         self.conn.execute("""
@@ -213,7 +223,7 @@ class TaskMemory:
                   "details", "family", "approach", "status", "outcome", "plan_json", "log_json",
                   "pending_json", "result_summary", "duration_s", "delegated_to", "agent_grade",
                   "agent_grade_reason", "user_feedback", "corrected", "flow_id", "embedding",
-                  "llm_calls", "tool_calls", "cost_usd")
+                  "llm_calls", "tool_calls", "cost_usd", "self_lesson")
 
     def _task_row(self, row):
         d = dict(zip(self._TASK_COLS, row))
@@ -411,7 +421,7 @@ class TaskMemory:
             elif key == "embedding":
                 cols.append("embedding = ?"); vals.append(pack_vec(val) if val else None)
             elif key in ("status", "family", "approach", "delegated_to", "llm_calls",
-                         "tool_calls", "cost_usd", "flow_id", "details"):
+                         "tool_calls", "cost_usd", "flow_id", "details", "self_lesson"):
                 cols.append(f"{key} = ?"); vals.append(val)
         vals.append(task_id)
         self.conn.execute(f"UPDATE tasks SET {', '.join(cols)} WHERE id = ?", vals)
@@ -626,13 +636,18 @@ class TaskMemory:
 
     # --- prompt + shutdown ------------------------------------------------------
 
-    def load_lessons(self, limit=5):
+    def load_lessons(self, limit=5, self_limit=3):
+        """Prompt lines: the user's corrections first, then what she worked out herself when a
+        step went wrong (marked as such — his word outranks her own reading of a report)."""
         rows = self._select_tasks("WHERE corrected = 1 AND user_feedback IS NOT NULL", limit=limit)
         lines = []
         for ep in rows:
             fb = (ep["user_feedback"] or "").strip().splitlines()
             gist = fb[-1][:120] if fb else ""
             lines.append(f"{ep['created_ts'][:10]}, \"{ep['goal_text'][:60]}\": {gist}")
+        for ep in self._select_tasks("WHERE self_lesson IS NOT NULL AND self_lesson != ''", limit=self_limit):
+            lines.append(f"{ep['created_ts'][:10]}, \"{ep['goal_text'][:60]}\" (you found this yourself): "
+                         f"{ep['self_lesson'][:160]}")
         return lines
 
     async def extract_feedback(self, openai_client, model, session_task_ids, messages, remember=None):
@@ -654,7 +669,7 @@ class TaskMemory:
         resp = await openai_client.chat.completions.create(
             model=model, **llm_kwargs(model, max_tokens=400, temperature=0.0),
             response_format={"type": "json_object"},
-            messages=[{"role": "system", "content": FEEDBACK_EXTRACTION_PROMPT},
+            messages=[{"role": "system", "content": self.feedback_prompt},
                       {"role": "user", "content": f"Tasks:\n{ep_block}\n\nConversation:\n{transcript[-8000:]}"}])
         try:
             data = json.loads(resp.choices[0].message.content or "{}")
@@ -671,54 +686,150 @@ class TaskMemory:
                     remember(rule, "instruction")
         return updated
 
-    async def grade_agent_work(self, openai_client, model, goal, evidence):
-        """Grade a delegated job from evidence. Deterministic rules first."""
+    async def grade_agent_work(self, openai_client, model, goal, evidence, step=None):
+        """Grade a delegated job from evidence. Deterministic rules first.
+
+        `step` ({title, expect, prompt}) is what THIS job was asked for: an inspect step is graded
+        on its report, not on the whole task's goal. With `evidence["agent_changed"]` (the files
+        the job itself touched — see TaskRunner's worktree snapshot) the user's own uncommitted
+        work is never mistaken for the agent's. Returns {grade, reason, blocked, question}:
+        blocked is "question" (the agent stopped to ask) or "premise" (it reports that something
+        the request took for granted isn't so) — neither is a botched job, they need a rethink."""
         status = (evidence.get("job_status") or "").lower()
-        diff = (evidence.get("diff_stat") or "").strip()
+        mode = evidence.get("mode", "execute")
+        changed = evidence.get("agent_changed")
+        diff = (evidence.get("diff_stat") or "").strip() if changed is None else "\n".join(changed)
         tests = evidence.get("tests") or {}
+        result_text = evidence.get("result_text") or ""
         if status.startswith("failed") or status == "killed":
-            return {"grade": "bad", "reason": f"the job {status} before finishing"}
-        if evidence.get("mode", "execute") == "execute" and evidence.get("diff_checked") and not diff:
-            return {"grade": "bad", "reason": "it says it's done but nothing in the project changed"}
+            return _graded("bad", f"the job {status} before finishing")
+        # asked to change things, changed nothing, and ends on a question: it's waiting on an
+        # answer. (An inspect report closing on "want me to go ahead?" is just good manners —
+        # that one is left to the model grader.)
+        question = agent_question(result_text) if mode == "execute" else None
+        if question and not diff:
+            return _graded("partial", "it stopped to ask a question before changing anything",
+                           blocked="question", question=question)
+        if mode == "execute" and evidence.get("diff_checked") and not diff:
+            return _graded("bad", "it says it's done but nothing in the project changed")
         cap = None
-        if tests and tests.get("returncode") not in (None, 0):
+        # tests SHE ran (TaskRunner): failing now caps the grade, unless they already failed before
+        # the job — then it's his breakage, and the model grader weighs the two runs
+        was_failing = (evidence.get("tests_before") or {}).get("returncode") not in (None, 0)
+        if tests and tests.get("returncode") not in (None, 0) and not was_failing:
             cap = "partial"
         if openai_client is None:
             grade = cap or "good"
-            return {"grade": grade, "reason": "tests are failing" if cap else "the change is in place"}
-        summary = json.dumps({k: (str(v)[:1500] if v is not None else None) for k, v in evidence.items()},
-                             ensure_ascii=False)
+            reason = "tests are failing" if cap else ("the report is in" if mode == "inspect"
+                                                      else "the change is in place")
+            return _graded(grade, reason)
+        summary = json.dumps({k: (str(v)[:4000] if k == "result_text" else str(v)[:1500])
+                              if v is not None else None for k, v in evidence.items()}, ensure_ascii=False)
+        asked = f"\nThis step: {json.dumps(step, ensure_ascii=False)}" if step else ""
         try:
             resp = await openai_client.chat.completions.create(
-                model=model, **llm_kwargs(model, max_tokens=120, temperature=0.0),
+                model=model, **llm_kwargs(model, max_tokens=200, temperature=0.0),
                 response_format={"type": "json_object"},
-                messages=[{"role": "system", "content": GRADE_PROMPT},
-                          {"role": "user", "content": f"Goal: {goal}\nEvidence: {summary}"}])
+                messages=[{"role": "system", "content": self.grade_prompt},
+                          {"role": "user", "content": f"Whole task: {goal}{asked}\nEvidence: {summary}"}])
             data = json.loads(resp.choices[0].message.content or "{}")
             grade = data.get("grade") if data.get("grade") in ("good", "partial", "bad") else "partial"
             reason = (data.get("reason") or "the evidence was unclear").strip()
+            blocked = data.get("blocked") if data.get("blocked") in ("question", "premise") else None
+            q = (data.get("question") or "").strip() or None
         except Exception as e:
-            grade, reason = "partial", f"I couldn't finish checking it ({e})"
+            grade, reason, blocked, q = "partial", f"I couldn't finish checking it ({e})", None, None
         if cap == "partial" and grade == "good":
             grade, reason = "partial", reason + ", but tests are failing"
-        return {"grade": grade, "reason": reason}
+        # blocked is NOT a bad job (it was right to stop) — the runner treats it as not done, and the
+        # grade stays honest so delegation_record never blames Claude Code for her wrong premise
+        return _graded(grade, reason, blocked=blocked, question=q)
 
 
 # --- prompts ---------------------------------------------------------------------
 
-GRADE_PROMPT = """You audit an autonomous coding agent for Aiva, a voice assistant. Given the goal, \
-the agent's own summary, the diff stat and any test results, grade it: good = the evidence matches \
-the claim and nothing unrelated changed; partial = did some of it, missed part, or left tests \
-failing; bad = claims done but the evidence contradicts it or it changed the wrong things. \
-Reply {"grade": "good|partial|bad", "reason": "<one spoken sentence citing the evidence>"}."""
+# {name}: the character whose tasks these are; TaskMemory renders once per character
+GRADE_PROMPT_T = """You audit an autonomous coding agent for {name}, a voice assistant. You get the \
+whole task, the ONE step this job was asked to do, the agent's own report, the files the agent itself \
+changed (agent_changed; the project may also hold the user's own older uncommitted work, which is NOT \
+the agent's doing), and the project's tests as {name} ran them herself after the job ("tests"; \
+"tests_before" is the same run from before the job, so failures already there are not the agent's). \
+Trust those runs over what the report says about tests. Grade THIS step against its own expectation, not the whole \
+task: an inspect or review step is good when its report answers what was asked, with no edits. The \
+step's later_steps are what the plan does after this job (e.g. writing the findings into a note): \
+never mark this step down for work that belongs to one of them. \
+good = the evidence matches the claim and nothing unrelated changed; partial = did some of it, \
+missed part, or left tests failing; bad = claims done but the evidence contradicts it or it changed \
+the wrong things. Separately, set "blocked": "question" if the agent stopped to ask something it \
+needs answered before going on, "premise" if it reports that something the request took for granted \
+does not exist or is not so, else null; when blocked, "question" holds what it needs to know. \
+Reply with JSON only: {"grade": "good|partial|bad", "reason": "<one spoken sentence citing the \
+evidence>", "blocked": "question|premise|null", "question": "<or null>"}."""
 
-FEEDBACK_EXTRACTION_PROMPT = """You maintain Aiva's task memory. From the conversation transcript, \
-find the user's reactions to the listed tasks Aiva did — praise, corrections ("no, that's wrong", \
+FEEDBACK_EXTRACTION_PROMPT_T = """You maintain {name}'s task memory. From the conversation transcript, \
+find the user's reactions to the listed tasks {name} did — praise, corrections ("no, that's wrong", \
 "you shouldn't have..."), or advice for next time. The transcript comes from speech recognition \
 and contains mishearings; be skeptical and extract nothing when unsure. Only cover tasks in the \
-list. Reply {"feedback": [{"task_id": "...", "feedback": "<one clean sentence>", \
+list. Reply with JSON only: {"feedback": [{"task_id": "...", "feedback": "<one clean sentence>", \
 "is_correction": true|false, "general_rule": "<optional self-contained standing instruction>"}]} \
 or {"feedback": []}."""
+
+GRADE_PROMPT = named(GRADE_PROMPT_T, "Aiva")
+FEEDBACK_EXTRACTION_PROMPT = named(FEEDBACK_EXTRACTION_PROMPT_T, "Aiva")
+
+
+# --- reading an agent's report (pure) -------------------------------------------------
+
+def _graded(grade, reason, blocked=None, question=None):
+    return {"grade": grade, "reason": reason, "blocked": blocked, "question": question}
+
+
+_MD = re.compile(r"[*_`#>]+")
+
+
+def agent_question(report):
+    """The question an agent's report ENDS on ("Which one did you mean?"), or None. Only the
+    closing line counts: a question mid-report is usually rhetorical."""
+    lines = [_MD.sub("", ln).strip() for ln in (report or "").strip().splitlines()]
+    lines = [ln for ln in lines if ln]
+    if not lines or not lines[-1].endswith("?"):
+        return None
+    return lines[-1][:240]
+
+
+def clip_middle(text, limit=3000):
+    """Keep the START and the end of a long report: an agent states what it found first and asks
+    last — keeping only the tail once dropped "there is no Miso renderer" and kept the question."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    head = limit * 2 // 3
+    return text[:head].rstrip() + "\n[…]\n" + text[-(limit - head):].lstrip()
+
+
+def _squash(text):
+    return re.sub(r"[\s`*_\"'“”‘’]+", " ", (text or "").lower()).strip()
+
+
+def found_in(evidence, report, min_len=8):
+    """True when `evidence` (a short quote a belief rests on) really appears in `report`, ignoring
+    case, whitespace, quotes and markdown — the same verbatim rule her reading quotes obey. What she
+    learns from a report must be something the report SAYS, never her paraphrase of it."""
+    ev = _squash(evidence)
+    return len(ev) >= min_len and ev in _squash(report)
+
+
+def parse_porcelain(text):
+    """`git status --porcelain` lines -> the set of paths listed (rename targets for renames)."""
+    paths = set()
+    for line in (text or "").splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        paths.add(path.strip('"'))
+    return paths
 
 
 # --- pure decision helpers -----------------------------------------------------
@@ -773,10 +884,36 @@ def _mid(text):
     return text[:1].lower() + text[1:] if text and not text[:2].isupper() else text
 
 
-def decide_autonomy(goal, plan, fam, pref=None, delegation=None, confirm_first=False):
+def free_range_blocker(plan):
+    """What still needs a yes under free range: acting on his behalf outside the PC."""
+    for s in plan.get("steps", []):
+        tool = ((s.get("action") or {}).get("tool") or "").lower()
+        if s.get("kind") == "message" or "message" in tool or "send" in tool or "pay" in tool:
+            return "sends something on your behalf"
+    return None
+
+
+def decide_autonomy(goal, plan, fam, pref=None, delegation=None, confirm_first=False, free_range=False):
     """The user's rule, made explicit. Returns
     {mode: just_do|confirm_plan|offer_options, why, say, lesson, approach_hint, must_confirm_steps}.
-    The voice LLM may be MORE careful than `mode`, never less."""
+    The voice LLM may be MORE careful than `mode`, never less.
+
+    `free_range` (user decision 2026-09-22, AIVA_TASK_FREE_RANGE=1): he wants her to just code —
+    novelty, past failures, corrections, shell, delegate and irreversible steps no longer ask.
+    Only `free_range_blocker` (sends/pays on his behalf) and an explicit confirm_first still do."""
+    if free_range and not confirm_first:
+        summary = _mid((plan.get("summary") or goal or "that").rstrip("."))
+        lesson = _gist(fam.get("last_correction")) or None
+        reason = free_range_blocker(plan)
+        if reason:
+            return {"mode": "confirm_plan", "why": f"this {reason}",
+                    "say": f"This {reason}, so I want a clear yes: {summary}?", "lesson": lesson,
+                    "approach_hint": None, "must_confirm_steps": []}
+        say = f"On it — {summary}."
+        if lesson:
+            say = say.rstrip(".") + f", and I'll keep in mind: {lesson}."
+        return {"mode": "just_do", "why": "free range", "say": say, "lesson": lesson,
+                "approach_hint": None, "must_confirm_steps": []}
     steps = plan.get("steps", [])
     summary = _mid((plan.get("summary") or goal or "that").rstrip("."))
     level = fam.get("level", "novel")

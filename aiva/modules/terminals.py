@@ -3,9 +3,13 @@ Claude Code runs.
 
 A "session" is a genuine Windows Terminal + PowerShell window the user can see
 AND type in themselves. Aiva runs commands by focusing that window and typing
-into it like a person (via computer.send_command_to_window), and reads results
-back from a PowerShell transcript the window writes (flushes in ~0.2s). So the
-user watches — and controls — the same terminal Aiva uses.
+into it like a person (via computer.send_keys_to_hwnd). Each command is wrapped so
+its output is teed to a per-run file and ends with a unique done-marker, and the
+result is read back from that file. This is deliberately NOT PowerShell's
+Start-Transcript: on Windows PowerShell 5.1 that buffers small output in memory and
+often never flushes it to disk while the window is alive, so normal commands read
+back empty. Tee-Object still shows the output live in the window (the user watches
+and controls the same terminal) but closes/flushes the file when the command ends.
 
 Claude Code still runs headless through its print mode with JSON output (a
 background "job"), announced out loud on completion via the `announce`
@@ -25,24 +29,56 @@ from modules import computer
 
 OUTPUT_TAIL = 2500       # chars of output surfaced to the LLM
 CAPTURE_TIMEOUT = 20     # max seconds to wait for a typed command's output
-CAPTURE_QUIET = 0.7      # seconds of no new transcript output => command done
+CAPTURE_TAIL_BYTES = 262144   # only the tail of a capture is read (marker + surfaced text live there)
 WM_CLOSE = 0x0010
+JOBS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs", "coding")
+# Claude Code's permission mode for a job that may change code. Headless (`-p`) nobody can answer a
+# prompt, so in acceptEdits every git/pytest/listing command was simply denied (14 in one job on
+# 2026-10-14) and the job ended asking him for approvals. "auto" lets Claude Code's own safety
+# classifier approve routine commands and block risky ones, with no prompts. Deliberately no
+# bypassPermissions: the classifier is what stands between a model-written command and his machine.
+EXECUTE_MODES = ("auto", "acceptEdits")
+
+
+def execute_permission_mode():
+    mode = os.getenv("AIVA_CLAUDE_PERMISSION_MODE", "auto").strip()
+    return mode if mode in EXECUTE_MODES else "auto"
+
+
+def resolve_dir(directory):
+    """A directory the way her file tools mean it: "~", absolute, or RELATIVE TO HIS HOME
+    ("desktop/foo" is ~/Desktop/foo). Resolving against the process cwd once put a folder
+    create_file had just made out of reach of open_terminal."""
+    directory = os.path.expanduser(str(directory or "~").strip() or "~")
+    if not os.path.isabs(directory):
+        directory = os.path.join(os.path.expanduser("~"), directory)
+    return os.path.normpath(directory)
+
+
+def is_whole_home(directory):
+    """"." / "~" / "" all resolve to his home — never a project (a job once ran across all of it)."""
+    home = os.path.normcase(os.path.normpath(os.path.expanduser("~")))
+    return os.path.normcase(resolve_dir(directory)) == home
 
 
 class TerminalManager:
-    def __init__(self, announce=None):
+    def __init__(self, announce=None, name="Aiva"):
         # name -> {cwd, history, created, title, log_path, startup}
         self.sessions = {}
         self.jobs = {}       # name -> headless Claude/background job
         self._active = None  # the terminal most recently opened/used
         self._announce = announce
+        self.name = name     # the character whose windows these are ("Saga: main")
         self._log_dir = os.path.join(tempfile.gettempdir(), "aiva_terminals")
         os.makedirs(self._log_dir, exist_ok=True)
+        # job results are the record of her coding work (the dashboard's Tasks tab reads them), so
+        # they live with the other logs, not in %TEMP%
+        self.jobs_dir = JOBS_DIR
 
     # --- visible terminal windows ------------------------------------------
 
     def _title(self, name):
-        return f"Aiva: {name}"
+        return f"{self.name}: {name}"
 
     def _launch_window(self, name, directory, log_path):
         """Open a real Windows Terminal + PowerShell window at `directory` that
@@ -86,19 +122,33 @@ class TerminalManager:
         s["hwnd"] = None
         return None
 
-    def _transcript_len(self, log_path):
+    def _read_capture(self, path, tail_bytes=CAPTURE_TAIL_BYTES):
+        """Read a per-command capture file, tolerant of the encoding Tee-Object writes (UTF-16LE with
+        a BOM on PowerShell 5.1, UTF-8 elsewhere). Only the tail is read for big outputs — the
+        done-marker and the bit we surface both live at the end."""
         try:
-            with open(log_path, encoding="utf-8-sig", errors="replace") as f:
-                return len(f.read())
-        except OSError:
-            return 0
-
-    def _read_transcript(self, log_path):
-        try:
-            with open(log_path, encoding="utf-8-sig", errors="replace") as f:
-                return f.read()
+            with open(path, "rb") as f:
+                head = f.read(3)
+                if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                    full_enc, width = "utf-16", 2
+                elif head[:3] == b"\xef\xbb\xbf":
+                    full_enc, width = "utf-8-sig", 1
+                else:
+                    full_enc, width = "utf-8", 1
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                start = 0
+                if tail_bytes and size > tail_bytes:
+                    start = size - tail_bytes
+                    if width == 2 and start % 2:      # keep UTF-16 code units aligned
+                        start += 1
+                f.seek(start)
+                raw = f.read()
         except OSError:
             return ""
+        # a tail slice has no BOM, so decode it BOM-free; a full read uses the detected encoding
+        dec = full_enc if start == 0 else ("utf-16-le" if width == 2 else "utf-8")
+        return raw.decode(dec, "replace")
 
     def _clean_output(self, text):
         """Strip PowerShell prompt/echo lines and Start-Transcript banners from
@@ -115,28 +165,25 @@ class TerminalManager:
             keep.append(ln)
         return "\n".join(keep).strip()
 
-    async def _capture_delta(self, log_path, before):
-        """Wait for the transcript to grow past `before` and settle, then return
-        the new (cleaned) output. Times out for long/interactive commands."""
-        last = before
-        stable = None
+    def _finish_capture(self, text, marker):
+        """Drop the done-marker line and clean the captured output."""
+        return self._clean_output(text.replace(marker, "")) if marker else self._clean_output(text)
+
+    async def _await_capture(self, out_path, marker):
+        """Poll the capture file until the done-marker appears (the command finished AND its output
+        flushed to disk), or we time out. Returns (cleaned_output, done)."""
         t0 = time.monotonic()
         while time.monotonic() - t0 < CAPTURE_TIMEOUT:
-            await asyncio.sleep(0.25)
-            cur = self._transcript_len(log_path)
-            if cur > last:
-                last = cur
-                stable = time.monotonic()
-            elif stable and cur > before and (time.monotonic() - stable) >= CAPTURE_QUIET:
-                break
-        full = self._read_transcript(log_path)
-        delta = full[before:] if len(full) > before else ""
-        return self._clean_output(delta)
+            await asyncio.sleep(0.2)
+            text = self._read_capture(out_path)
+            if marker and marker in text:
+                return self._finish_capture(text, marker), True
+        return self._finish_capture(self._read_capture(out_path), marker), False
 
     # --- sessions ----------------------------------------------------------
 
     def open_session(self, name, directory):
-        directory = os.path.expanduser(directory or "~")
+        directory = resolve_dir(directory)
         if not os.path.isdir(directory):
             return {"success": False, "error": f"directory doesn't exist: {directory}"}
         log_path = os.path.join(self._log_dir, f"session-{name}.log")
@@ -206,31 +253,61 @@ class TerminalManager:
         s = self.sessions.get(name)
         if not s:
             return {"success": False, "error": f"no terminal named '{name}'"}
-        text = self._clean_output(self._read_transcript(s["log_path"]))
+        out_path = s.get("last_out")
+        if not out_path:
+            return {"success": True, "terminal": name, "cwd": s["cwd"],
+                    "recent_output": "(nothing run in this terminal yet)"}
+        raw = self._read_capture(out_path)
+        marker = s.get("last_marker", "")
+        done = (marker in raw) if marker else True
+        text = self._finish_capture(raw, marker)
+        note = "" if done else "\n(still running — read again shortly)"
         return {"success": True, "terminal": name, "cwd": s["cwd"],
-                "recent_output": text[-OUTPUT_TAIL:]}
+                "recent_output": (text[-OUTPUT_TAIL:] or "(no output captured)") + note}
 
     # --- commands -----------------------------------------------------------
 
+    def _wrap(self, command, out_path, marker):
+        """Wrap the command so ALL its output is teed to `out_path` and it ends with `marker`.
+        Dot-sourced (`. { }`, not `& { }`) so cd / $vars persist to the session; `2>&1` so errors
+        are captured too; Tee-Object shows it live in the window and flushes the file when it ends."""
+        return ". { " + command + " ; '" + marker + "' } 2>&1 | Tee-Object -FilePath '" + out_path + "'"
+
     async def run(self, name, command):
-        """Type a command into the session's visible terminal and read back its
-        output from the transcript. The user sees it run in that window."""
+        """Type a command into the session's visible terminal and read back its output. Deterministic:
+        the command is teed to a per-run file ending in a unique marker (no dependence on
+        Start-Transcript, which doesn't flush small output in time). The user sees it run in the window."""
         name = self._resolve(name)
         s = self.sessions[name]
         hwnd = await self._ensure_window(name)
         if not hwnd:
             return {"success": False, "error": "couldn't open or find the terminal window"}
 
-        before = self._transcript_len(s["log_path"])
-        ok = await asyncio.to_thread(computer.send_keys_to_hwnd, hwnd, command, 0.35, True)
+        s["cmd_n"] = s.get("cmd_n", 0) + 1
+        n = s["cmd_n"]
+        out_path = os.path.join(self._log_dir, f"cmd-{name}-{n}.out")
+        marker = f"AIVADONE{n}X{int(time.time() * 1000) % 1000000:06d}"
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except OSError:
+            pass
+        ok = await asyncio.to_thread(computer.send_keys_to_hwnd, hwnd,
+                                     self._wrap(command, out_path, marker), 0.35, True)
         if not ok:
             return {"success": False,
                     "error": "couldn't focus the terminal window to type the command"}
+        s["last_out"] = out_path
+        s["last_marker"] = marker
 
-        output = await self._capture_delta(s["log_path"], before)
+        output, done = await self._await_capture(out_path, marker)
         s["history"].append((command, output))
-        return {"success": True, "output": output[-OUTPUT_TAIL:] or
-                "(command sent to the terminal; still running or no output — read it again shortly)"}
+        tail = output[-OUTPUT_TAIL:]
+        if done:
+            return {"success": True, "output": tail or "(command finished with no output)"}
+        return {"success": True, "still_running": True,
+                "output": (tail + "\n(still running — read the terminal again shortly)").strip()
+                if tail else "(command sent; still running — read the terminal again shortly)"}
 
     async def type_in(self, name, text, submit=True):
         """Type raw keystrokes into the visible terminal WITHOUT waiting to
@@ -250,9 +327,9 @@ class TerminalManager:
                 "note": "typed into the terminal — use look_at_screen to read what it shows"}
 
     def _track_job(self, job_name, session, cmd, proc, announce_done, claude=False):
-        job = {"proc": proc, "cmd": cmd, "session": session, "status": "running",
-               "result": "", "claude_session_id": None, "cost": None, "started": time.time(),
-               "log_path": os.path.join(self._log_dir, f"{job_name}.log"),
+        job = {"proc": proc, "cmd": cmd, "session": session, "status": "running", "claude": bool(claude),
+               "result": "", "claude_session_id": None, "cost": None, "denied": [], "started": time.time(),
+               "log_path": os.path.join(self.jobs_dir, f"{job_name}.log"),
                "done_event": asyncio.Event()}
         self.jobs[job_name] = job
         asyncio.create_task(self._watch_job(job_name, announce_done, claude))
@@ -266,17 +343,30 @@ class TerminalManager:
             job["status"] = "done" if job["proc"].returncode == 0 else f"failed ({job['proc'].returncode})"
         job["result"] = text
 
+        payload = None
         if claude:
             try:
                 payload = json.loads(text.strip().splitlines()[-1])
                 job["claude_session_id"] = payload.get("session_id")
                 job["cost"] = payload.get("total_cost_usd")
                 job["result"] = payload.get("result", text)
+                # what it wanted to do but wasn't allowed (headless: nobody to approve the prompt)
+                for d in payload.get("permission_denials") or []:
+                    inp = d.get("tool_input") or {}
+                    what = inp.get("command") or inp.get("file_path") or ""
+                    job["denied"].append(f"{d.get('tool_name')}: {str(what)[:120]}".strip(": "))
             except (json.JSONDecodeError, IndexError):
                 pass
 
-        with open(job["log_path"], "w", encoding="utf-8") as f:
-            f.write(job["result"])
+        try:
+            os.makedirs(os.path.dirname(job["log_path"]), exist_ok=True)
+            with open(job["log_path"], "w", encoding="utf-8") as f:
+                f.write(job["result"])
+            if isinstance(payload, dict):  # session_id, cost, turns, duration — the raw record
+                with open(job["log_path"][:-4] + ".json", "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass  # a log we can't write must never stall the waiting task
         job["done_event"].set()  # wait_job() callers (the task runner) wake up here
 
         if announce_done and self._announce:
@@ -300,7 +390,8 @@ class TerminalManager:
         except asyncio.TimeoutError:
             return None
         return {"status": job["status"], "result": job["result"], "cost": job["cost"],
-                "claude_session_id": job["claude_session_id"]}
+                "claude_session_id": job["claude_session_id"], "log_path": job.get("log_path"),
+                "denied": job.get("denied") or []}
 
     def kill_job(self, name):
         """Kill a running job (task cancelled / timed out). True if something died."""
@@ -326,7 +417,10 @@ class TerminalManager:
 
     async def start_claude(self, job_name, project_dir, prompt, mode="plan", resume_id=None,
                            announce_done=True):
-        project_dir = os.path.expanduser(project_dir)
+        if is_whole_home(project_dir):
+            return {"success": False, "error": "won't run Claude Code across his whole home folder; "
+                                               "give the project's own folder"}
+        project_dir = resolve_dir(project_dir)
         if not os.path.isdir(project_dir):
             return {"success": False, "error": f"project dir doesn't exist: {project_dir}"}
         if job_name in self.jobs and self.jobs[job_name]["status"] == "running":
@@ -336,7 +430,7 @@ class TerminalManager:
         if mode == "plan":
             args += ["--permission-mode", "plan"]
         else:
-            args += ["--permission-mode", "acceptEdits"]
+            args += ["--permission-mode", execute_permission_mode()]
         if resume_id:
             args += ["--resume", resume_id]
 

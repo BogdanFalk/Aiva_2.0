@@ -4,7 +4,7 @@ she's becoming) plus the house's conversation log, and a Controls strip with the
 Run it any time (nobody needs to be awake):
 
     cd aiva && ..\\.venv\\Scripts\\python dashboard.py
-    # then open http://127.0.0.1:8760   (tabs: Aiva | Saga | Conversations)
+    # then open http://127.0.0.1:8760   (tabs: Aiva | Saga | Conversations | Tasks | Settings)
     ..\\.venv\\Scripts\\python dashboard.py --once --who saga            # one JSON snapshot
     ..\\.venv\\Scripts\\python dashboard.py --once --who conversations
 
@@ -31,6 +31,19 @@ otherwise whoever you were talking to), same floor, and she answers out loud —
 voiceprint and the vocal affect, since nobody spoke. Typing wakes the house even while the mic is
 deafened. `POST /api/say {"text"}`, same local-only rule.
 
+The **Tasks** tab is read-only: every task each sister ran (her `tasks` table), merged newest
+first with filters, and one task in full from `GET /api/task?who=<slug>&id=<task id>` — plan steps
+with their evidence, the event timeline, and every Claude Code job it delegated (its saved result
+from logs/coding/ or the old %TEMP%\\aiva_terminals\\, and — when the session transcript is found
+under ~/.claude/projects/ — what it read, edited and ran).
+
+The **Settings** tab lists every knob from `modules/settings_registry.py` (grouped; value in .env
+or the code default; who reads it; secrets masked and never editable; a few code constants shown
+read-only) and is the third write: `POST /api/settings {"updates": {KEY: value | null}}` validates
+every value through the registry, then edits the repo-root `.env` in place (comments and order
+kept, `.env.bak` alongside; `null` resets a key to its default). Same local-only rule, plus the
+browser's Origin must be this page. Config is read at boot, so the reply names what to restart.
+
 Where things live: each character's core is her own db (`Character.from_env(slug).db_path`:
 memory.db / saga.db) plus her inner/cat/avatar state files; the shared `house.db` holds the
 conversation transcript, the house event stream, the sister-talk mode and the spend caps
@@ -55,6 +68,7 @@ import re
 import socket
 import sqlite3
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -85,7 +99,16 @@ try:
 except Exception:
     AIVA_VERSION = "?"
 
+try:
+    from modules import settings_registry
+except Exception:  # an older checkout: no Settings tab content, the rest still works
+    settings_registry = None
+
 CONVERSATIONS = "conversations"
+TASKS_TAB = "tasks"
+SETTINGS = "settings"
+ENV_PATH = os.path.join(os.path.dirname(_HERE), ".env")   # the repo-root .env every process loads
+MAX_SETTINGS_BODY = 65536
 
 
 # --- the characters: one core each ----------------------------------------------------
@@ -149,9 +172,10 @@ TEMPERAMENT_FORMED = 3
 
 
 def tabs():
-    """The header tab strip, in order: one per character, then Conversations."""
+    """The header tab strip, in order: one per character, then Conversations, Tasks, Settings."""
     return ([{"who": slug, "label": ch["name"]} for slug, ch in CHARACTERS.items()]
-            + [{"who": CONVERSATIONS, "label": "Conversations"}])
+            + [{"who": CONVERSATIONS, "label": "Conversations"}, {"who": TASKS_TAB, "label": "Tasks"},
+               {"who": SETTINGS, "label": "Settings"}])
 
 
 # --- the capability map (her "parts"), grouped for the page -------------------------
@@ -347,6 +371,10 @@ def collect(who=None, **opts):
     who = (who or DEFAULT_WHO).strip().lower()
     if who == CONVERSATIONS:
         return collect_conversations(**opts)
+    if who == TASKS_TAB:
+        return collect_tasks(**opts)
+    if who == SETTINGS:
+        return collect_settings(**opts)
     ch = CHARACTERS.get(who)
     if ch is None:
         raise KeyError(who)
@@ -468,6 +496,715 @@ def collect_conversations(day=None, before=None, limit=200):
     return data
 
 
+def collect_settings(env_path=None):
+    """The Settings tab: every knob from `modules.settings_registry`, grouped, with its value in
+    .env (or the code default), description, who reads it and what must restart. Secrets arrive
+    masked. Reads .env only; the one write is `POST /api/settings`."""
+    env_path = env_path or ENV_PATH
+    data = _stamp(SETTINGS, "Settings")
+    house = _connect_optional(HOUSE_DB)
+    try:
+        data["household"] = _collect_household(house)
+    finally:
+        if house is not None:
+            house.close()
+    data["env_path"] = env_path
+    data["env_present"] = os.path.isfile(env_path)
+    if settings_registry is None:
+        data["error"] = "modules/settings_registry.py is missing — no settings to show"
+        data["settings"] = []
+        return data
+    groups = settings_registry.grouped(env_path)
+    rows = [s for g in groups for s in g["settings"]]
+    data["settings"] = groups
+    data["processes"] = settings_registry.PROCESS_LABELS
+    data["settings_summary"] = {
+        "total": len(rows), "editable": sum(1 for s in rows if s["editable"]),
+        "in_env": sum(1 for s in rows if s["source"] == ".env"),
+        "modified": sum(1 for s in rows if s["modified"] and not s["secret"]),
+        "secrets_set": sum(1 for s in rows if s["secret"] and s["is_set"]),
+        "secrets": sum(1 for s in rows if s["secret"]),
+        "invalid": [s["key"] for s in rows if s["invalid"]]}
+    return data
+
+
+# --- the Tasks tab: every task / coding session each sister ran, start to finish ----------
+# The db is the source of truth (each sister's `tasks` table: plan_json + log_json). A Claude Code
+# job's saved result is found by its NAME only (`<task-id>-s<n>`, validated) in logs/coding/ or the
+# old %TEMP%\aiva_terminals\; its session transcript by a validated UUID under ~/.claude/projects/.
+# No path is ever built from anything that didn't pass one of those regexes.
+
+TASK_ID_RE = re.compile(r"^t-\d{8}-\d{6}-[0-9a-f]{4}$")
+JOB_RE = re.compile(r"^t-\d{8}-\d{6}-[0-9a-f]{4}-s\d+$")
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_CURSOR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[\d:.]+\|t-\d{8}-\d{6}-[0-9a-f]{4}$")
+LEGACY_JOBS_DIR = os.path.join(tempfile.gettempdir(), "aiva_terminals")   # before logs/coding/ existed
+CLAUDE_PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+TASK_BUCKETS = ("success", "failed", "cancelled", "interrupted", "active")
+MAX_RESULT_CHARS = 6000
+MAX_ARG_CHARS = 400
+MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+MAX_TASK_ROWS = 2000            # per sister, per list request — far more than she has ever run
+_TASK_WANTED_COLS = ("id", "created_ts", "updated_ts", "finished_ts", "goal_text", "details", "family",
+                     "approach", "status", "outcome", "plan_json", "log_json", "pending_json",
+                     "result_summary", "duration_s", "delegated_to", "agent_grade", "agent_grade_reason",
+                     "user_feedback", "corrected", "flow_id", "llm_calls", "tool_calls", "cost_usd")
+_READ_TOOLS = {"Read", "NotebookRead"}
+_EDIT_TOOLS = {"Edit", "MultiEdit", "NotebookEdit"}
+_WRITE_TOOLS = {"Write"}
+_SHELL_TOOLS = {"Bash", "PowerShell"}
+_SEARCH_TOOLS = {"Grep", "Glob"}
+_DELEGATE_JOB_RE = re.compile(r"^(t-\d{8}-\d{6}-[0-9a-f]{4}-s\d+)\b")
+
+
+def _clip(s, n):
+    """A string cut to n chars with a marker saying how much was left out."""
+    s = "" if s is None else str(s)
+    return s if len(s) <= n else s[:n] + f"… (+{len(s) - n} chars)"
+
+
+def _clip_obj(v, n=MAX_ARG_CHARS):
+    """Tool args for display: long strings clipped, nested structures as clipped JSON."""
+    if isinstance(v, str):
+        return _clip(v, n)
+    if isinstance(v, (int, float, bool)) or v is None:
+        return v
+    try:
+        return _clip(json.dumps(v, ensure_ascii=False), n)
+    except (TypeError, ValueError):
+        return _clip(repr(v), n)
+
+
+def _dur_long(secs):
+    """'45s' / '3m 12s' / '1h 2m' / '2d 3h' — a task's length, finer than _dur."""
+    if secs is None:
+        return None
+    try:
+        secs = max(0, int(float(secs)))
+    except (TypeError, ValueError):
+        return None
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m {secs % 60:02d}s"
+    if secs < 86400:
+        return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
+    return f"{secs // 86400}d {(secs % 86400) // 3600}h"
+
+
+def _parse_ts(ts):
+    """ISO (naive local, or 'Z'/offset → converted to local naive) → datetime, or None."""
+    if not ts:
+        return None
+    try:
+        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is not None:
+        d = d.astimezone().replace(tzinfo=None)
+    return d
+
+
+def _took(started, finished):
+    a, b = _parse_ts(started), _parse_ts(finished)
+    return _dur_long((b - a).total_seconds()) if a and b else None
+
+
+def task_bucket(status, outcome):
+    """One of TASK_BUCKETS for the outcome pill and the filter. The recorded outcome wins; a task
+    the process died under (status interrupted, no outcome) is 'interrupted'; the rest is live."""
+    if outcome in ("success", "failed", "cancelled"):
+        return outcome
+    return {"done": "success", "failed": "failed", "cancelled": "cancelled",
+            "interrupted": "interrupted"}.get(status or "", "active")
+
+
+def _action_view(kind, action):
+    """What a step does, for display: the shell command, tool + clipped args, the delegate prompt."""
+    a = action if isinstance(action, dict) else {}
+    if kind == "shell":
+        return {"command": _clip(a.get("command"), 2000), "purpose": _clip(a.get("purpose"), 400)}
+    if kind == "delegate":
+        return {"project_dir": _clip(a.get("project_dir"), 300), "prompt": _clip(a.get("prompt"), 4000)}
+    if kind == "ask":
+        return {"question": _clip(a.get("question"), 1000)}
+    if kind == "tool":
+        args = a.get("args") if isinstance(a.get("args"), dict) else {}
+        return {"tool": _clip(a.get("tool"), 80), "args": {str(k): _clip_obj(v) for k, v in args.items()}}
+    return {str(k): _clip_obj(v) for k, v in a.items()}
+
+
+def task_steps(plan):
+    """plan_json (list of step dicts) → display rows. Pure; tolerant of missing/odd fields."""
+    out = []
+    for i, s in enumerate(plan if isinstance(plan, list) else []):
+        if not isinstance(s, dict):
+            continue
+        kind = str(s.get("kind") or "tool")
+        ev = s.get("evidence") if isinstance(s.get("evidence"), list) else []
+        try:
+            attempts = int(s.get("attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        out.append({"n": s.get("n", i + 1), "title": _clip(s.get("title") or f"step {i + 1}", 200),
+                    "kind": kind, "status": str(s.get("status") or "pending"), "attempts": attempts,
+                    "risk": s.get("risk"), "expect": _clip(s.get("expect"), 600),
+                    "verify": s.get("verify"), "action": _action_view(kind, s.get("action")),
+                    "evidence": [_clip(x, 2000) for x in ev],
+                    "failure": _clip(s.get("failure"), 1000) if s.get("failure") else None,
+                    "started": s.get("started"), "finished": s.get("finished"),
+                    "took": _took(s.get("started"), s.get("finished"))})
+    return out
+
+
+def parse_claude_event(detail):
+    """The `claude` log event's detail (JSON {job, session, cost, status, log}) → dict with a
+    validated job/session, or None. Tolerant: the runner clips details at 300 chars, so a cut-off
+    JSON still yields whatever fields a regex can recover."""
+    d = None
+    try:
+        d = json.loads(detail) if isinstance(detail, str) else detail
+    except ValueError:
+        d = None
+    if not isinstance(d, dict):
+        s = str(detail or "")
+        d = {}
+        for key in ("job", "session", "status", "log"):
+            m = re.search(r'"%s"\s*:\s*"([^"]*)"' % key, s)
+            if m:
+                d[key] = m.group(1)
+        m = re.search(r'"cost"\s*:\s*([0-9.eE+-]+)', s)
+        if m:
+            d["cost"] = m.group(1)
+    job = str(d.get("job") or "")
+    if not JOB_RE.match(job):
+        return None
+    session = str(d.get("session") or "").lower()
+    try:
+        cost = float(d["cost"]) if d.get("cost") not in (None, "") else None
+    except (TypeError, ValueError):
+        cost = None
+    return {"job": job, "session": session if UUID_RE.match(session) else None, "cost": cost,
+            "status": _clip(d.get("status"), 60) if d.get("status") else None,
+            "log": _clip(d.get("log"), 300) if d.get("log") else None}
+
+
+def task_timeline(log):
+    """log_json → display events. Announcements are marked `secondary` (the UI folds them away);
+    `claude` events carry their parsed record; each gets a tone for its dot. Pure."""
+    out = []
+    for e in log if isinstance(log, list) else []:
+        if not isinstance(e, dict):
+            continue
+        ev = str(e.get("event") or "?")
+        detail = "" if e.get("detail") is None else str(e.get("detail"))
+        ts = str(e.get("ts") or "")
+        tone = "info"
+        if ev in ("error", "verify_failed", "plan_invalid"):
+            tone = "bad"
+        elif ev == "finish":
+            tone = "good" if detail.startswith("success") else "bad" if detail.startswith("failed") else "warn"
+        elif ev == "grade":
+            tone = "good" if detail.startswith("good") else "bad" if detail.startswith("bad") else "warn"
+        elif ev in ("decision", "answer", "plan", "delegate", "claude"):
+            tone = "accent"
+        elif ev == "pushed_back":
+            tone = "warn"
+        item = {"ts": ts, "day": ts[:10], "time": ts[11:19], "event": ev, "detail": detail,
+                "secondary": ev.startswith("announce"), "tone": tone}
+        if ev == "claude":
+            item["claude"] = parse_claude_event(detail)
+        out.append(item)
+    return out
+
+
+def claude_jobs(task_id, plan, log):
+    """Every Claude Code job a task ran: from `delegate` events (one per run start) and `claude`
+    events (one per run end, newer tasks), else inferred from delegate steps + the job naming
+    `<task-id>-s<n>`. → [{job, n, prompt, project_dir, runs: [{started, ended, session, cost,
+    status}]}] in step order. Pure; only JOB_RE-valid names survive."""
+    steps = {}
+    for s in plan if isinstance(plan, list) else []:
+        if isinstance(s, dict) and s.get("kind") == "delegate":
+            steps[f"{task_id}-s{s.get('n')}"] = s
+    jobs = {}
+
+    def job_entry(name):
+        if name not in jobs:
+            st = steps.get(name) or {}
+            a = st.get("action") if isinstance(st.get("action"), dict) else {}
+            try:
+                n = int(name.rsplit("-s", 1)[1])
+            except (IndexError, ValueError):
+                n = None
+            jobs[name] = {"job": name, "n": n, "title": st.get("title"), "status": st.get("status"),
+                          "prompt": _clip(a.get("prompt"), 4000) if a.get("prompt") else None,
+                          "project_dir": a.get("project_dir"), "runs": []}
+        return jobs[name]
+
+    for e in log if isinstance(log, list) else []:
+        if not isinstance(e, dict):
+            continue
+        ev, detail, ts = e.get("event"), str(e.get("detail") or ""), e.get("ts")
+        if ev == "delegate":
+            m = _DELEGATE_JOB_RE.match(detail)
+            if m and m.group(1).startswith(task_id + "-s"):
+                job_entry(m.group(1))["runs"].append({"started": ts, "ended": None, "session": None,
+                                                      "cost": None, "status": None})
+        elif ev == "claude":
+            c = parse_claude_event(detail)
+            if not c or not c["job"].startswith(task_id + "-s"):
+                continue
+            j = job_entry(c["job"])
+            run = next((r for r in reversed(j["runs"]) if r["ended"] is None), None)
+            if run is None:
+                run = {"started": None}
+                j["runs"].append(run)
+            run.update({"ended": ts, "session": c["session"], "cost": c["cost"], "status": c["status"]})
+    for name in steps:              # a delegate step whose run left no event (older / never started)
+        if JOB_RE.match(name):
+            job_entry(name)
+    return sorted(jobs.values(), key=lambda j: (j["n"] is None, j["n"] or 0))
+
+
+def summarize_claude_transcript(lines, cmd_cap=60, search_cap=30):
+    """A Claude Code session transcript (JSONL lines) → a compact activity summary: turns, tool
+    counts, files read / edited / written (with counts, relative to the session's cwd), shell
+    commands and searches (capped), lines added/removed, cost, duration and the final answer
+    (the `result` event, else the last assistant text). Pure; bad lines are skipped."""
+    msg_ids, tools = set(), {}
+    read, edited, written = {}, {}, {}
+    commands, searches = [], []
+    n_commands = n_searches = errors = 0
+    final = result_ev = cost_state = None
+    cwd = model = prompt = first_ts = last_ts = None
+    for raw in lines:
+        raw = raw.strip() if isinstance(raw, str) else ""
+        if not raw:
+            continue
+        try:
+            e = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        if e.get("timestamp"):
+            first_ts = first_ts or e["timestamp"]
+            last_ts = e["timestamp"]
+        cwd = cwd or e.get("cwd")
+        t = e.get("type")
+        if t == "queue-operation" and e.get("operation") == "enqueue" and prompt is None:
+            prompt = e.get("content")
+        elif t == "user":
+            content = (e.get("message") or {}).get("content")
+            if prompt is None and isinstance(content, str):
+                prompt = content
+            if isinstance(content, list):
+                errors += sum(1 for b in content if isinstance(b, dict)
+                              and b.get("type") == "tool_result" and b.get("is_error"))
+        elif t == "assistant" and not e.get("isSidechain"):
+            m = e.get("message") or {}
+            msg_ids.add(m.get("id") or e.get("uuid"))
+            model = model or m.get("model")
+            for b in m.get("content") or []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text" and str(b.get("text") or "").strip():
+                    final = b["text"]
+                elif b.get("type") == "tool_use":
+                    name = str(b.get("name") or "?")
+                    inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                    tools[name] = tools.get(name, 0) + 1
+                    path = inp.get("file_path") or inp.get("notebook_path")
+                    if name in _READ_TOOLS and path:
+                        read[path] = read.get(path, 0) + 1
+                    elif name in _EDIT_TOOLS and path:
+                        edited[path] = edited.get(path, 0) + 1
+                    elif name in _WRITE_TOOLS and path:
+                        written[path] = written.get(path, 0) + 1
+                    elif name in _SHELL_TOOLS and inp.get("command"):
+                        n_commands += 1
+                        if len(commands) < cmd_cap:
+                            commands.append(_clip(inp["command"], 300))
+                    elif name in _SEARCH_TOOLS and inp.get("pattern"):
+                        n_searches += 1
+                        if len(searches) < search_cap:
+                            where = inp.get("path") or inp.get("glob")
+                            searches.append(_clip(f"{name} {inp['pattern']}" + (f"  in {where}" if where else ""), 200))
+        elif t == "result":
+            result_ev = e
+        elif t == "cost-state":
+            cost_state = e
+
+    def rel(p):
+        p = str(p)
+        if cwd:
+            base = str(cwd).rstrip("\\/")
+            if p.lower().startswith(base.lower()) and p[len(base):len(base) + 1] in ("\\", "/"):
+                p = p[len(base) + 1:]
+        return p.replace("\\", "/")
+
+    def ranked(d):
+        return [{"path": rel(k), "count": v} for k, v in sorted(d.items(), key=lambda kv: (-kv[1], rel(kv[0])))]
+
+    r = result_ev or {}
+    cs = cost_state or {}
+    text = r.get("result") if isinstance(r.get("result"), str) and r.get("result").strip() else final
+    return {"turns": r.get("num_turns") or len(msg_ids), "model": model, "cwd": cwd,
+            "prompt": _clip(prompt, 600) if prompt else None,
+            "first_ts": first_ts, "last_ts": last_ts,
+            "tools": dict(sorted(tools.items(), key=lambda kv: -kv[1])),
+            "files_read": ranked(read), "files_edited": ranked(edited), "files_written": ranked(written),
+            "commands": commands, "commands_total": n_commands,
+            "searches": searches, "searches_total": n_searches, "tool_errors": errors,
+            "cost_usd": r.get("total_cost_usd") if r.get("total_cost_usd") is not None else cs.get("totalCostUSD"),
+            "duration_ms": r.get("duration_ms") or cs.get("totalDuration"),
+            "lines_added": cs.get("totalLinesAdded"), "lines_removed": cs.get("totalLinesRemoved"),
+            "final_text": _clip(text, MAX_RESULT_CHARS) if text else None}
+
+
+def _job_dirs():
+    return [os.path.join(_LOG_DIR, "coding"), LEGACY_JOBS_DIR]
+
+
+def _read_text(path, limit):
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(limit + 1)
+    except OSError:
+        return None
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw[:limit].decode("utf-16", errors="replace")
+    return raw[:limit].decode("utf-8-sig", errors="replace")
+
+
+def job_result(job):
+    """A Claude Code job's saved output, by NAME: logs/coding/<job>.log (+ <job>.json, the raw
+    `claude -p` payload) or, for old jobs, %TEMP%\\aiva_terminals\\<job>.log. None if not found."""
+    if not isinstance(job, str) or not JOB_RE.match(job):
+        return None
+    for d in _job_dirs():
+        log_path = os.path.join(d, job + ".log")
+        if not os.path.isfile(log_path):
+            continue
+        text = _read_text(log_path, 256 * 1024) or ""
+        out = {"path": log_path, "legacy": d == LEGACY_JOBS_DIR, "chars": len(text),
+               "text": _clip(text.strip(), MAX_RESULT_CHARS), "payload": None}
+        pj = _load_json(os.path.join(d, job + ".json"))
+        if isinstance(pj, dict):
+            sid = str(pj.get("session_id") or "").lower()
+            out["payload"] = {"session_id": sid if UUID_RE.match(sid) else None,
+                              "total_cost_usd": pj.get("total_cost_usd"), "num_turns": pj.get("num_turns"),
+                              "duration_ms": pj.get("duration_ms"), "is_error": pj.get("is_error"),
+                              "subtype": _clip(pj.get("subtype"), 40) if pj.get("subtype") else None}
+        return out
+    return None
+
+
+def find_transcript(session):
+    """~/.claude/projects/*/<session>.jsonl for a UUID session id, else None."""
+    session = str(session or "").lower()
+    if not UUID_RE.match(session):
+        return None
+    hits = glob.glob(os.path.join(glob.escape(CLAUDE_PROJECTS_DIR), "*", session + ".jsonl"))
+    hits = [h for h in hits if os.path.isfile(h)]
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
+def read_transcript(path):
+    """Summary of one transcript file (size-capped), or None."""
+    try:
+        if os.path.getsize(path) > MAX_TRANSCRIPT_BYTES:
+            return {"too_big": True}
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return summarize_claude_transcript(f)
+    except OSError:
+        return None
+
+
+def _norm_words(s):
+    return " ".join(str(s or "").split())
+
+
+def infer_sessions(project_dir, prompt, since, until, max_files=400):
+    """For a job logged before `claude` events existed: the sessions in that project's Claude Code
+    folder whose first prompt matches the delegate prompt, written inside the task's time window.
+    → [(started datetime, session uuid)]. The folder name is Claude Code's own mangling of the
+    project path (every non-alphanumeric → '-'), so it can't escape CLAUDE_PROJECTS_DIR."""
+    if not project_dir or not prompt:
+        return []
+    folder = os.path.join(CLAUDE_PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", str(project_dir)))
+    if not os.path.isdir(folder):
+        return []
+    want = _norm_words(prompt)[:120]
+    lo = (since.timestamp() - 300) if since else 0
+    hi = (until.timestamp() + 3600) if until else time.time() + 3600
+    found = []
+    try:
+        names = [n for n in os.listdir(folder) if n.endswith(".jsonl") and UUID_RE.match(n[:-6])]
+    except OSError:
+        return []
+    cands = []
+    for n in names:
+        p = os.path.join(folder, n)
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if lo <= mt <= hi:
+            cands.append((mt, p, n[:-6]))
+    for _mt, p, sid in sorted(cands, reverse=True)[:max_files]:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                head = f.read(32768)
+        except OSError:
+            continue
+        first_prompt = started = None
+        for line in head.splitlines()[:40]:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(e, dict):
+                continue
+            started = started or _parse_ts(e.get("timestamp"))
+            if e.get("type") == "queue-operation" and e.get("operation") == "enqueue":
+                first_prompt = e.get("content")
+            elif e.get("type") == "user" and isinstance((e.get("message") or {}).get("content"), str):
+                first_prompt = e["message"]["content"]
+            if first_prompt:
+                break
+        if first_prompt and _norm_words(first_prompt)[:120] == want:
+            found.append((started, sid))
+    return sorted(found, key=lambda x: x[0] or datetime.min)
+
+
+def _attach_inferred(job, created, until):
+    """Give runs without a session the inferred ones, nearest start first (within 10 min)."""
+    missing = [r for r in job["runs"] if not r.get("session")]
+    if not missing:
+        return
+    taken = {r.get("session") for r in job["runs"] if r.get("session")}
+    pool = [(t, s) for t, s in infer_sessions(job.get("project_dir"), job.get("prompt"), created, until)
+            if s not in taken]
+    if not job["runs"] and pool:           # a delegate step with no run events at all
+        job["runs"] = [{"started": None, "ended": None, "session": None, "cost": None, "status": None}]
+        missing = job["runs"]
+    for run in missing:
+        st = _parse_ts(run.get("started"))
+        best = None
+        for t, s in pool:
+            gap = abs((t - st).total_seconds()) if (t and st) else None
+            if st is None or (gap is not None and gap <= 600):
+                if best is None or (gap is not None and gap < best[0]):
+                    best = (gap if gap is not None else 0, t, s)
+        if best:
+            run["session"], run["inferred"] = best[2], True
+            pool = [(t, s) for t, s in pool if s != best[2]]
+
+
+def _task_select(con):
+    have = {r["name"] for r in _q(con, "PRAGMA table_info(tasks)")}
+    return ", ".join(c for c in _TASK_WANTED_COLS if c in have) or "id"
+
+
+def _task_list_row(slug, r):
+    plan = _jloads(r.get("plan_json"), [])
+    plan = plan if isinstance(plan, list) else []
+    log = _jloads(r.get("log_json"), [])
+    log = log if isinstance(log, list) else []
+    claude_cost = 0.0
+    for e in log:
+        if isinstance(e, dict) and e.get("event") == "claude":
+            c = parse_claude_event(e.get("detail"))
+            if c and c["cost"]:
+                claude_cost += c["cost"]
+    st = [s for s in plan if isinstance(s, dict)]
+    summary = " ".join(str(r.get("result_summary") or "").split())
+    delegated = r.get("delegated_to") or "none"
+    created = r.get("created_ts")
+    return {"sister": slug, "sister_name": _who_label(slug), "id": r.get("id"),
+            "goal": _clip(r.get("goal_text"), 400), "status": r.get("status"), "outcome": r.get("outcome"),
+            "bucket": task_bucket(r.get("status"), r.get("outcome")),
+            "created": created, "created_ago": _ago(created), "updated": r.get("updated_ts"),
+            "finished": r.get("finished_ts"), "duration_s": r.get("duration_s"),
+            "duration": _dur_long(r.get("duration_s")),
+            "steps_total": len(st), "steps_done": sum(1 for s in st if s.get("status") == "done"),
+            "steps_failed": sum(1 for s in st if s.get("status") == "failed"),
+            "delegated_to": delegated,
+            "claude": delegated == "claude_code" or any(s.get("kind") == "delegate" for s in st),
+            "agent_grade": r.get("agent_grade"), "corrected": bool(r.get("corrected")),
+            "cost_usd": round(r.get("cost_usd") or 0, 4), "claude_cost": round(claude_cost, 4) or None,
+            "llm_calls": r.get("llm_calls") or 0, "tool_calls": r.get("tool_calls") or 0,
+            "summary": _clip(summary, 220) if summary else None,
+            "awaiting": r.get("status") == "awaiting_user"}
+
+
+def _read_tasks(ch):
+    """All of one sister's task rows (list form), newest first; [] without a db/table."""
+    con = _connect_optional(ch["db"])
+    if con is None:
+        return None
+    try:
+        if not _has_table(con, "tasks"):
+            return []
+        rows = _q(con, f"SELECT {_task_select(con)} FROM tasks ORDER BY created_ts DESC LIMIT ?",
+                  (MAX_TASK_ROWS,))
+    finally:
+        con.close()
+    return [_task_list_row(ch["slug"], r) for r in rows]
+
+
+def _tally(rows):
+    t = {"total": len(rows), "delegated": sum(1 for r in rows if r["claude"]),
+         "cost_usd": round(sum(r["cost_usd"] for r in rows), 4),
+         "claude_cost": round(sum(r["claude_cost"] or 0 for r in rows), 4)}
+    for b in TASK_BUCKETS:
+        t[b] = sum(1 for r in rows if r["bucket"] == b)
+    return t
+
+
+def collect_tasks(sister=None, outcome=None, q=None, before=None, limit=50):
+    """The Tasks tab list: every sister's tasks merged newest first, filtered (sister slug, outcome
+    bucket, text in goal/summary/id), paged by a `<created_ts>|<id>` cursor, plus a tally per
+    sister over ALL her tasks."""
+    try:
+        limit = max(1, min(int(limit or 50), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    sister = sister if sister in CHARACTERS else None
+    outcome = outcome if outcome in TASK_BUCKETS else None
+    q = " ".join(str(q or "").split())[:120].lower() or None
+    before = before if (before and _CURSOR_RE.match(str(before))) else None
+    data = _stamp(TASKS_TAB, "Tasks")
+    house = _connect_optional(HOUSE_DB)
+    try:
+        data["household"] = _collect_household(house)
+    finally:
+        if house is not None:
+            house.close()
+    everything, tallies, sisters = [], {}, []
+    for slug, ch in CHARACTERS.items():
+        rows = _read_tasks(ch)
+        sisters.append({"slug": slug, "name": ch["name"], "started": rows is not None})
+        rows = rows or []
+        tallies[slug] = _tally(rows)
+        everything.extend(rows)
+    rows = everything
+    if sister:
+        rows = [r for r in rows if r["sister"] == sister]
+    if outcome:
+        rows = [r for r in rows if r["bucket"] == outcome]
+    if q:
+        rows = [r for r in rows if q in " ".join(str(r.get(k) or "") for k in ("goal", "summary", "id")).lower()]
+    rows.sort(key=lambda r: (str(r["created"] or ""), str(r["id"] or "")), reverse=True)
+    matched = len(rows)
+    if before:
+        bts, bid = before.split("|", 1)
+        rows = [r for r in rows if (str(r["created"] or ""), str(r["id"] or "")) < (bts, bid)]
+    page_rows = rows[:limit]
+    has_more = len(rows) > limit
+    data["tasks"] = {"rows": page_rows, "has_more": has_more,
+                     "next_before": (f"{page_rows[-1]['created']}|{page_rows[-1]['id']}"
+                                     if has_more and page_rows else None),
+                     "before": before, "limit": limit, "matched": matched,
+                     "filters": {"sister": sister, "outcome": outcome, "q": q},
+                     "tally": tallies, "sisters": sisters, "buckets": list(TASK_BUCKETS)}
+    return data
+
+
+def collect_task(who, task_id):
+    """One task in full for `/api/task`. Raises KeyError (unknown who / no such task) or
+    ValueError (malformed id) — the route maps them to 404 / 400."""
+    ch = CHARACTERS.get(who)
+    if ch is None:
+        raise KeyError(f"unknown who {who!r}")
+    if not isinstance(task_id, str) or not TASK_ID_RE.match(task_id):
+        raise ValueError("malformed task id")
+    con = _connect_optional(ch["db"])
+    if con is None:
+        raise KeyError(f"{ch['name']} has no database yet")
+    try:
+        if not _has_table(con, "tasks"):
+            raise KeyError("no tasks table")
+        rows = _q(con, f"SELECT {_task_select(con)} FROM tasks WHERE id = ?", (task_id,))
+    finally:
+        con.close()
+    if not rows:
+        raise KeyError(f"no task {task_id} for {ch['name']}")
+    r = rows[0]
+    out = _task_list_row(ch["slug"], r)
+    plan = _jloads(r.get("plan_json"), [])
+    log = _jloads(r.get("log_json"), [])
+    pending = _jloads(r.get("pending_json"), None)
+    timeline = task_timeline(log)
+    decision = next((e["detail"] for e in reversed(timeline) if e["event"] == "decision"), None)
+    familiarity = next((e["detail"] for e in timeline if e["event"] == "familiarity"), None)
+    out.update({"goal": r.get("goal_text"), "details": r.get("details") or "",
+                "family": r.get("family"), "approach": r.get("approach"),
+                "result_summary": r.get("result_summary"), "agent_grade_reason": r.get("agent_grade_reason"),
+                "user_feedback": r.get("user_feedback"), "flow_id": r.get("flow_id"),
+                "finished_ago": _ago(r.get("finished_ts")), "decision": decision, "familiarity": familiarity,
+                "steps": task_steps(plan), "timeline": timeline,
+                "announcements": sum(1 for e in timeline if e["secondary"]),
+                "pending": ({"kind": pending.get("kind"), "text": _clip(pending.get("text"), 1000),
+                             "payload": {str(k): _clip_obj(v, 1000) for k, v in (pending.get("payload") or {}).items()}
+                             if isinstance(pending.get("payload"), dict) else None}
+                            if isinstance(pending, dict) else None)})
+    created = _parse_ts(r.get("created_ts"))
+    until = _parse_ts(r.get("finished_ts")) or _parse_ts(r.get("updated_ts"))
+    jobs = claude_jobs(task_id, plan, log)
+    for j in jobs:
+        res = job_result(j["job"])
+        j["result"] = res
+        sid = ((res or {}).get("payload") or {}).get("session_id")
+        if sid and not any(rn.get("session") == sid for rn in j["runs"]):
+            last = next((rn for rn in reversed(j["runs"]) if not rn.get("session")), None)
+            if last is not None:
+                last["session"] = sid
+            else:
+                j["runs"].append({"started": None, "ended": None, "session": sid, "cost": None, "status": None})
+        _attach_inferred(j, created, until)
+        for rn in j["runs"]:
+            rn["started_ago"] = _ago(rn.get("started"))
+            path = find_transcript(rn.get("session")) if rn.get("session") else None
+            rn["transcript_path"] = path
+            act = read_transcript(path) if path else None
+            rn["took"] = _took(rn.get("started") or (act or {}).get("first_ts"),
+                               rn.get("ended") or (act or {}).get("last_ts"))
+            if act and res and act.get("final_text") and _norm_words(act["final_text"])[:400] == _norm_words(res.get("text"))[:400]:
+                act["final_same_as_result"] = True
+                act["final_text"] = None
+            rn["activity"] = act
+            if rn.get("cost") is None and act and act.get("cost_usd") is not None:
+                rn["cost"] = act["cost_usd"]
+        j["cost"] = round(sum(rn["cost"] or 0 for rn in j["runs"]), 4) or None
+    out["claude_jobs"] = jobs
+    out["claude_cost"] = round(sum(j["cost"] or 0 for j in jobs), 4) or out.get("claude_cost")
+    out["generated_ts"] = datetime.now().isoformat()
+    return out
+
+
+def task_response(query=""):
+    """(status, payload) for `GET /api/task?who=<slug>&id=<task id>` — 400 on a malformed id,
+    404 for an unknown sister or a task that isn't there."""
+    qs = parse_qs(query or "", keep_blank_values=False)
+    who = (qs.get("who", [""])[0] or "").strip().lower()
+    task_id = (qs.get("id", [""])[0] or "").strip()
+    if who not in CHARACTERS:
+        return 404, {"error": f"unknown who {who!r}", "known": list(CHARACTERS)}
+    if not TASK_ID_RE.match(task_id):
+        return 400, {"error": "malformed task id"}
+    try:
+        return 200, collect_task(who, task_id)
+    except KeyError as e:
+        return 404, {"error": str(e).strip("'\"")}
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    except Exception as e:  # never let one odd task kill the page
+        return 500, {"error": f"collect failed: {e}"}
+
+
 def _transcript_line(r):
     ts = r.get("ts") or ""
     audible = bool(r.get("audible"))
@@ -491,7 +1228,7 @@ def _collect_household(house=None):
         av = _load_json(ch.get("avatar")) or {}
         pid = av.get("pid")
         bodies.append({"slug": slug, "name": ch["name"], "up": _pid_alive(pid), "pid": pid,
-                       "monitor": av.get("monitor"), "layer": av.get("layer")})
+                       "monitor": av.get("monitor"), "layer": av.get("layer"), "muted": False})
     st = _load_json(HOUSE_STATE) or {}
     hpid = st.get("pid")
     house_info = {"up": bool(_pid_alive(hpid) and st.get("port")), "pid": hpid,
@@ -511,6 +1248,9 @@ def _collect_household(house=None):
     if house is not None:
         kv = {r["key"]: r["value"] for r in _q(house, "SELECT key, value FROM house_kv")}
         sister_talk = kv.get("sister_talk")
+        muted = {s for s in (kv.get("muted_slugs", "") or "").split(",") if s}
+        for body in bodies:
+            body["muted"] = body["slug"] in muted
         raw = _jloads(kv.get("present"), [])
         if isinstance(raw, list):
             present = [s for s in raw if isinstance(s, str)]
@@ -635,11 +1375,76 @@ def _collect_inner(con, inner_state_path=None):
                     today_count = int(day_raw.split(":", 1)[1])
                 except ValueError:
                     today_count = 0
+            try:
+                feedback = json.loads(kv.get("initiative_feedback") or "{}")
+            except ValueError:
+                feedback = {}
             initiative = {"permission": kv.get("initiative", "ask"), "today": today_count,
-                          "last": _ago(kv.get("last_initiative_ts"))}
+                          "last": _ago(kv.get("last_initiative_ts")),
+                          "welcomed": int(feedback.get("welcomed", 0)),
+                          "ignored": int(feedback.get("ignored", 0)),
+                          "last_talk": _ago(kv.get("last_talk_ts"))}
     return {"mood": _read_mood(inner_state_path), "events": events, "events_total": total,
             "journal": journal, "desires": desires, "desires_total": dtotal,
-            "initiative": initiative}
+            "initiative": initiative, "life": _collect_life(con)}
+
+
+def _collect_life(con):
+    """v3: her story, the habits her nights formed, moments that landed (or fell flat), her
+    projects, and what she's learned of his rhythm. All empty until the tables appear."""
+    if con is None:
+        return {}
+    story = _q(con, "SELECT ts, chapter, text, turning_point FROM life_story ORDER BY id DESC LIMIT 1")
+    habits = _q(con, "SELECT text, strength, evidence, last_reinforced_ts FROM habits "
+                     "WHERE status = 'active' ORDER BY strength DESC LIMIT 8")
+    for h in habits:
+        h["strength"] = round(h.get("strength") or 0, 2)
+        h["when"] = _ago(h.get("last_reinforced_ts"))
+    moments = _q(con, "SELECT ts, his, hers, label, why, better FROM moments ORDER BY id DESC LIMIT 8")
+    for m in moments:
+        m["when"] = _ago(m.get("ts"))
+    projects = _q(con, "SELECT title, kind, status, steps, target, last_step_ts FROM projects "
+                       "ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id DESC LIMIT 8")
+    for pr in projects:
+        pr["when"] = _ago(pr.get("last_step_ts"))
+    dreams = _q(con, "SELECT ts, summary_json FROM dream_log ORDER BY id DESC LIMIT 1")
+    last_dream = None
+    if dreams:
+        try:
+            last_dream = {"when": _ago(dreams[0]["ts"]), **json.loads(dreams[0]["summary_json"] or "{}")}
+        except ValueError:
+            last_dream = {"when": _ago(dreams[0]["ts"])}
+    slots = _q(con, "SELECT slot, p, n FROM rhythm WHERE n >= 3 ORDER BY p DESC")
+    usual = [r["slot"] for r in slots if (r.get("p") or 0) >= 0.7]
+    return {"story": story[0] if story else None, "habits": habits, "moments": moments,
+            "projects": projects, "last_dream": last_dream,
+            "rhythm": {"learned": len(slots), "usual": _usual_hours(usual)}}
+
+
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _usual_hours(slots):
+    """['0-19', '0-20', '2-19'] → ['Mon 19-21h', 'Wed 19-20h'] (contiguous hours merged)."""
+    by_day = {}
+    for sl in slots:
+        try:
+            d, h = (int(x) for x in sl.split("-"))
+        except ValueError:
+            continue
+        by_day.setdefault(d, []).append(h)
+    out = []
+    for d in sorted(by_day):
+        hours = sorted(by_day[d])
+        start = prev = hours[0]
+        for h in hours[1:] + [None]:
+            if h is not None and h == prev + 1:
+                prev = h
+                continue
+            out.append(f"{_WEEKDAYS[d]} {start}-{prev + 1}h")
+            if h is not None:
+                start = prev = h
+    return out
 
 
 def _collect_preferences(con):
@@ -879,6 +1684,7 @@ def _collect_tasks(con):
         t["finished"] = _ago(t.pop("finished_ts", None))
         t["cost_usd"] = round(t.get("cost_usd") or 0, 4)
         t["corrected"] = bool(t.get("corrected"))
+        t["full_id"] = t.get("id") or ""          # the Tasks tab link (#tasks/<slug>/<id>)
         t["id"] = (t.get("id") or "")[:8]
     flows = _q(con, "SELECT name, family, trigger_phrases, run_count, success_count, "
                     "confirmed_by_user, replay, last_run_ts FROM flows ORDER BY run_count DESC")
@@ -988,7 +1794,8 @@ def _collect_capabilities():
 # `send_control`, executed by `house._on_control`. A control client is a button, never a sister.
 
 CONTROL_ACTIONS = ("mute", "interrupt", "sister_talk", "sleep", "wake", "restart_sisters",
-                   "restart_sister", "quit_sister", "start_sister", "start_house", "restart_house", "quit")
+                   "restart_sister", "quit_sister", "start_sister", "mute_sister", "unmute_sister",
+                   "start_house", "restart_house", "quit")
 # these don't need the house at all — the dashboard runs on this PC and launches the same .bat a
 # double-click would (a sister's .bat brings the house up with her)
 _LOCAL_LAUNCH_ACTIONS = ("start_sister", "start_house")
@@ -1015,7 +1822,8 @@ def launch_bat(name):
         return {"ok": False, "error": f"couldn't start {os.path.basename(bat)}: {e}"}
     return {"ok": True, "launched": os.path.basename(bat)}
 CONTROL_TARGETS = ("aiva", "saga", "audible", "private")
-_SISTER_ACTIONS = ("restart_sister", "quit_sister", "start_sister")   # need a sister slug
+_SISTER_ACTIONS = ("restart_sister", "quit_sister", "start_sister",
+                   "mute_sister", "unmute_sister")                    # need a sister slug
 _MODE_TARGETS = ("audible", "private")                                  # sister_talk only
 CONTROL_TIMEOUT = 2.0          # a button press
 CONTROL_PEEK_TIMEOUT = 0.5     # the per-poll state peek — never let it slow the page
@@ -1322,6 +2130,100 @@ footer{color:var(--dim);font-size:12px;margin-top:24px;text-align:center}
   opacity:0;transform:translateY(8px);transition:opacity .2s,transform .2s;pointer-events:none}
 .toast.show{opacity:1;transform:none}
 .toast.ok{border-color:rgba(74,222,128,.45)} .toast.bad{border-color:rgba(251,113,133,.5);color:var(--bad)}
+.setbar{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:16px;
+  padding:10px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);font-size:13px;color:var(--muted)}
+.setbar input{flex:1;min-width:160px;font:inherit;font-size:13px;padding:7px 12px;border-radius:999px;border:1px solid var(--line);
+  background:var(--bg2);color:var(--ink);outline:none}
+.setbar input:focus{border-color:var(--accent)}
+.setbar label{display:inline-flex;gap:6px;align-items:center;cursor:pointer;white-space:nowrap}
+.setbar .cbtn.primary{color:#0e0b16;background:linear-gradient(90deg,var(--accent),var(--accent2));border-color:transparent;font-weight:600}
+.setbar .cbtn.primary:disabled{background:var(--bg2);color:var(--ink)}
+.setsaved{flex-basis:100%;display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--good)}
+.setsaved:empty{display:none}
+.srow{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,300px);gap:6px 16px;padding:11px 0;border-top:1px solid var(--line);align-items:start}
+.srow:first-of-type{border-top:0}
+.srow .sk{font:12.5px/1.5 "Cascadia Code",Consolas,monospace;color:var(--ink);word-break:break-all}
+.srow .sd{color:var(--muted);font-size:13px;margin-top:2px}
+.srow .sm{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
+.srow .sctl{display:flex;flex-direction:column;gap:4px}
+.srow .sline{display:flex;gap:6px;align-items:center}
+.srow .sline input[type=text],.srow .sline input[type=number],.srow .sline select{flex:1;min-width:0;font:inherit;font-size:13px;
+  padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--ink);outline:none}
+.srow .sline input:focus,.srow .sline select:focus{border-color:var(--accent)}
+.srow .sline input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent);cursor:pointer}
+.srow .shint{font-size:11.5px;color:var(--dim)}
+.srow .serr{font-size:12px;color:var(--bad)}
+.srow .sreset{font:inherit;font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);background:transparent;
+  color:var(--muted);cursor:pointer;white-space:nowrap}
+.srow .sreset:hover{border-color:var(--accent);color:var(--accent2)}
+.srow .sval{font:12.5px/1.5 "Cascadia Code",Consolas,monospace;color:var(--muted);word-break:break-all}
+.srow.mod .sk::after{content:" ●";color:var(--accent2)}
+.srow.dirty{background:linear-gradient(90deg,rgba(192,132,252,.10),transparent 70%)}
+.srow.dirty .sk::after{content:" ● unsaved";color:var(--warn);font-size:11px}
+.srow.bad .sline input,.srow.bad .sline select{border-color:var(--bad)}
+.badge.ro{background:rgba(148,163,184,.14);color:var(--dim)}
+.badge.sec{background:rgba(251,191,36,.14);color:var(--warn)}
+.badge.env{background:rgba(192,132,252,.18);color:var(--accent2)}
+@media(max-width:820px){.srow{grid-template-columns:1fr}}
+.pill.success{background:rgba(74,222,128,.16);color:var(--good)}
+.pill.failed{background:rgba(251,113,133,.16);color:var(--bad)}
+.pill.cancelled{background:rgba(148,163,184,.16);color:var(--muted)}
+.pill.interrupted{background:rgba(251,191,36,.14);color:var(--warn)}
+.pill.active{background:rgba(192,132,252,.18);color:var(--accent2)}
+.sb{font-size:11px;font-weight:700;letter-spacing:.3px;padding:2px 8px;border-radius:6px;background:rgba(192,132,252,.14);color:var(--accent2)}
+.sb.saga{background:rgba(125,211,252,.14);color:var(--saga)}
+.badge.cc{background:rgba(240,171,252,.14);color:var(--accent2)}
+.tkgrid{display:grid;grid-template-columns:minmax(280px,380px) minmax(0,1fr);gap:16px;align-items:start}
+@media(max-width:980px){.tkgrid{grid-template-columns:minmax(0,1fr)}}
+.tklist{display:flex;flex-direction:column;gap:8px}
+.tcard{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:11px 13px;cursor:pointer}
+.tcard:hover{border-color:var(--accent)}
+.tcard.on{border-color:var(--accent2);background:linear-gradient(180deg,var(--panel2),var(--bg2))}
+.tcard .th{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px}
+.tcard .th .when{margin-left:auto;color:var(--dim)}
+.tcard .tg{font-weight:600;margin-top:6px;word-break:break-word}
+.tcard .d{color:var(--muted);font-size:12.5px;margin-top:4px}
+.tkpane{position:sticky;top:10px;max-height:calc(100vh - 20px);overflow:auto;background:var(--bg2);border:1px solid var(--line);
+  border-radius:14px;padding:16px 18px}
+@media(max-width:980px){.tkpane{position:static;max-height:none}}
+.tkpane .row .v{text-align:left;max-width:78%}
+.tkpane h3{font-size:13px;margin:18px 0 8px;color:var(--accent2);text-transform:uppercase;letter-spacing:.4px}
+.tkpane .goal{font-size:17px;font-weight:700;line-height:1.35;margin:8px 0 4px;word-break:break-word}
+.mono{font:12px/1.6 "Cascadia Code",Consolas,monospace}
+pre.box{font:12px/1.6 "Cascadia Code",Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:10px;
+  padding:9px 11px;margin:6px 0 0;white-space:pre-wrap;word-break:break-word;color:var(--muted);max-height:360px;overflow:auto}
+.steps{position:relative;margin-left:4px}
+.step{position:relative;padding:0 0 14px 30px}
+.step::before{content:"";position:absolute;left:10px;top:22px;bottom:0;width:2px;background:var(--line)}
+.step:last-child::before{display:none}
+.step .ic{position:absolute;left:0;top:1px;width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+  font-size:12px;font-weight:700;background:var(--panel);border:1px solid var(--line);color:var(--dim)}
+.step.done .ic{color:var(--good);border-color:rgba(74,222,128,.5)}
+.step.failed .ic{color:var(--bad);border-color:rgba(251,113,133,.5)}
+.step.running .ic{color:var(--accent2);border-color:var(--accent)}
+.step .st{font-weight:600}
+.step .d{color:var(--muted);font-size:12.5px;margin-top:2px}
+.step .fail{color:var(--bad);font-size:13px;margin-top:4px}
+details.more{margin-top:6px}
+details.more>summary{cursor:pointer;color:var(--muted);font-size:12.5px}
+details.more>summary:hover{color:var(--accent2)}
+.tev{display:grid;grid-template-columns:14px 64px 118px minmax(0,1fr);gap:8px;padding:5px 0;border-top:1px solid var(--line);font-size:13px;align-items:baseline}
+.tev:first-child{border-top:0}
+.tev .time{color:var(--dim);font:12px/1.6 "Cascadia Code",Consolas,monospace}
+.tev .evn{color:var(--ink);font-weight:600;font-size:12px;border:0;padding:0;display:block}
+.tev .dt{color:var(--muted);word-break:break-word}
+.tev.sec{opacity:.6}
+.tdot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--dim)}
+.tdot.good{background:var(--good)} .tdot.bad{background:var(--bad)} .tdot.warn{background:var(--warn)} .tdot.accent{background:var(--accent)}
+.ccjob{border:1px solid var(--line);border-radius:12px;padding:11px 13px;margin-top:10px;background:var(--panel)}
+.ccrun{border-top:1px dashed var(--line);margin-top:10px;padding-top:10px}
+.flist{margin:4px 0 0;padding:0;list-style:none;font:12px/1.7 "Cascadia Code",Consolas,monospace;color:var(--muted)}
+.flist li{word-break:break-all}
+.flist b{color:var(--ink);font-weight:600}
+.toolbar input[type=search]{font:inherit;font-size:13px;background:var(--bg2);color:var(--ink);border:1px solid var(--line);
+  border-radius:8px;padding:5px 10px;min-width:180px;flex:1;outline:none}
+.toolbar input[type=search]:focus{border-color:var(--accent)}
+a.tlink{color:inherit;text-decoration:none} a.tlink:hover .t{color:var(--accent2)}
 </style>
 </head>
 <body>
@@ -1343,7 +2245,7 @@ footer{color:var(--dim);font-size:12px;margin-top:24px;text-align:center}
   <div id="sayhost"></div>
   <div id="content"></div>
   <footer>Reads the databases <b>read-only</b> — safe to keep open; the Controls strip only sends the
-    house hotkeys over its local socket. Polls every __POLL__s · <span id="stamp"></span></footer>
+    house hotkeys over its local socket, and Settings' Save only edits .env. Polls every __POLL__s · <span id="stamp"></span></footer>
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -1363,9 +2265,12 @@ let CONV = {day:null, before:null};      // conversations tab: day filter + pagi
 // the chat box lives in #sayhost, built once and never replaced by a poll, so its focus/caret/draft
 // are kept natively by the browser; SAY only tracks the in-flight send.
 let SAY = {sending:false};
+// the Settings tab: `dirty` = {KEY: new value | null (reset to default)} not yet saved. The cards are
+// rebuilt only when the data changes AND nothing is unsaved, so a poll never eats an edit or focus.
+let SET = {sig:null, dirty:{}, errors:{}, saving:false, filter:'', onlyMod:false, rows:{}, saved:null};
 
 function pickWho(){
-  const h = (location.hash||'').replace(/^#/,'');
+  const h = (location.hash||'').replace(/^#/,'').split('/')[0];   // '#tasks/<slug>/<id>' → tasks
   return TABS.some(t=>t.who===h) ? h : TABS[0].who;
 }
 function renderTabs(){
@@ -1374,11 +2279,19 @@ function renderTabs(){
 }
 function selectTab(who){
   if(who===WHO) return;
+  if(WHO==='settings' && Object.keys(SET.dirty).length && !confirm('Leave Settings? Your unsaved changes will be lost.')) return;
+  SET.dirty = {}; SET.errors = {}; SET.sig = null;
   WHO = who; CONV = {day:null, before:null};
   if(location.hash !== '#'+who) location.hash = who;
   renderTabs(); tick();
 }
-window.addEventListener('hashchange', () => { const w = pickWho(); if(w!==WHO){ WHO = w; CONV = {day:null, before:null}; renderTabs(); tick(); } });
+window.addEventListener('hashchange', () => {
+  const w = pickWho();
+  const picked = readTaskHash();
+  if(w!==WHO){ WHO = w; CONV = {day:null, before:null}; SET.dirty = {}; SET.errors = {}; SET.sig = null; renderTabs(); tick(); }
+  else if(w==='tasks' && picked && $('tkList')){ openTask(TK.sel.who, TK.sel.id, true); }
+});
+window.addEventListener('beforeunload', (e) => { if(Object.keys(SET.dirty).length){ e.preventDefault(); e.returnValue = ''; } });
 
 function statCard(n, label, sub){
   return `<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(label)}</div>${sub?`<div class="s">${esc(sub)}</div>`:''}</div>`;
@@ -1424,6 +2337,8 @@ function renderControls(hh){
   b.push('<span class="csep"></span>');
   (hh.bodies||[]).forEach(s => {
     if(present.includes(s.slug)){
+      b.push(btn(s.muted?'unmute_sister':'mute_sister',
+                 (s.muted?'Unmute ':'Mute ')+s.name+' voice', {target:s.slug}));
       b.push(btn('restart_sister', 'Restart '+s.name, {target:s.slug}));
       b.push(btn('quit_sister', 'Quit '+s.name, {target:s.slug, danger:true, confirm:`Quit ${s.name}? Her process exits; the house stays up.`}));
     } else {
@@ -1464,7 +2379,10 @@ function toast(text, ok){
 function render(d){
   renderHousehold(d.household||{});
   renderControls(d.household||{});
-  if(d.who==='conversations'){ renderConversations(d); } else { clearSayBox(); renderCharacter(d); }
+  if(d.who==='conversations'){ SET.sig = null; renderConversations(d); }
+  else if(d.who==='tasks'){ SET.sig = null; clearSayBox(); renderTasks(d); }
+  else if(d.who==='settings'){ clearSayBox(); renderSettings(d); }
+  else { SET.sig = null; clearSayBox(); renderCharacter(d); }
   $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
 }
 
@@ -1552,9 +2470,14 @@ function renderCharacter(d){
     const mo = inn.mood;
     html += `<div class="d" style="margin-bottom:12px">Right now she feels <b style="color:var(--accent2)">${esc(mo.mood_word||'—')}</b>${mo.focus?` · preoccupied with “${esc(mo.focus)}”`:''}${mo.last_update?` · <span class="dim">settled ${esc((mo.last_update||'').slice(11,19))}</span>`:''}</div>`;
     html += `<div class="vitals">${dial('Valence',mo.valence,true)}${dial('Arousal',mo.arousal,false)}${dial('Social',mo.social,true)}</div>`;
+    if(mo.needs){
+      const nd = mo.needs;
+      html += `<div class="d" style="margin:14px 0 6px">What she needs <span class="dim">(0 starved · 1 met)</span>${mo.tension?` · <b style="color:var(--warn)">${esc(mo.tension)}</b>`:(mo.pressing&&mo.pressing.length?` · <b style="color:var(--warn)">pressing: ${esc(mo.pressing.join(', '))}</b>`:'')}</div>`;
+      html += `<div class="vitals">${dial('Connection',nd.connection,false)}${dial('Novelty',nd.novelty,false)}${dial('Competence',nd.competence,false)}${dial('Rest',nd.rest,false)}</div>`;
+    }
     if(inn.initiative){
       const ini = inn.initiative;
-      html += `<div class="dim" style="font-size:12px;margin-top:10px">Initiative: <b style="color:var(--muted)">${esc(ini.permission)}</b> · ${ini.today} today${ini.last?` · last ${esc(ini.last)}`:''}</div>`;
+      html += `<div class="dim" style="font-size:12px;margin-top:10px">Initiative: <b style="color:var(--muted)">${esc(ini.permission)}</b> · ${ini.today} today${ini.last?` · last ${esc(ini.last)}`:''} · landed ${ini.welcomed||0} · let drop ${ini.ignored||0}${ini.last_talk?` · last talked with him ${esc(ini.last_talk)}`:''}</div>`;
     }
   } else {
     html += `<div class="empty">No inner state yet — the dials light up once she has run and settled a mood.</div>`;
@@ -1585,6 +2508,46 @@ function renderCharacter(d){
     });
   } else {
     html += `<div class="empty">No wishes yet — they form from her diary and conversation.</div>`;
+  }
+  html += `</section>`;
+
+  // v3 — her life: story, habits from her nights, moments, projects, his rhythm
+  const lf = inn.life||{};
+  html += `<section><h2>Her life <span class="cnt">story · habits · projects</span></h2>`;
+  if(lf.story){
+    html += `<div class="item"><div class="t" style="font-weight:500">${lf.story.chapter?`“${esc(lf.story.chapter)}”`:'Her story so far'}</div><div class="d" style="color:var(--ink)">${esc(lf.story.text)}</div>${lf.story.turning_point?`<div class="dim" style="font-size:12px;margin-top:4px">turning point: ${esc(lf.story.turning_point)}</div>`:''}</div>`;
+  } else {
+    html += `<div class="empty">No story yet — she writes it once she has a few diary entries, then revises it about weekly.</div>`;
+  }
+  html += `<h2 style="margin-top:18px">Habits <span class="cnt">formed in her sleep</span></h2>`;
+  if(lf.habits && lf.habits.length){
+    lf.habits.forEach(h=>{
+      html += `<div class="item"><div class="t" style="font-weight:500">${esc(h.text)}</div><div class="d">${strength(h.strength)} ${h.strength}${h.evidence?` · from “${esc(h.evidence)}”`:''}${h.when?` · reinforced ${esc(h.when)}`:''}</div></div>`;
+    });
+  } else {
+    html += `<div class="empty">No habits yet — her nights turn what landed with him into habits.</div>`;
+  }
+  if(lf.last_dream){
+    const ld = lf.last_dream;
+    html += `<div class="dim" style="font-size:12px;margin-top:6px">Last dream ${esc(ld.when||'')}: ${ld.moments||0} moment(s), ${ld.habits||0} habit change(s), forgot ${ld.forgotten||0} old event(s)</div>`;
+  }
+  if(lf.moments && lf.moments.length){
+    html += `<h2 style="margin-top:18px">Moments <span class="cnt">replayed at night</span></h2>`;
+    lf.moments.forEach(m=>{
+      const col = m.label==='landed'?'var(--good)':'var(--bad)';
+      html += `<div class="item"><div class="d"><span style="color:${col}">●</span> him: “${esc(m.his)}”<br>her: “${esc(m.hers)}”${m.better?`<br><span class="dim">now she'd say: “${esc(m.better)}”</span>`:''}</div><div class="dim" style="font-size:12px;margin-top:4px">${esc(m.label)}${m.why?` · ${esc(m.why)}`:''} · ${esc(m.when||'')}</div></div>`;
+    });
+  }
+  html += `<h2 style="margin-top:18px">Projects</h2>`;
+  if(lf.projects && lf.projects.length){
+    lf.projects.forEach(pr=>{
+      html += `<div class="item"><div class="t" style="font-weight:500">${esc(pr.title)}</div><div class="d">${esc(pr.kind)} · ${esc(pr.status)} · ${pr.steps}/${pr.target}${pr.when?` · last step ${esc(pr.when)}`:''}</div></div>`;
+    });
+  } else {
+    html += `<div class="empty">No projects yet — a wish that keeps coming back and that she can pursue alone becomes one.</div>`;
+  }
+  if(lf.rhythm){
+    html += `<div class="dim" style="font-size:12px;margin-top:10px">His rhythm: ${lf.rhythm.learned} hour-slots learned${lf.rhythm.usual&&lf.rhythm.usual.length?` · usually around ${esc(lf.rhythm.usual.slice(0,8).join(', '))}`:' · nothing she can count on yet (needs ~3 weeks)'}</div>`;
   }
   html += `</section>`;
 
@@ -1740,10 +2703,10 @@ function renderCharacter(d){
   const tk = d.tasks||{};
   html += `<section><h2>Tasks & competence <span class="cnt">${(tk.tally&&tk.tally.total)||0} tasks · ${(tk.flows||[]).length} flows</span></h2>`;
   html += `<div class="cols"><div>`;
-  html += `<div class="muted" style="margin-bottom:6px">Recent tasks</div>`;
+  html += `<div class="muted" style="margin-bottom:6px">Recent tasks <a href="#tasks" style="font-size:12px">all on the Tasks tab →</a></div>`;
   if(tk.recent && tk.recent.length){
     tk.recent.forEach(t => {
-      html += `<div class="item"><div class="t">${esc(t.goal_text)}</div><div class="d">${esc(t.status)}${t.outcome?` · ${esc(t.outcome)}`:''}${t.delegated_to&&t.delegated_to!=='none'?` · ↦ ${esc(t.delegated_to)}`:''}${t.agent_grade?` · grade ${esc(t.agent_grade)}`:''}${t.corrected?` · <span style="color:var(--warn)">corrected</span>`:''} · ${esc(t.created||'')}</div></div>`;
+      html += `<a class="tlink" href="#tasks/${esc(d.who)}/${esc(t.full_id||'')}" title="open on the Tasks tab"><div class="item"><div class="t">${esc(t.goal_text)}</div><div class="d">${esc(t.status)}${t.outcome?` · ${esc(t.outcome)}`:''}${t.delegated_to&&t.delegated_to!=='none'?` · ↦ ${esc(t.delegated_to)}`:''}${t.agent_grade?` · grade ${esc(t.agent_grade)}`:''}${t.corrected?` · <span style="color:var(--warn)">corrected</span>`:''} · ${esc(t.created||'')}</div></div></a>`;
     });
   } else html += `<div class="empty">No tasks run yet.</div>`;
   html += `</div><div>`;
@@ -1858,6 +2821,212 @@ function renderConversations(d){
   const ob = $('olderBtn'); if(ob) ob.onclick = () => { if(conv.next_before){ CONV.before = conv.next_before; tick(); } };
 }
 
+// --- the Settings tab ------------------------------------------------------------------
+// Every knob in .env, grouped. Edits stay local (SET.dirty) until Save posts ONLY the changed rows to
+// /api/settings; config is read at boot, so the reply names what to restart (offered as buttons).
+// The cards are rebuilt only when the data changed and nothing is unsaved — a poll never eats an edit.
+const hasOwn = (o,k) => Object.prototype.hasOwnProperty.call(o,k);
+function fmtSetVal(s, v){
+  if(v===null || v===undefined || v==='') return '';
+  if(s.type==='bool') return v ? 'on' : 'off';
+  if(Array.isArray(v)) return v.join('–');
+  return String(v);
+}
+function restartNames(list, procs){ return (list||[]).map(p => (procs&&procs[p]) || p); }
+function renderSettings(d){
+  $('title').textContent = 'Settings';
+  const hh = d.household||{}, h = hh.house||{};
+  SET.hh = hh; SET.procs = d.processes||{};
+  $('dot').className = 'dot ' + (h.up?'live':'offline');
+  $('statusText').textContent = d.env_present ? ('.env · ' + (d.env_path||'')) : 'no .env yet — Save creates it';
+  $('subtitle').textContent = 'v' + (d.version||'?') + ' · every knob the house and the sisters read · read at boot, so a change applies after a restart';
+  const sm = d.settings_summary||{};
+  $('banner').innerHTML = d.error ? `<div class="banner">${esc(d.error)}</div>`
+    : ((sm.invalid||[]).length ? `<div class="banner">These .env values don't parse, so the code falls back to its default: ${sm.invalid.map(esc).join(', ')}</div>` : '');
+  $('stats').innerHTML = [
+    statCard(sm.total??0, 'Settings', `${sm.editable??0} editable here`),
+    statCard(sm.in_env??0, 'Set in .env', 'the rest use the code default'),
+    statCard(sm.modified??0, 'Changed', 'from the default'),
+    statCard(`${sm.secrets_set??0}/${sm.secrets??0}`, 'API keys set', 'masked · edit .env by hand'),
+  ].join('');
+  const groups = d.settings||[];
+  const sig = JSON.stringify(groups);
+  if($('setbar') && SET.sig === sig){ refreshSetBar(); return; }
+  if($('setbar') && SET.sig !== null && Object.keys(SET.dirty).length){
+    refreshSetBar('.env changed on disk while you were editing — Save writes only the rows you changed');
+    return;
+  }
+  SET.sig = sig; SET.rows = {};
+  groups.forEach(g => g.settings.forEach(s => { SET.rows[s.key] = s; }));
+  let html = `<div class="setbar" id="setbar"><input id="setFilter" type="search" placeholder="Filter — a key or a few words" value="${esc(SET.filter)}" autocomplete="off">`
+    + `<label><input type="checkbox" id="setOnlyMod"${SET.onlyMod?' checked':''}> changed only</label><span id="setCount" class="dim"></span>`
+    + `<button class="cbtn" id="setDiscard">Discard</button><button class="cbtn primary" id="setSave">Save</button><div class="setsaved" id="setSaved"></div></div>`;
+  groups.forEach(g => {
+    html += `<section class="sgroup"><h2>${esc(g.group)} <span class="cnt">${g.settings.length}</span></h2>`;
+    g.settings.forEach(s => { html += settingRow(s); });
+    html += `</section>`;
+  });
+  $('content').innerHTML = html;
+  $('setFilter').oninput = (e) => { SET.filter = e.target.value; applySetFilter(); };
+  $('setOnlyMod').onchange = (e) => { SET.onlyMod = e.target.checked; applySetFilter(); };
+  $('setSave').onclick = () => saveSettings();
+  $('setDiscard').onclick = () => { SET.dirty = {}; SET.errors = {}; SET.sig = null; tick(); };
+  document.querySelectorAll('#content .srow').forEach(wireRow);
+  applySetFilter();
+  refreshSetBar();
+}
+function settingFoot(s){
+  const dirty = hasOwn(SET.dirty, s.key);
+  const bits = [`default: ${esc(s.default_text || fmtSetVal(s, s.default) || 'unset')}`];
+  if(s.readonly && s.source_file) bits.push(`in ${esc(s.source_file)}`);
+  else if((s.restart||[]).length) bits.push('restart: ' + esc(restartNames(s.restart, SET.procs).join(', ')));
+  if(dirty && SET.dirty[s.key]===null) bits.push('<b style="color:var(--warn)">resets to default on Save</b>');
+  const canReset = s.editable && (s.source==='.env' || dirty) && !(dirty && SET.dirty[s.key]===null);
+  const err = SET.errors[s.key];
+  return `<div class="shint">${bits.join(' · ')}${canReset?' <button class="sreset" title="back to the code default">reset</button>':''}</div>`
+       + (err ? `<div class="serr">${esc(err)}</div>` : '');
+}
+function settingRow(s){
+  const dirty = hasOwn(SET.dirty, s.key);
+  const cur = dirty ? SET.dirty[s.key] : s.value;
+  const tags = [`<span class="badge">${esc(s.applies_to)}</span>`];
+  if(s.secret) tags.push('<span class="badge sec">secret</span>');
+  if(s.readonly) tags.push('<span class="badge ro">read-only</span>');
+  if(s.source==='.env') tags.push('<span class="badge env">.env</span>');
+  if(s.invalid) tags.push('<span class="badge cut">unparsable</span>');
+  let ctl;
+  if(s.secret){
+    ctl = `<div class="sval">${s.is_set ? esc(s.value) : '<span class="dim">not set</span>'}</div>`;
+  } else if(s.readonly){
+    ctl = `<div class="sval">${esc(fmtSetVal(s, s.value))}</div>`;
+  } else if(s.type==='bool'){
+    const on = cur===null ? !!s.default : !!cur;
+    ctl = `<label class="sline"><input type="checkbox" data-key="${esc(s.key)}"${on?' checked':''}> <span class="dim" data-label>${on?'on':'off'}</span></label>`;
+  } else if(s.type==='choice'){
+    const v = cur===null ? s.default : cur;
+    ctl = `<div class="sline"><select data-key="${esc(s.key)}">${(s.choices||[]).map(c => `<option value="${esc(c)}"${c===v?' selected':''}>${esc(c)}</option>`).join('')}</select></div>`;
+  } else {
+    const num = s.type==='int' || s.type==='float';
+    const v = cur===null ? (s.default==null ? '' : s.default) : cur;
+    const attrs = num ? ` step="${s.type==='int'?'1':'any'}"${s.min!=null?` min="${s.min}"`:''}${s.max!=null?` max="${s.max}"`:''}` : '';
+    ctl = `<div class="sline"><input type="${num?'number':'text'}" data-key="${esc(s.key)}" value="${esc(v==null?'':v)}" placeholder="${esc(s.default_text||'')}"${attrs} autocomplete="off" spellcheck="false"></div>`;
+  }
+  const cls = ['srow'];
+  if(dirty) cls.push('dirty'); else if(s.modified) cls.push('mod');
+  if(SET.errors[s.key]) cls.push('bad');
+  const search = (s.key + ' ' + s.description + ' ' + s.applies_to).toLowerCase();
+  return `<div class="${cls.join(' ')}" data-key="${esc(s.key)}" data-search="${esc(search)}">`
+    + `<div><div class="sk">${esc(s.key)}</div><div class="sd">${esc(s.description)}</div><div class="sm">${tags.join('')}</div></div>`
+    + `<div class="sctl">${ctl}<div class="sfoot">${settingFoot(s)}</div></div></div>`;
+}
+function rowEl(key){ return document.querySelector(`#content .srow[data-key="${CSS.escape(key)}"]`); }
+function wireRow(row){
+  if(!row) return;
+  const key = row.dataset.key;
+  const input = row.querySelector('[data-key]');
+  if(input){ input.oninput = () => onSetInput(key, input); input.onchange = () => onSetInput(key, input); }
+  const rb = row.querySelector('.sreset');
+  if(rb) rb.onclick = () => resetSetting(key);
+}
+function markRow(key){
+  const row = rowEl(key), s = SET.rows[key];
+  if(!row || !s) return;
+  const dirty = hasOwn(SET.dirty, key);
+  row.classList.toggle('dirty', dirty);
+  row.classList.toggle('mod', !dirty && !!s.modified);
+  row.classList.toggle('bad', !!SET.errors[key]);
+  const foot = row.querySelector('.sfoot');
+  if(foot){ foot.innerHTML = settingFoot(s); const rb = foot.querySelector('.sreset'); if(rb) rb.onclick = () => resetSetting(key); }
+}
+function onSetInput(key, el){
+  const s = SET.rows[key];
+  if(!s) return;
+  let v, orig;
+  if(s.type==='bool'){
+    v = !!el.checked; orig = !!s.value;
+    const lab = el.parentNode.querySelector('[data-label]'); if(lab) lab.textContent = v ? 'on' : 'off';
+  } else if(s.type==='choice'){
+    v = el.value; orig = s.value;
+  } else {
+    v = el.value.trim(); orig = s.value==null ? '' : String(s.value);
+    if(v==='') v = (orig==='' ? '' : null);
+  }
+  if(v===orig || (v==='' && orig==='') || (v===null && s.source!=='.env')) delete SET.dirty[key]; else SET.dirty[key] = v;
+  delete SET.errors[key];
+  markRow(key); refreshSetBar();
+}
+function resetSetting(key){
+  const s = SET.rows[key];
+  if(!s) return;
+  if(s.source==='.env') SET.dirty[key] = null; else delete SET.dirty[key];
+  delete SET.errors[key];
+  const row = rowEl(key);
+  if(row){ row.outerHTML = settingRow(s); wireRow(rowEl(key)); }
+  applySetFilter(); refreshSetBar();
+}
+function applySetFilter(){
+  const words = (SET.filter||'').toLowerCase().split(/\s+/).filter(Boolean);
+  let shown = 0;
+  document.querySelectorAll('#content .sgroup').forEach(sec => {
+    let any = 0;
+    sec.querySelectorAll('.srow').forEach(row => {
+      const s = SET.rows[row.dataset.key] || {};
+      const hay = row.dataset.search || '';
+      const ok = words.every(w => hay.includes(w)) && (!SET.onlyMod || s.modified || hasOwn(SET.dirty, row.dataset.key));
+      row.style.display = ok ? '' : 'none';
+      if(ok) any++;
+    });
+    sec.style.display = any ? '' : 'none';
+    shown += any;
+  });
+  const c = $('setCount'); if(c) c.textContent = `${shown} shown`;
+}
+function refreshSetBar(note){
+  const n = Object.keys(SET.dirty).length;
+  const sb = $('setSave'), db = $('setDiscard'), box = $('setSaved');
+  if(sb){ sb.disabled = SET.saving || !n; sb.textContent = SET.saving ? 'saving…' : (n ? `Save ${n} change${n>1?'s':''}` : 'Save'); }
+  if(db) db.disabled = SET.saving || !n;
+  if(!box) return;
+  if(note){ box.innerHTML = `<span style="color:var(--warn)">${esc(note)}</span>`; return; }
+  const r = SET.saved;
+  if(!r){ box.innerHTML = ''; return; }
+  const hh = SET.hh||{}, up = !!(hh.house||{}).up, present = hh.present||[];
+  const btns = [];
+  (r.restart||[]).forEach(p => {
+    if(p==='house') btns.push(`<button class="cbtn" data-ract="restart_house"${up?'':' disabled'}>Restart the house</button>`);
+    else if(p==='aiva' || p==='saga'){
+      const nm = nameOf(p);
+      btns.push(present.includes(p) ? `<button class="cbtn" data-ract="restart_sister" data-rtarget="${p}"${up?'':' disabled'}>Restart ${esc(nm)}</button>`
+                                    : `<span class="dim">${esc(nm)} isn't running — she'll start with the new values</span>`);
+    }
+  });
+  box.innerHTML = `<span>${esc(r.message||'saved')}</span>${btns.join('')}<button class="sreset" id="setSavedX" title="dismiss">×</button>`;
+  box.querySelectorAll('[data-ract]').forEach(b => b.onclick = () => pressControl(b.dataset.ract, b.dataset.rtarget||null,
+    b.dataset.ract==='restart_house' ? 'Restart the house? The sisters stay up and reconnect.' : null, b.textContent));
+  const x = $('setSavedX'); if(x) x.onclick = () => { SET.saved = null; refreshSetBar(); };
+}
+async function saveSettings(){
+  const updates = Object.assign({}, SET.dirty);
+  if(!Object.keys(updates).length || SET.saving) return;
+  SET.saving = true; refreshSetBar();
+  let res;
+  try{
+    const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({updates})});
+    res = await r.json();
+  }catch(e){ res = {ok:false, error:'dashboard server not reachable'}; }
+  SET.saving = false;
+  if(res && res.ok){
+    SET.dirty = {}; SET.errors = {}; SET.saved = res; SET.sig = null;
+    toast(res.message || 'saved', true);
+    tick();
+  } else {
+    SET.errors = (res && res.errors) || {};
+    Object.keys(SET.errors).forEach(markRow);
+    toast('not saved: ' + ((res && res.error) || 'failed'), false);
+    refreshSetBar();
+  }
+}
+
 // --- typing to them ------------------------------------------------------------------
 // The chat box lives in its OWN persistent host (#sayhost), built once and never replaced by a poll,
 // so it keeps native focus, caret and draft while you type. renderSayBox only refreshes state
@@ -1907,6 +3076,252 @@ async function sendSay(){
   tick();
 }
 
+// --- the Tasks tab: every task each sister ran, and one in full ------------------------------
+// The toolbar, the card list and the detail pane are built ONCE when the tab opens; a poll only
+// re-renders the card list when it changed, and re-fetches the open task (/api/task) only when its
+// `updated` stamp moved — so an open detail, its expanded <details> and its scroll survive polling.
+// The open task lives in the hash (#tasks/<slug>/<id>), so a sister tab's task row can link to it.
+const TASK_ID_RE = /^t-\d{8}-\d{6}-[0-9a-f]{4}$/;
+let TK = {sister:'', outcome:'', q:'', before:null, sel:null, listSig:null, detailFor:null, detailUpd:null, req:0, inflight:null, showAnn:false, rows:[]};
+function readTaskHash(){
+  const parts = (location.hash||'').replace(/^#/,'').split('/');
+  if(parts[0]==='tasks' && parts.length>=3 && TABS.some(t=>t.who===parts[1]) && TASK_ID_RE.test(parts[2])){
+    TK.sel = {who:parts[1], id:parts[2]}; return true;
+  }
+  return false;
+}
+const STEP_ICON = {done:'✓', failed:'✗', running:'●', skipped:'↷', not_needed:'–', pending:'○'};
+const money = (n) => (n==null||n==='') ? '—' : '$' + Number(n).toFixed(Number(n)>=1?2:4);
+function taskMeta(t){
+  const bits = [];
+  if(t.steps_total) bits.push(`steps ${t.steps_done}/${t.steps_total}${t.steps_failed?` · ${t.steps_failed} failed`:''}`);
+  if(t.duration) bits.push(t.duration);
+  bits.push(money(t.cost_usd) + (t.claude_cost?` + ${money(t.claude_cost)} Claude`:''));
+  if(t.agent_grade) bits.push('grade ' + t.agent_grade);
+  if(t.corrected) bits.push('corrected');
+  return bits.map(esc).join(' · ');
+}
+function taskCard(t){
+  const on = TK.sel && TK.sel.who===t.sister && TK.sel.id===t.id;
+  return `<div class="tcard${on?' on':''}" data-who="${esc(t.sister)}" data-id="${esc(t.id)}">`
+    + `<div class="th"><span class="sb ${esc(t.sister)}">${esc(t.sister_name)}</span>${pill(t.bucket)}`
+    + `${t.status!==t.bucket&&t.status!=='done'?`<span class="dim">${esc(t.status)}</span>`:''}`
+    + `${t.claude?'<span class="badge cc">Claude Code</span>':''}${t.awaiting?'<span class="badge private">waiting for you</span>':''}`
+    + `<span class="when" title="${esc(t.created||'')}">${esc(t.created_ago||'')}</span></div>`
+    + `<div class="tg">${esc(t.goal)}</div><div class="d">${taskMeta(t)}</div>`
+    + (t.summary?`<div class="d dim">${esc(t.summary)}</div>`:'') + `</div>`;
+}
+function buildTasksShell(d){
+  const tk = d.tasks||{};
+  const sis = (tk.sisters||[]).map(s=>`<option value="${esc(s.slug)}"${TK.sister===s.slug?' selected':''}>${esc(s.name)}</option>`).join('');
+  const outs = (tk.buckets||[]).map(b=>`<option value="${esc(b)}"${TK.outcome===b?' selected':''}>${esc(b)}</option>`).join('');
+  $('content').innerHTML = `<section><h2>Tasks <span class="cnt" id="tkCnt"></span></h2>`
+    + `<div class="toolbar"><label>Sister <select id="tkSister"><option value="">both</option>${sis}</select></label>`
+    + `<label>Outcome <select id="tkOutcome"><option value="">any</option>${outs}</select></label>`
+    + `<input type="search" id="tkQ" placeholder="search goals, summaries, ids…" value="${esc(TK.q)}"></div>`
+    + `<div class="tkgrid"><div><div class="tklist" id="tkList"></div><div class="toolbar" style="margin-top:10px" id="tkPager"></div></div>`
+    + `<div class="tkpane" id="tkDetail"></div></div></section>`;
+  $('tkSister').onchange = (e) => { TK.sister = e.target.value; TK.before = null; TK.listSig = null; tick(); };
+  $('tkOutcome').onchange = (e) => { TK.outcome = e.target.value; TK.before = null; TK.listSig = null; tick(); };
+  let qt = null;
+  $('tkQ').oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { TK.q = e.target.value.trim(); TK.before = null; TK.listSig = null; tick(); }, 300); };
+  $('tkList').onclick = (e) => {
+    const c = e.target.closest('.tcard'); if(!c) return;
+    openTask(c.dataset.who, c.dataset.id, true);
+  };
+  TK.listSig = null; TK.detailFor = null; TK.detailUpd = null;
+  renderTaskPlaceholder();
+}
+function renderTaskPlaceholder(){
+  if(!TK.sel) $('tkDetail').innerHTML = `<div class="empty">Pick a task to see it start to finish — its plan, every step's evidence, the Claude Code sessions it ran and the full event timeline.</div>`;
+}
+function openTask(who, id, scroll){
+  TK.sel = {who, id};
+  try{ history.replaceState(null, '', `#tasks/${who}/${id}`); }catch(e){}
+  document.querySelectorAll('#tkList .tcard').forEach(c => c.classList.toggle('on', c.dataset.who===who && c.dataset.id===id));
+  TK.detailFor = null;
+  $('tkDetail').innerHTML = `<div class="empty">loading…</div>`;
+  fetchTask(scroll);
+}
+async function fetchTask(scroll){
+  if(!TK.sel) return;
+  const {who, id} = TK.sel, key = who+'/'+id, my = ++TK.req;
+  TK.inflight = key;
+  let res, t;
+  try{
+    res = await fetch(`/api/task?who=${encodeURIComponent(who)}&id=${encodeURIComponent(id)}`, {cache:'no-store'});
+    t = await res.json();
+  }catch(e){ t = {error:'dashboard server not reachable'}; }
+  if(my !== TK.req) return;
+  TK.inflight = null;
+  if(WHO!=='tasks' || !$('tkDetail')) return;
+  const pane = $('tkDetail');
+  const openKeys = new Set([...pane.querySelectorAll('details[data-k]')].filter(x=>x.open).map(x=>x.dataset.k));
+  const keepScroll = TK.detailFor===key ? pane.scrollTop : 0;
+  const same = TK.detailFor===key;
+  pane.innerHTML = t.error ? `<div class="banner">${esc(t.error)}</div>` : renderTaskDetail(t);
+  if(same) pane.querySelectorAll('details[data-k]').forEach(x => { x.open = openKeys.has(x.dataset.k); });
+  pane.scrollTop = keepScroll;
+  const ann = $('tkAnn'); if(ann) ann.onchange = (e) => { TK.showAnn = e.target.checked; pane.querySelectorAll('.tev.sec').forEach(x => x.style.display = TK.showAnn?'':'none'); };
+  TK.detailFor = key; TK.detailUpd = t.updated || null;
+  if(scroll && window.matchMedia('(max-width:980px)').matches) pane.scrollIntoView({behavior:'smooth', block:'start'});
+}
+function det(k, summary, body, open){
+  return `<details class="more" data-k="${esc(k)}"${open?' open':''}><summary>${summary}</summary>${body}</details>`;
+}
+function actionBox(st){
+  const a = st.action||{};
+  if(st.kind==='shell') return `<pre class="box">${esc(a.command||'')}</pre>${a.purpose?`<div class="d">${esc(a.purpose)}</div>`:''}`;
+  if(st.kind==='delegate') return `<div class="d mono">${esc(a.project_dir||'')}</div>` + det('prompt-'+st.n, 'Prompt for Claude Code', `<pre class="box">${esc(a.prompt||'')}</pre>`);
+  if(st.kind==='ask') return `<div class="d">asks: “${esc(a.question||'')}”</div>`;
+  if(st.kind==='tool'){
+    const args = Object.entries(a.args||{}).map(([k,v]) => `${k}: ${typeof v==='string'?v:JSON.stringify(v)}`).join('\n');
+    return `<div class="d"><span class="tag">${esc(a.tool||'?')}</span></div>${args?`<pre class="box">${esc(args)}</pre>`:''}`;
+  }
+  const rest = Object.entries(a).map(([k,v]) => `${k}: ${typeof v==='string'?v:JSON.stringify(v)}`).join('\n');
+  return rest ? `<pre class="box">${esc(rest)}</pre>` : '';
+}
+function fileList(arr, cap){
+  if(!arr || !arr.length) return '';
+  const shown = arr.slice(0, cap||arr.length);
+  return `<ul class="flist">${shown.map(f=>`<li>${esc(f.path)}${f.count>1?` <b>×${f.count}</b>`:''}</li>`).join('')}</ul>`
+    + (arr.length>shown.length?`<div class="dim" style="font-size:12px">…and ${arr.length-shown.length} more</div>`:'');
+}
+function renderActivity(a, k){
+  if(!a) return `<div class="dim" style="font-size:12.5px;margin-top:4px">No session transcript found on this PC.</div>`;
+  if(a.too_big) return `<div class="dim" style="font-size:12.5px;margin-top:4px">The session transcript is too big to summarise here.</div>`;
+  const tools = Object.entries(a.tools||{}).map(([n,c]) => `<span class="tag">${esc(n)} ${c}</span>`).join('');
+  let h = `<div class="d">${a.turns||0} turns${a.duration_ms?` · ${fmtms(a.duration_ms)}`:''}${a.lines_added!=null?` · <span style="color:var(--good)">+${a.lines_added}</span> <span style="color:var(--bad)">−${a.lines_removed||0}</span> lines`:''}${a.tool_errors?` · ${a.tool_errors} tool errors`:''}${a.model?` · ${esc(a.model)}`:''}</div>`;
+  if(tools) h += `<div class="chips" style="margin-top:4px">${tools}</div>`;
+  const ed = a.files_edited||[], wr = a.files_written||[], rd = a.files_read||[];
+  if(ed.length) h += `<div class="d" style="margin-top:8px;color:var(--ink)">Edited ${ed.length} file${ed.length>1?'s':''}</div>` + fileList(ed);
+  if(wr.length) h += `<div class="d" style="margin-top:8px;color:var(--ink)">Wrote ${wr.length} file${wr.length>1?'s':''}</div>` + fileList(wr);
+  if(!ed.length && !wr.length) h += `<div class="d" style="margin-top:8px">Changed no files.</div>`;
+  if(rd.length) h += det(k+'-read', `Read ${rd.length} file${rd.length>1?'s':''}`, fileList(rd, 80));
+  if((a.commands||[]).length) h += det(k+'-cmd', `Ran ${a.commands_total} command${a.commands_total>1?'s':''}`, `<pre class="box">${esc(a.commands.join('\n'))}${a.commands_total>a.commands.length?`\n… and ${a.commands_total-a.commands.length} more`:''}</pre>`);
+  if((a.searches||[]).length) h += det(k+'-srch', `Searched ${a.searches_total} time${a.searches_total>1?'s':''}`, `<pre class="box">${esc(a.searches.join('\n'))}</pre>`);
+  if(a.final_text) h += det(k+'-final', 'Its final answer this run', `<pre class="box">${esc(a.final_text)}</pre>`);
+  return h;
+}
+function renderClaudeJob(j){
+  const k = 'job-'+j.job;
+  let h = `<div class="ccjob"><div class="th" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="badge cc">Claude Code</span>`
+    + `<span class="mono">${esc(j.job)}</span>${j.status==='done'?pill('success'):j.status==='failed'?pill('failed'):''}`
+    + `<span class="dim" style="margin-left:auto">${j.runs.length} run${j.runs.length===1?'':'s'}${j.cost?` · ${money(j.cost)}`:''}</span></div>`;
+  if(j.title) h += `<div class="d" style="margin-top:4px">step ${esc(j.n)} · ${esc(j.title)}</div>`;
+  if(j.project_dir) h += `<div class="d mono">${esc(j.project_dir)}</div>`;
+  if(j.prompt) h += det(k+'-prompt', 'The prompt it was given', `<pre class="box">${esc(j.prompt)}</pre>`);
+  j.runs.forEach((r, i) => {
+    h += `<div class="ccrun"><div class="d" style="color:var(--ink)">Run ${i+1}${r.started?` · <span title="${esc(r.started)}">${esc((r.started||'').replace('T',' ').slice(0,19))}</span>`:''}${r.took?` · ${esc(r.took)}`:''}${r.status?` · ${esc(r.status)}`:''}${r.cost!=null?` · ${money(r.cost)}`:''}</div>`;
+    if(r.session) h += `<div class="d mono" title="${esc(r.transcript_path||'')}">session ${esc(r.session)}${r.inferred?' <span class="dim">(matched by prompt + time)</span>':''}</div>`;
+    h += renderActivity(r.activity, k+'-r'+i);
+    if(r.transcript_path) h += `<div class="dim mono" style="font-size:11.5px;margin-top:6px;word-break:break-all">${esc(r.transcript_path)}</div>`;
+    h += `</div>`;
+  });
+  const res = j.result;
+  if(res){
+    h += det(k+'-result', `Saved result <span class="dim">(${res.legacy?'old temp log':'logs/coding'} · ${fmtK(res.chars)} chars${j.runs.length>1?' · last run':''})</span>`,
+      `<pre class="box">${esc(res.text)}</pre><div class="dim mono" style="font-size:11.5px;margin-top:4px;word-break:break-all">${esc(res.path)}</div>`, true);
+  } else {
+    h += `<div class="dim" style="font-size:12.5px;margin-top:8px">No saved result file for this job.</div>`;
+  }
+  return h + `</div>`;
+}
+function renderTaskDetail(t){
+  let h = `<div class="th" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="sb ${esc(t.sister)}">${esc(t.sister_name)}</span>${pill(t.bucket)}`
+    + `${t.status!==t.bucket?`<span class="dim">${esc(t.status)}</span>`:''}${t.claude?'<span class="badge cc">Claude Code</span>':''}`
+    + `<span class="dim mono" style="margin-left:auto">${esc(t.id)}</span></div>`;
+  h += `<div class="goal">${esc(t.goal)}</div>`;
+  h += `<div class="d muted" style="font-size:13px">${esc((t.created||'').replace('T',' ').slice(0,19))} · ${esc(t.created_ago||'')}${t.duration?` · took ${esc(t.duration)}`:''} · ${esc(t.llm_calls)} LLM calls · ${esc(t.tool_calls)} tool calls · ${money(t.cost_usd)}${t.claude_cost?` + ${money(t.claude_cost)} Claude Code`:''}</div>`;
+  if(t.pending) h += `<div class="banner soft" style="margin-top:12px"><b>Waiting for you</b> (${esc(t.pending.kind||'')}): ${esc(t.pending.text||'')}</div>`;
+  h += `<div style="margin-top:10px">`;
+  if(t.details) h += rowKV('Details', t.details);
+  if(t.family || t.approach) h += rowKV('Kind', [t.family, t.approach].filter(Boolean).join(' · '));
+  if(t.familiarity) h += rowKV('Familiarity', t.familiarity);
+  if(t.decision) h += rowKV('Decision', t.decision);
+  if(t.result_summary) h += rowKV('Result', t.result_summary);
+  if(t.agent_grade) h += rowKV('Grade', t.agent_grade + (t.agent_grade_reason?` — ${t.agent_grade_reason}`:''));
+  if(t.user_feedback) h += rowKV('Your feedback', t.user_feedback + (t.corrected?' (corrected)':''));
+  else if(t.corrected) h += rowKV('Corrected', 'yes');
+  h += `</div>`;
+
+  const steps = t.steps||[];
+  h += `<h3>Plan <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">${steps.length} step${steps.length===1?'':'s'}</span></h3>`;
+  if(steps.length){
+    h += `<div class="steps">`;
+    steps.forEach(st => {
+      h += `<div class="step ${esc(st.status)}"><span class="ic">${STEP_ICON[st.status]||'○'}</span>`
+        + `<div class="st">${esc(st.n)}. ${esc(st.title)}</div>`
+        + `<div class="d"><span class="tag">${esc(st.kind)}</span>${esc(st.status)}${st.attempts>1?` · ${st.attempts} attempts`:''}${st.risk&&st.risk!=='none'?` · risk ${esc(st.risk)}`:''}${st.took?` · ${esc(st.took)}`:''}${st.started?` · ${esc((st.started||'').slice(11,19))}`:''}</div>`
+        + actionBox(st)
+        + (st.expect?`<div class="d">expects: ${esc(st.expect)}</div>`:'')
+        + (st.failure?`<div class="fail">${esc(st.failure)}</div>`:'')
+        + ((st.evidence||[]).length ? det('ev-'+st.n, `Evidence (${st.evidence.length})`, st.evidence.map(e=>`<pre class="box">${esc(e)}</pre>`).join('')) : '')
+        + `</div>`;
+    });
+    h += `</div>`;
+  } else h += `<div class="empty">No plan was made.</div>`;
+
+  const jobs = t.claude_jobs||[];
+  if(jobs.length){
+    h += `<h3>Claude Code <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">${jobs.length} job${jobs.length===1?'':'s'}</span></h3>`;
+    jobs.forEach(j => h += renderClaudeJob(j));
+  }
+
+  const tl = t.timeline||[];
+  h += `<h3 style="display:flex;align-items:center;gap:10px">Timeline <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">${tl.length} events</span>`
+    + (t.announcements?`<label class="dim" style="text-transform:none;letter-spacing:0;font-weight:400;font-size:12px;margin-left:auto;cursor:pointer"><input type="checkbox" id="tkAnn"${TK.showAnn?' checked':''}> show ${t.announcements} announcements</label>`:'')
+    + `</h3>`;
+  if(tl.length){
+    let day = null;
+    tl.forEach(e => {
+      if(e.day && e.day!==day){ day = e.day; h += `<div class="dim" style="font-size:11px;margin:8px 0 2px;text-transform:uppercase;letter-spacing:.5px">${esc(day)}</div>`; }
+      let detail = esc(e.detail);
+      if(e.claude){ const c = e.claude; detail = `job <span class="mono">${esc(c.job)}</span> ${esc(c.status||'')}${c.cost!=null?` · ${money(c.cost)}`:''}${c.session?` · session <span class="mono">${esc(c.session.slice(0,8))}</span>`:''}`; }
+      h += `<div class="tev${e.secondary?' sec':''}"${e.secondary&&!TK.showAnn?' style="display:none"':''}><span><span class="tdot ${esc(e.tone)}"></span></span><span class="time">${esc(e.time)}</span><span class="evn">${esc(e.event)}</span><span class="dt">${detail}</span></div>`;
+    });
+  } else h += `<div class="empty">Nothing logged.</div>`;
+  return h;
+}
+function renderTasks(d){
+  $('title').textContent = 'Tasks';
+  const hh = d.household||{}, h = hh.house||{};
+  $('dot').className = 'dot ' + (h.up?'live':'offline');
+  $('statusText').textContent = (h.up?'house up':'house down') + ((hh.present_names||[]).length?` · ${hh.present_names.join(' & ')} connected`:'');
+  $('subtitle').textContent = 'v' + (d.version||'?') + ' · every task and coding session the sisters ran, start to finish';
+  $('banner').innerHTML = d.error ? `<div class="banner">${esc(d.error)}</div>` : '';
+  const tk = d.tasks||{}, tl = tk.tally||{};
+  const cards = [];
+  (tk.sisters||[]).forEach(s => {
+    const x = tl[s.slug]||{};
+    cards.push(statCard(x.total??0, s.name+' tasks', s.started===false?'not started yet':`${x.success||0} ok · ${x.failed||0} failed · ${(x.cancelled||0)+(x.interrupted||0)} stopped`));
+  });
+  const all = Object.values(tl);
+  const sum = (k) => all.reduce((a,x)=>a+(x[k]||0),0);
+  cards.push(statCard(sum('delegated'), 'Claude Code', 'tasks that delegated'));
+  cards.push(statCard(money(sum('cost_usd')), 'Her spend', sum('claude_cost')?`+ ${money(sum('claude_cost'))} Claude Code (logged)`:'tasks, lifetime'));
+  $('stats').innerHTML = cards.join('');
+
+  if(!$('tkList')) buildTasksShell(d);
+  const rows = tk.rows||[];
+  TK.rows = rows;
+  $('tkCnt').textContent = `${tk.matched||0} match${tk.matched===1?'':'es'}${TK.before?' · older page':''}`;
+  const sig = JSON.stringify([rows.map(r=>[r.sister,r.id,r.updated,r.created_ago]), tk.has_more, TK.sel&&TK.sel.id]);
+  if(sig !== TK.listSig){
+    TK.listSig = sig;
+    $('tkList').innerHTML = rows.length ? rows.map(taskCard).join('')
+      : `<div class="empty">${(TK.sister||TK.outcome||TK.q)?'No task matches these filters.':'No tasks yet — they appear once a sister runs one (start_task).'}</div>`;
+    $('tkPager').innerHTML = (TK.before||tk.has_more) ? `<button id="tkNewest"${TK.before?'':' disabled'}>newest</button><button id="tkOlder"${tk.has_more?'':' disabled'}>older</button>` : '';
+    const nb = $('tkNewest'); if(nb) nb.onclick = () => { TK.before = null; TK.listSig = null; tick(); };
+    const ob = $('tkOlder'); if(ob) ob.onclick = () => { if(tk.next_before){ TK.before = tk.next_before; TK.listSig = null; tick(); } };
+  }
+  if(TK.sel){
+    const key = TK.sel.who+'/'+TK.sel.id;
+    const row = rows.find(r => r.sister===TK.sel.who && r.id===TK.sel.id);
+    if(TK.inflight !== key && (TK.detailFor !== key || (row && row.updated !== TK.detailUpd))) fetchTask(false);
+  }
+}
+
 function rowKV(k,v){ return `<div class="row"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`; }
 function fmtms(ms){ ms=ms||0; return ms>=1000 ? (ms/1000).toFixed(ms>=10000?0:1)+'s' : Math.round(ms)+'ms'; }
 function dial(label,val,bipolar){
@@ -1927,6 +3342,11 @@ async function tick(){
   if(who==='conversations'){
     if(CONV.day) url += '&day=' + encodeURIComponent(CONV.day);
     if(CONV.before) url += '&before=' + encodeURIComponent(CONV.before);
+  } else if(who==='tasks'){
+    if(TK.sister) url += '&sister=' + encodeURIComponent(TK.sister);
+    if(TK.outcome) url += '&outcome=' + encodeURIComponent(TK.outcome);
+    if(TK.q) url += '&q=' + encodeURIComponent(TK.q);
+    if(TK.before) url += '&before=' + encodeURIComponent(TK.before);
   }
   try{
     const res = await fetch(url, {cache:'no-store'});
@@ -1938,6 +3358,7 @@ async function tick(){
     $('dot').className = 'dot offline';
   }
 }
+readTaskHash();
 renderTabs();
 tick();
 setInterval(tick, POLL);
@@ -1957,16 +3378,19 @@ def page():
 def api_response(query=""):
     """(status, payload) for `/api/data?<query>` — shared by the HTTP handler and tests.
     `who` = a character slug | 'conversations' (default DEFAULT_WHO); unknown → 404 JSON.
-    Conversations also take `day=YYYY-MM-DD`, `before=<id>`, `limit=<n>`."""
+    Conversations also take `day=YYYY-MM-DD`, `before=<id>`, `limit=<n>`; Tasks take `sister`,
+    `outcome` (a TASK_BUCKETS value), `q` (text), `before=<created_ts>|<id>`, `limit`."""
     qs = parse_qs(query or "", keep_blank_values=False)
     who = (qs.get("who", [DEFAULT_WHO])[0] or DEFAULT_WHO).strip().lower()
-    if who != CONVERSATIONS and who not in CHARACTERS:
-        return 404, {"error": f"unknown who {who!r}", "known": [*CHARACTERS, CONVERSATIONS],
+    if who not in (CONVERSATIONS, TASKS_TAB, SETTINGS) and who not in CHARACTERS:
+        return 404, {"error": f"unknown who {who!r}", "known": [*CHARACTERS, CONVERSATIONS, TASKS_TAB, SETTINGS],
                      "generated_ts": datetime.now().isoformat()}
     opts = {}
     if who == CONVERSATIONS:
         opts = {"day": qs.get("day", [None])[0], "before": qs.get("before", [None])[0],
                 "limit": qs.get("limit", [200])[0]}
+    elif who == TASKS_TAB:
+        opts = {k: qs.get(k, [None])[0] for k in ("sister", "outcome", "q", "before", "limit")}
     try:
         return 200, collect(who, **opts)
     except Exception as e:  # never let one bad query kill the feed
@@ -2060,6 +3484,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/data":
             code, payload = api_response(query)
             self._json(code, payload)
+        elif path == "/api/task":
+            code, payload = task_response(query)
+            self._json(code, payload)
         elif path == "/healthz":
             self._send(200, "ok", "text/plain")
         elif path in ("/favicon.svg", "/favicon.ico"):
@@ -2072,23 +3499,42 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, "not found", "text/plain")
 
+    def _same_origin(self):
+        """A browser POST carries Origin; a settings write must come from this page itself, never
+        from another site the browser happens to have open (no Origin = a script/curl on this PC)."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        host = self.headers.get("Host") or ""
+        o = origin.split("://", 1)[-1].rstrip("/")
+        return bool(host) and o.lower() == host.lower()
+
     def do_POST(self):
         path, _, _query = self.path.partition("?")
-        if path not in ("/api/control", "/api/say"):
+        if path not in ("/api/control", "/api/say", "/api/settings"):
             self._send(404, "not found", "text/plain")
             return
         if not self._local_client():
             self._json(403, {"ok": False, "error": "controls are only accepted from this machine"})
             return
+        if path == "/api/settings" and not self._same_origin():
+            self._json(403, {"ok": False, "error": "settings are only accepted from this dashboard page"})
+            return
+        limit = MAX_SETTINGS_BODY if path == "/api/settings" else MAX_CONTROL_BODY
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = -1
-        if n < 0 or n > MAX_CONTROL_BODY:
-            self._json(400, {"ok": False, "error": f"body must be 0-{MAX_CONTROL_BODY} bytes of JSON"})
+        if n < 0 or n > limit:
+            self._json(400, {"ok": False, "error": f"body must be 0-{limit} bytes of JSON"})
             return
         body = self.rfile.read(n) if n else b""
-        code, payload = say_response(body) if path == "/api/say" else control_response(body)
+        if path == "/api/say":
+            code, payload = say_response(body)
+        elif path == "/api/settings":
+            code, payload = settings_response(body)
+        else:
+            code, payload = control_response(body)
         self._json(code, payload)
 
 
@@ -2123,6 +3569,36 @@ def say_response(body, send=None):
     return (200 if result.get("ok") else 503), result
 
 
+def settings_response(body, env_path=None):
+    """(status, payload) for `POST /api/settings {"updates": {KEY: value | null}}` — the Settings
+    tab's Save. Every value is validated through the registry FIRST (one bad value → 400 with
+    per-key `errors`, nothing written); then one in-place `.env` write (comments/order kept,
+    `.env.bak` alongside). `null` resets a key to its code default (its line is removed). Secrets
+    and read-only rows are refused. Config is read at boot, so the payload says which process(es)
+    must restart (`restart`, `restart_labels`, `message`). `env_path` overrides ENV_PATH (tests)."""
+    env_path = env_path or ENV_PATH
+    if settings_registry is None:
+        return 503, {"ok": False, "error": "modules/settings_registry.py is missing"}
+    if isinstance(body, (bytes, bytearray)):
+        body = bytes(body).decode("utf-8", errors="replace")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body) if body.strip() else None
+        except ValueError:
+            return 400, {"ok": False, "error": "body is not JSON"}
+    if not isinstance(body, dict) or not isinstance(body.get("updates"), dict):
+        return 400, {"ok": False, "error": 'body must be a JSON object {"updates": {KEY: value}}'}
+    try:
+        ok, payload = settings_registry.apply_updates(env_path, body["updates"])
+    except OSError as e:      # a locked/readonly .env must never take the dashboard down
+        return 500, {"ok": False, "error": f"couldn't write .env: {e}"}
+    if not ok:
+        errs = payload.get("errors") or {}
+        return 400, {"ok": False, "errors": errs,
+                     "error": "; ".join(errs.values()) if errs else "nothing saved"}
+    return 200, {"ok": True, **payload}
+
+
 def _arg(argv, flag, default=None):
     if flag in argv:
         i = argv.index(flag)
@@ -2132,11 +3608,11 @@ def _arg(argv, flag, default=None):
 
 
 def main(argv=None):
-    """`--once [--who aiva|saga|conversations]` prints one JSON snapshot; otherwise serves.
+    """`--once [--who aiva|saga|conversations|tasks|settings]` prints one JSON snapshot; otherwise serves.
     `--open` opens the browser on the chosen tab."""
     argv = list(sys.argv[1:] if argv is None else argv)
     who = (_arg(argv, "--who", DEFAULT_WHO) or DEFAULT_WHO).strip().lower()
-    known = [*CHARACTERS, CONVERSATIONS]
+    known = [*CHARACTERS, CONVERSATIONS, TASKS_TAB, SETTINGS]
     if who not in known:
         print(f"unknown --who {who!r}; known: {', '.join(known)}", file=sys.stderr)
         return 2

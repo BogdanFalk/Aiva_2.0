@@ -92,20 +92,32 @@ class SpeakerConfig:
     max_secs: float = 12.0      # cap buffered audio fed to the model
     embed_timeout_ms: int = 800
     primary_name: str = "Frank"
+    seed_primary: bool = True   # first voice ever is silently enrolled as primary_name (Aiva);
+                                # False → an empty roster asks "who are you?" like any unknown (Saga)
 
     @classmethod
-    def from_env(cls):
+    def from_env(cls, prefix="AIVA"):
+        """Read `{prefix}_SPEAKER_*`. The model thresholds are tuned once for the shared CAM++ model,
+        so a sister's prefix falls back to the AIVA_ value for those; who she seeds and under what
+        name (`_SEED_PRIMARY`, `_PRIMARY_NAME`) are strictly her own."""
         g = os.getenv
+        p = (prefix or "AIVA").upper()
+
+        def shared(key, default):
+            return g(f"{p}_SPEAKER_{key}") or g(f"AIVA_SPEAKER_{key}") or default
+
+        seed = (g(f"{p}_SPEAKER_SEED_PRIMARY") or "1").strip().lower() not in ("0", "false", "no", "off")
         return cls(
-            t_high=float(g("AIVA_SPEAKER_T_HIGH", "0.62")),
-            t_low=float(g("AIVA_SPEAKER_T_LOW", "0.45")),
-            margin=float(g("AIVA_SPEAKER_MARGIN", "0.06")),
-            sticky_keep=float(g("AIVA_SPEAKER_STICKY_KEEP", "0.50")),
-            sticky_secs=float(g("AIVA_SPEAKER_STICKY_SECS", "45")),
-            min_secs=float(g("AIVA_SPEAKER_MIN_SECS", "1.5")),
-            max_secs=float(g("AIVA_SPEAKER_MAX_SECS", "12")),
-            embed_timeout_ms=int(g("AIVA_SPEAKER_EMBED_TIMEOUT_MS", "800")),
-            primary_name=g("AIVA_SPEAKER_PRIMARY_NAME", "Frank"),
+            t_high=float(shared("T_HIGH", "0.62")),
+            t_low=float(shared("T_LOW", "0.45")),
+            margin=float(shared("MARGIN", "0.06")),
+            sticky_keep=float(shared("STICKY_KEEP", "0.50")),
+            sticky_secs=float(shared("STICKY_SECS", "45")),
+            min_secs=float(shared("MIN_SECS", "1.5")),
+            max_secs=float(shared("MAX_SECS", "12")),
+            embed_timeout_ms=int(shared("EMBED_TIMEOUT_MS", "800")),
+            primary_name=g(f"{p}_SPEAKER_PRIMARY_NAME") or "Frank",
+            seed_primary=seed,
         )
 
 
@@ -301,8 +313,10 @@ class SpeakerRecognizer:
             return None
         now = self._now()
 
-        # first voice ever → silently seed the primary user (he boots her); no interrogation
-        if self.mem.count() == 0:
+        # first voice ever → silently seed the primary user (he boots her); no interrogation.
+        # A sister with seed_primary=False doesn't know his voice yet: an empty roster falls
+        # through to the unknown path below and she asks who she's talking to.
+        if self.mem.count() == 0 and self.cfg.seed_primary:
             sid = self.mem.enroll(self.cfg.primary_name, vec, source="primary-seed")
             self._set_current(sid, self.cfg.primary_name, now)
             self._last_note_name = self.cfg.primary_name   # already "current" — don't announce next turn

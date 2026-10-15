@@ -141,13 +141,14 @@ async def _describe(image_url, prompt, max_tokens=400):
     return resp.choices[0].message.content.strip()
 
 
-async def describe_screen(looking_for=None, monitor_index=None):
+async def describe_screen(looking_for=None, monitor_index=None, name="Aiva"):
     """Capture the screen and have the vision model describe it. Returns a
-    short text description (verbatim on error dialogs / key labels)."""
+    short text description (verbatim on error dialogs / key labels). `name` is
+    whose eyes these are (the character asking)."""
     jpeg = await asyncio.to_thread(capture_screen, monitor_index)
     b64 = base64.b64encode(jpeg).decode("utf-8")
     prompt = (
-        "You are Aiva's eyes. Look at this screenshot of the user's Windows screen and "
+        f"You are {name}'s eyes. Look at this screenshot of the user's Windows screen and "
         "describe what's relevant in 2-4 short sentences, plainly. Quote the exact text of "
         "any error messages, dialog titles, or important button/field labels verbatim. "
         "Name the app/window in focus if you can tell."
@@ -157,7 +158,7 @@ async def describe_screen(looking_for=None, monitor_index=None):
     return await _describe(f"data:image/jpeg;base64,{b64}", prompt)
 
 
-async def describe_image(url_or_path, looking_for=None):
+async def describe_image(url_or_path, looking_for=None, name="Aiva"):
     """Look at an image the way describe_screen looks at the screen — for something she FOUND online.
     Accepts a local file path or an http(s) URL. She describes what it actually is and judges it in
     her own voice (taste allowed). Returns a short description, or a spoken-safe error string."""
@@ -170,7 +171,7 @@ async def describe_image(url_or_path, looking_for=None):
         except Exception as e:
             return f"(couldn't open that image: {e})"
     prompt = (
-        "You are Aiva's eyes. Look at this image and describe what it actually shows in two or three "
+        f"You are {name}'s eyes. Look at this image and describe what it actually shows in two or three "
         "short sentences, plainly and with no markdown. Then say, in your own voice, whether YOU like "
         "it and why — your taste is allowed to be picky."
     )

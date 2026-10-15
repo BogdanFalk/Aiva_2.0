@@ -20,7 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 
 import pytest
@@ -144,6 +144,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "HOUSE_DB", str(tmp_path / "house.db"))
     monkeypatch.setattr(dashboard, "HOUSE_STATE", str(tmp_path / "house_state.json"))
     monkeypatch.setattr(dashboard, "_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(dashboard, "ENV_PATH", str(tmp_path / ".env"))   # never the real .env
     monkeypatch.setenv("AIVA_TTS_MONTHLY_CHARS", "100000")
     monkeypatch.delenv("AIVA_TAVILY_MONTHLY_CAP", raising=False)
     # the house looks up (our pid, :8761) but nobody listens there — skip the live-state peek so a
@@ -172,7 +173,7 @@ def test_characters_map_comes_from_character_module():
     assert chars["saga"]["cat"] is None and chars["saga"]["self_forming"] is True
     assert chars["saga"]["avatar"].endswith("saga_avatar_state.json")
     assert dashboard.HOUSE_DB.endswith("house.db") and dashboard.HOUSE_STATE.endswith("house_state.json")
-    assert [t["who"] for t in dashboard.tabs()][-1] == "conversations"
+    assert [t["who"] for t in dashboard.tabs()][-3:] == ["conversations", "tasks", "settings"]
 
 
 def test_tool_groups_tolerate_sister_tools_not_in_tools_py_yet():
@@ -193,7 +194,7 @@ def test_collect_aiva_started_with_kin_and_house_limits(home):
     d = dashboard.collect("aiva")
     assert (d["who"], d["name"], d["started"], d["db_present"]) == ("aiva", "Aiva", True, True)
     assert "error" not in d and "note" not in d
-    assert [t["who"] for t in d["tabs"]] == ["aiva", "saga", "conversations"]
+    assert [t["who"] for t in d["tabs"]] == ["aiva", "saga", "conversations", "tasks", "settings"]
     assert d["has_cat"] is True and d["cat"] is None           # a cat path, no state file yet
     assert d["inner"]["mood"] is not None and "valence" in d["inner"]["mood"]
 
@@ -378,7 +379,7 @@ def test_api_response_routes(home):
     assert payload["conversations"]["has_more"] is True
     code, payload = dashboard.api_response("who=bogus")
     assert code == 404 and "unknown who" in payload["error"]
-    assert payload["known"] == ["aiva", "saga", "conversations"]
+    assert payload["known"] == ["aiva", "saga", "conversations", "tasks", "settings"]
     json.dumps(payload, default=str)
 
 
@@ -583,8 +584,12 @@ def test_control_response_validates_before_it_sends(home):
     assert dashboard.control_response({"action": "mute", "target": "x"}, send=fake_send)[1]["targets"] == [
         "aiva", "saga", "audible", "private"]
     assert set(dashboard.CONTROL_ACTIONS) == {"mute", "interrupt", "sister_talk", "sleep", "wake", "restart_sisters",
-                                              "restart_sister", "quit_sister", "start_sister", "start_house",
+                                              "restart_sister", "quit_sister", "start_sister",
+                                              "mute_sister", "unmute_sister", "start_house",
                                               "restart_house", "quit"}
+    # per-sister voice mute needs a real sister slug and goes to the house (not launched locally)
+    assert dashboard.control_response({"action": "mute_sister"}, send=fake_send)[0] == 400
+    assert dashboard.control_response({"action": "mute_sister", "target": "nobody"}, send=fake_send)[0] == 400
 
     good = [(b'{"action": "mute"}', ("mute", None)),
             ({"action": "mute", "target": None}, ("mute", None)),
@@ -596,6 +601,8 @@ def test_control_response_validates_before_it_sends(home):
             ('{"action": "start_sister", "target": "saga"}', ("start_sister", "saga")),
             ({"action": "restart_sister", "target": "aiva"}, ("restart_sister", "aiva")),
             ({"action": "quit_sister", "target": "Saga"}, ("quit_sister", "saga")),
+            ({"action": "mute_sister", "target": "aiva"}, ("mute_sister", "aiva")),
+            ({"action": "unmute_sister", "target": "Saga"}, ("unmute_sister", "saga")),
             ({"action": "restart_sisters"}, ("restart_sisters", None)),
             ({"action": "restart_house"}, ("restart_house", None)),
             ({"action": "quit"}, ("quit", None))]
@@ -748,3 +755,414 @@ def test_favicon_is_served_inline(home):
     html = d.page()
     assert 'rel="icon" href="/favicon.svg"' in html
     assert d.FAVICON_SVG.startswith("<svg") and "circle" in d.FAVICON_SVG and len(d.FAVICON_SVG) < 2000
+
+
+
+# --- the Settings tab ----------------------------------------------------------------------------
+
+ENV_TEXT = ("# keys\nOPENAI_API_KEY=sk-secret-abcd1234\n\n# the voice model\nAIVA_LLM_MODEL=gpt-5.6-luna\n"
+            "AIVA_WAKE_THRESHOLD=0.4\nUNRELATED=keep   # mine\n")
+
+
+def test_settings_tab_comes_after_conversations(home):
+    assert [t["who"] for t in dashboard.tabs()] == ["aiva", "saga", "conversations", "tasks", "settings"]
+    assert dashboard.tabs()[-1]["label"] == "Settings"
+
+
+def test_settings_payload_groups_values_and_masks_secrets(home):
+    (home / ".env").write_text(ENV_TEXT, encoding="utf-8")
+    code, d = dashboard.api_response("who=settings")
+    assert code == 200 and d["who"] == "settings" and d["env_present"] is True
+    assert d["env_path"] == str(home / ".env")
+    assert "household" in d and [t["who"] for t in d["tabs"]][-1] == "settings"
+    rows = {s["key"]: s for g in d["settings"] for s in g["settings"]}
+    groups = [g["group"] for g in d["settings"]]
+    assert groups[0] == "API keys & services" and "Tasks" in groups and "Saga" in groups
+    assert rows["OPENAI_API_KEY"]["value"] == "••••1234" and rows["OPENAI_API_KEY"]["editable"] is False
+    assert "sk-secret" not in json.dumps(d, ensure_ascii=False)
+    w = rows["AIVA_WAKE_THRESHOLD"]
+    assert (w["value"], w["default"], w["source"], w["modified"], w["type"]) == (0.4, 0.5, ".env", True, "float")
+    assert w["restart"] == ["house"] and w["description"]
+    assert rows["AIVA_TASK_MAX_WALL_MIN"]["value"] == 20.0 and rows["AIVA_TASK_MAX_WALL_MIN"]["source"] == "default"
+    assert rows["AIVA_TASK_MODEL"]["value"] == "gpt-5.6-luna"            # falls back to the voice model
+    assert rows["becoming.MAX_ACTIVE_TRAITS"]["readonly"] is True
+    sm = d["settings_summary"]
+    assert sm["total"] == len(rows) and sm["secrets_set"] == 1 and sm["in_env"] == 3
+    json.dumps(d, default=str)
+    assert dashboard.main(["--once", "--who", "settings"]) == 0
+
+
+def test_settings_payload_without_an_env_file(home):
+    d = dashboard.collect("settings")
+    assert d["env_present"] is False and d["settings_summary"]["in_env"] == 0
+
+
+def test_settings_response_validates_then_writes_the_tmp_env(home):
+    env = home / ".env"
+    env.write_text(ENV_TEXT, encoding="utf-8")
+    before = env.read_bytes()
+    for body in (b"", b"nope", b"[]", {"updates": []}, {"x": 1}):
+        code, payload = dashboard.settings_response(body)
+        assert code == 400 and payload["ok"] is False, body
+    code, payload = dashboard.settings_response({"updates": {"OPENAI_API_KEY": "sk-evil", "AIVA_WAKE_THRESHOLD": 9}})
+    assert code == 400 and set(payload["errors"]) == {"OPENAI_API_KEY", "AIVA_WAKE_THRESHOLD"}
+    assert env.read_bytes() == before                                  # nothing written on any error
+    code, payload = dashboard.settings_response(
+        json.dumps({"updates": {"AIVA_WAKE_THRESHOLD": "0.45", "AIVA_SISTER_TALK": "audible",
+                                "AIVA_TASK_MAX_COST_USD": 2, "AIVA_LLM_MODEL": None}}).encode())
+    assert code == 200 and payload["ok"] is True
+    assert payload["restart"] == ["house", "aiva", "saga"] and "restart" in payload["message"]
+    text = env.read_text(encoding="utf-8")
+    assert text.startswith("# keys\nOPENAI_API_KEY=sk-secret-abcd1234\n\n# the voice model\nAIVA_WAKE_THRESHOLD=0.45\n"
+                           "UNRELATED=keep   # mine\n")
+    assert "AIVA_LLM_MODEL" not in text and "AIVA_TASK_MAX_COST_USD=2" in text and "AIVA_SISTER_TALK=audible" in text
+    assert (home / ".env.bak").read_bytes() == before
+    rows = {s["key"]: s for g in dashboard.collect("settings")["settings"] for s in g["settings"]}
+    assert rows["AIVA_SISTER_TALK"]["value"] == "audible" and rows["AIVA_LLM_MODEL"]["source"] == "default"
+
+
+def test_http_settings_route_is_local_and_same_origin(home, monkeypatch):
+    env = home / ".env"
+    env.write_text(ENV_TEXT, encoding="utf-8")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def post(data, origin=None):
+        headers = {"Content-Type": "application/json"}
+        if origin:
+            headers["Origin"] = origin
+        req = urllib.request.Request(base + "/api/settings", data=data, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+    try:
+        code, body = post(b'{"updates":{"AIVA_SELF_TICK_S":"30"}}', origin=base)      # the page itself
+        assert code == 200 and body["restart"] == ["aiva", "saga"]
+        assert "AIVA_SELF_TICK_S=30" in env.read_text(encoding="utf-8")
+        code, body = post(b'{"updates":{"AIVA_SELF_TICK_S":"45"}}')                  # a local script: no Origin
+        assert code == 200
+        code, body = post(b'{"updates":{"AIVA_SELF_TICK_S":"5"}}', origin="http://evil.example")
+        assert code == 403 and "AIVA_SELF_TICK_S=45" in env.read_text(encoding="utf-8")
+        code, body = post(b'{"updates":{"AIVA_SELF_TICK_S":"abc"}}', origin=base)
+        assert code == 400 and "AIVA_SELF_TICK_S" in body["errors"]
+        with urllib.request.urlopen(base + "/api/data?who=settings", timeout=5) as r:
+            assert json.loads(r.read())["who"] == "settings"
+        monkeypatch.setattr(dashboard.Handler, "_local_client", lambda self: False)
+        code, body = post(b'{"updates":{"AIVA_SELF_TICK_S":"50"}}', origin=base)
+        assert code == 403 and "AIVA_SELF_TICK_S=45" in env.read_text(encoding="utf-8")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_page_carries_the_settings_tab(home):
+    html = dashboard.page()
+    assert '"who": "settings"' in html and '"label": "Settings"' in html
+    assert "/api/settings" in html and "function renderSettings" in html and "function saveSettings" in html
+    assert "d.who==='settings'" in html and "restart_sister" in html and "beforeunload" in html
+
+
+# --- the Tasks tab ---------------------------------------------------------------------------
+
+T_CODE = "t-20260920-101500-abcd"      # delegated to Claude Code, newer (`claude` event)
+T_OLD = "t-20260919-090000-0f0f"       # an old delegate: no `claude` event, legacy temp log only
+T_SHELL = "t-20260918-080000-1234"     # a plain tool + shell task that failed
+SESSION = "11111111-2222-4333-8444-555555555555"
+OLD_SESSION = "99999999-8888-4777-8666-555555555555"
+PROJECT = "C:/Work/Proj_1"
+
+
+def _task_row(tid, created, goal, status, outcome, plan, log, **kw):
+    row = {"id": tid, "created_ts": created, "updated_ts": created, "finished_ts": kw.pop("finished", None),
+           "goal_text": goal, "goal_normalized": goal.lower(), "details": kw.pop("details", ""),
+           "family": kw.pop("family", "repo-edit"), "approach": kw.pop("approach", None),
+           "status": status, "outcome": outcome, "plan_json": json.dumps(plan), "log_json": json.dumps(log),
+           "pending_json": kw.pop("pending", None), "result_summary": kw.pop("summary", None),
+           "duration_s": kw.pop("duration", None), "delegated_to": kw.pop("delegated", "none"),
+           "agent_grade": kw.pop("grade", None), "cost_usd": kw.pop("cost", 0.0),
+           "llm_calls": 3, "tool_calls": 4}
+    assert not kw
+    return row
+
+
+def _transcript_lines(prompt, cwd, *, edit="a.py", ts="2026-09-20T07:15:10.000Z"):
+    return [
+        {"type": "queue-operation", "operation": "enqueue", "timestamp": ts, "content": prompt},
+        {"type": "user", "timestamp": ts, "cwd": cwd, "message": {"role": "user", "content": prompt}},
+        {"type": "assistant", "timestamp": ts, "cwd": cwd, "message": {"id": "m1", "model": "claude-x", "content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": cwd + "\\src\\a.py"}},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": cwd + "\\src\\a.py"}},
+            {"type": "tool_use", "name": "Grep", "input": {"pattern": "def main", "path": "src"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "is_error": True, "content": "x"}]}},
+        {"type": "assistant", "message": {"id": "m2", "content": [
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": cwd + "\\src\\" + edit}},
+            {"type": "tool_use", "name": "MultiEdit", "input": {"file_path": cwd + "\\src\\" + edit}},
+            {"type": "tool_use", "name": "Write", "input": {"file_path": cwd + "\\tests\\test_a.py"}},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "pytest -q"}}]}},
+        {"type": "assistant", "message": {"id": "m2", "content": [{"type": "text", "text": "Done: fixed it."}]}},
+        {"type": "cost-state", "totalCostUSD": 1.25, "totalLinesAdded": 12, "totalLinesRemoved": 3,
+         "totalDuration": 61000},
+    ]
+
+
+@pytest.fixture
+def tasks_home(home, monkeypatch):
+    """Aiva's db gets a tasks table (the real TaskMemory schema) with three tasks; a coding log +
+    .json for the new job, a legacy temp log for the old one, and a fake ~/.claude/projects with
+    both sessions' transcripts."""
+    from modules.task_memory import TaskMemory
+    mem = Memory(str(home / "memory.db"))
+    TaskMemory(mem.conn)
+    code_plan = [{"n": 1, "title": "Fix the bug", "kind": "delegate", "status": "done", "attempts": 1,
+                  "action": {"project_dir": PROJECT, "prompt": "Fix the parser bug in src/a.py"},
+                  "expect": "tests pass", "evidence": ["Claude Code done: fixed", "grade good: ok"],
+                  "started": "2026-09-20T10:15:05", "finished": "2026-09-20T10:16:10"}]
+    code_log = [
+        {"ts": "2026-09-20T10:15:00", "event": "start", "detail": "Fix it"},
+        {"ts": "2026-09-20T10:15:01", "event": "familiarity", "detail": "novel (lexical, 0.1)"},
+        {"ts": "2026-09-20T10:15:02", "event": "decision", "detail": "confirm_plan — never done this"},
+        {"ts": "2026-09-20T10:15:03", "event": "announce(question)", "detail": "[Task wants ...]"},
+        {"ts": "2026-09-20T10:15:05", "event": "delegate", "detail": f"{T_CODE}-s1 in {PROJECT}"},
+        {"ts": "2026-09-20T10:16:10", "event": "claude", "detail": json.dumps(
+            {"job": f"{T_CODE}-s1", "session": SESSION, "cost": 1.25, "status": "done",
+             "log": f"logs/coding/{T_CODE}-s1.log"})},
+        {"ts": "2026-09-20T10:16:11", "event": "grade", "detail": "good: tests pass"},
+        {"ts": "2026-09-20T10:16:12", "event": "finish", "detail": "success: fixed"},
+    ]
+    old_plan = [{"n": 1, "title": "Inspect", "kind": "delegate", "status": "done",
+                 "action": {"project_dir": PROJECT, "prompt": "Inspect the  repo\nand report"}}]
+    old_log = [{"ts": "2026-09-19T09:00:05", "event": "delegate", "detail": f"{T_OLD}-s1 in {PROJECT}"},
+               {"ts": "2026-09-19T09:02:00", "event": "finish", "detail": "success: inspected"}]
+    shell_plan = [
+        {"n": 1, "title": "Write the file", "kind": "tool", "status": "done",
+         "action": {"tool": "create_file", "args": {"path": "~/x.py", "content": "x" * 1000}}},
+        {"n": 2, "title": "Run it", "kind": "shell", "status": "failed", "attempts": 2,
+         "action": {"command": "python x.py", "purpose": "check"}, "failure": "rc=1"},
+        {"n": 3, "title": "Report", "kind": "tool", "status": "pending", "action": {"tool": "remember", "args": {}}}]
+    shell_log = [{"ts": "2026-09-18T08:00:01", "event": "tool", "detail": "create_file(...) -> ok"},
+                 {"ts": "2026-09-18T08:00:02", "event": "error", "detail": "RuntimeError('boom')"}]
+    rows = [
+        _task_row(T_CODE, "2026-09-20T10:15:00.100000", "Fix the parser bug", "done", "success", code_plan,
+                  code_log, delegated="claude_code", grade="good", duration=72, cost=0.004,
+                  finished="2026-09-20T10:16:12", summary="Finished: fixed the parser."),
+        _task_row(T_OLD, "2026-09-19T09:00:00.000000", "Inspect the repo", "done", "success", old_plan,
+                  old_log, delegated="claude_code", finished="2026-09-19T09:02:00"),
+        _task_row(T_SHELL, "2026-09-18T08:00:00.000000", "Make a prime script", "failed", "failed",
+                  shell_plan, shell_log, cost=0.001, pending=json.dumps({"kind": "confirm_command",
+                                                                          "text": "run python x.py?"})),
+    ]
+    for r in rows:
+        cols = ", ".join(r)
+        mem.conn.execute(f"INSERT INTO tasks ({cols}) VALUES ({','.join('?' * len(r))})", list(r.values()))
+    mem.conn.commit()
+    mem.close()
+
+    logs = home / "logs"
+    (logs / "coding").mkdir(parents=True)
+    (logs / "coding" / f"{T_CODE}-s1.log").write_text("Fixed the parser. All tests pass.", encoding="utf-8")
+    (logs / "coding" / f"{T_CODE}-s1.json").write_text(json.dumps(
+        {"result": "Fixed the parser.", "session_id": SESSION, "total_cost_usd": 1.25, "num_turns": 5,
+         "duration_ms": 61000}), encoding="utf-8")
+    legacy = home / "aiva_terminals"
+    legacy.mkdir()
+    (legacy / f"{T_OLD}-s1.log").write_text("# Report\nNothing changed.", encoding="utf-8")
+    monkeypatch.setattr(dashboard, "LEGACY_JOBS_DIR", str(legacy))
+
+    projects = home / "claude_projects"
+    cwd = "C:\\Work\\Proj_1"
+    folder = projects / "C--Work-Proj-1"
+    folder.mkdir(parents=True)
+    with open(folder / f"{SESSION}.jsonl", "w", encoding="utf-8") as f:
+        for e in _transcript_lines("Fix the parser bug in src/a.py", cwd):
+            f.write(json.dumps(e) + "\n")
+        f.write("not json at all\n")
+    # the old run's transcript: found only by prompt (whitespace-normalised) + time window
+    old_start = datetime.fromisoformat("2026-09-19T09:00:06").astimezone()
+    with open(folder / f"{OLD_SESSION}.jsonl", "w", encoding="utf-8") as f:
+        for e in _transcript_lines("Inspect the repo and report", cwd, edit="b.py",
+                                   ts=old_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")):
+            f.write(json.dumps(e) + "\n")
+    t = datetime.fromisoformat("2026-09-19T09:01:00").timestamp()
+    os.utime(folder / f"{OLD_SESSION}.jsonl", (t, t))
+    # a decoy in the same folder: other prompt
+    (folder / "00000000-0000-4000-8000-000000000000.jsonl").write_text(json.dumps(
+        {"type": "queue-operation", "operation": "enqueue", "content": "something else"}) + "\n", encoding="utf-8")
+    os.utime(folder / "00000000-0000-4000-8000-000000000000.jsonl", (t, t))
+    monkeypatch.setattr(dashboard, "CLAUDE_PROJECTS_DIR", str(projects))
+    return home
+
+
+def test_tasks_tab_sits_between_conversations_and_settings(home):
+    whos = [t["who"] for t in dashboard.tabs()]
+    assert whos.index("tasks") == whos.index("conversations") + 1 == whos.index("settings") - 1
+
+
+def test_tasks_list_merges_newest_first_with_tally(tasks_home):
+    d = dashboard.collect("tasks")
+    assert d["who"] == "tasks" and "household" in d
+    tk = d["tasks"]
+    assert [r["id"] for r in tk["rows"]] == [T_CODE, T_OLD, T_SHELL]
+    top = tk["rows"][0]
+    assert top["sister"] == "aiva" and top["sister_name"] == "Aiva" and top["bucket"] == "success"
+    assert top["claude"] is True and top["claude_cost"] == 1.25 and top["steps_done"] == 1 == top["steps_total"]
+    assert top["duration"] == "1m 12s" and top["summary"] == "Finished: fixed the parser."
+    shell = tk["rows"][2]
+    assert shell["bucket"] == "failed" and shell["steps_failed"] == 1 and shell["claude"] is False
+    ta = tk["tally"]["aiva"]
+    assert ta["total"] == 3 and ta["success"] == 2 and ta["failed"] == 1 and ta["delegated"] == 2
+    assert tk["tally"]["saga"]["total"] == 0          # no db yet → an empty tally, not an error
+    assert {s["slug"]: s["started"] for s in tk["sisters"]} == {"aiva": True, "saga": False}
+    json.dumps(d, default=str)
+
+
+def test_tasks_list_filters_and_paging(tasks_home):
+    q = lambda **kw: dashboard.collect("tasks", **kw)["tasks"]
+    assert [r["id"] for r in q(outcome="failed")["rows"]] == [T_SHELL]
+    assert q(sister="saga")["rows"] == []
+    assert [r["id"] for r in q(q="PARSER")["rows"]] == [T_CODE]
+    assert q(outcome="bogus")["filters"]["outcome"] is None            # unknown filter → ignored
+    p1 = q(limit=2)
+    assert len(p1["rows"]) == 2 and p1["has_more"] and p1["next_before"]
+    p2 = q(limit=2, before=p1["next_before"])
+    assert [r["id"] for r in p2["rows"]] == [T_SHELL] and not p2["has_more"]
+    assert len(q(before="'; DROP TABLE tasks; --")["rows"]) == 3      # malformed cursor → ignored
+    code, payload = dashboard.api_response("who=tasks&outcome=success&limit=1")
+    assert code == 200 and len(payload["tasks"]["rows"]) == 1 and payload["tasks"]["has_more"]
+
+
+def test_task_detail_with_claude_event(tasks_home):
+    code, t = dashboard.task_response(f"who=aiva&id={T_CODE}")
+    assert code == 200 and t["id"] == T_CODE and t["goal"] == "Fix the parser bug"
+    assert t["decision"] == "confirm_plan — never done this" and t["familiarity"].startswith("novel")
+    assert t["steps"][0]["kind"] == "delegate" and t["steps"][0]["took"] == "1m 05s"
+    assert t["steps"][0]["action"]["prompt"] == "Fix the parser bug in src/a.py"
+    assert t["steps"][0]["evidence"] == ["Claude Code done: fixed", "grade good: ok"]
+    tl = t["timeline"]
+    assert [e["event"] for e in tl][:3] == ["start", "familiarity", "decision"]
+    assert t["announcements"] == 1 and [e for e in tl if e["secondary"]][0]["event"] == "announce(question)"
+    cl = next(e for e in tl if e["event"] == "claude")
+    assert cl["claude"]["session"] == SESSION and cl["claude"]["cost"] == 1.25
+    (job,) = t["claude_jobs"]
+    assert job["job"] == f"{T_CODE}-s1" and job["n"] == 1 and job["prompt"].startswith("Fix the parser")
+    assert job["result"]["text"] == "Fixed the parser. All tests pass." and job["result"]["legacy"] is False
+    assert job["result"]["payload"]["num_turns"] == 5
+    (run,) = job["runs"]
+    assert run["session"] == SESSION and not run.get("inferred") and run["status"] == "done"
+    assert run["took"] == "1m 05s" and run["transcript_path"].endswith(SESSION + ".jsonl")
+    a = run["activity"]
+    assert a["files_edited"] == [{"path": "src/a.py", "count": 2}]
+    assert a["files_written"] == [{"path": "tests/test_a.py", "count": 1}]
+    assert a["files_read"] == [{"path": "src/a.py", "count": 2}]
+    assert a["commands"] == ["pytest -q"] and a["lines_added"] == 12
+    assert t["claude_cost"] == 1.25
+    json.dumps(t, default=str)
+
+
+def test_task_detail_old_job_uses_legacy_log_and_infers_session(tasks_home):
+    code, t = dashboard.task_response(f"who=aiva&id={T_OLD}")
+    assert code == 200
+    (job,) = t["claude_jobs"]
+    assert job["result"]["legacy"] is True and job["result"]["text"].startswith("# Report")
+    (run,) = job["runs"]
+    assert run["session"] == OLD_SESSION and run["inferred"] is True
+    assert run["activity"]["files_edited"] == [{"path": "src/b.py", "count": 2}]
+
+
+def test_task_detail_steps_clip_args_and_show_pending(tasks_home):
+    code, t = dashboard.task_response(f"who=aiva&id={T_SHELL}")
+    assert code == 200 and t["claude_jobs"] == []
+    s1, s2, s3 = t["steps"]
+    assert s1["action"]["tool"] == "create_file" and len(s1["action"]["args"]["content"]) < 450
+    assert "(+600 chars)" in s1["action"]["args"]["content"]
+    assert s2["action"] == {"command": "python x.py", "purpose": "check"} and s2["failure"] == "rc=1"
+    assert s2["attempts"] == 2 and s3["status"] == "pending"
+    assert t["pending"]["kind"] == "confirm_command"
+    assert next(e for e in t["timeline"] if e["event"] == "error")["tone"] == "bad"
+
+
+def test_task_detail_rejects_bad_who_and_ids(tasks_home):
+    assert dashboard.task_response(f"who=bogus&id={T_CODE}")[0] == 404
+    assert dashboard.task_response(f"who=saga&id={T_CODE}")[0] == 404          # no db / not hers
+    assert dashboard.task_response("who=aiva&id=t-20990101-000000-ffff")[0] == 404
+    for bad in ("", "..%2F..%2Fmemory", "t-20260920-101500-abcd-s1", "t-20260920-101500-ABCD",
+                "t-20260920-101500-abcd%00", "*"):
+        code, payload = dashboard.task_response(f"who=aiva&id={bad}")
+        assert code == 400 and "malformed" in payload["error"], bad
+
+
+def test_job_and_transcript_lookups_refuse_traversal(tasks_home):
+    assert dashboard.job_result("../../secrets") is None
+    assert dashboard.job_result(f"{T_CODE}-s1/../../x") is None
+    assert dashboard.job_result(f"{T_CODE}-s1")["text"].startswith("Fixed")
+    assert dashboard.find_transcript("../*") is None
+    assert dashboard.find_transcript("*") is None
+    assert dashboard.find_transcript(SESSION).endswith(SESSION + ".jsonl")
+    # a `claude` event carrying a hostile job/session is dropped / neutered
+    assert dashboard.parse_claude_event(json.dumps({"job": "../../x", "session": SESSION})) is None
+    c = dashboard.parse_claude_event(json.dumps({"job": f"{T_CODE}-s1", "session": "../*"}))
+    assert c["session"] is None
+    # the runner clips details at 300 chars: a cut-off JSON still yields what a regex can find
+    cut = json.dumps({"job": f"{T_CODE}-s2", "session": SESSION, "cost": 0.5, "status": "done",
+                      "log": "x" * 400})[:300]
+    c = dashboard.parse_claude_event(cut)
+    assert c["job"] == f"{T_CODE}-s2" and c["session"] == SESSION and c["cost"] == 0.5
+
+
+def test_summarize_claude_transcript_pure():
+    lines = [json.dumps(e) for e in _transcript_lines("do it", "C:\\p")] + ["", "{bad", "[1,2]"]
+    a = dashboard.summarize_claude_transcript(lines)
+    assert a["turns"] == 2 and a["model"] == "claude-x" and a["prompt"] == "do it"
+    assert a["tools"] == {"Read": 2, "Grep": 1, "Edit": 1, "MultiEdit": 1, "Write": 1, "Bash": 1}
+    assert a["searches"] == ["Grep def main  in src"] and a["tool_errors"] == 1
+    assert a["final_text"] == "Done: fixed it." and a["cost_usd"] == 1.25 and a["duration_ms"] == 61000
+    # a `result` event wins for the final answer and the turn count
+    a = dashboard.summarize_claude_transcript(lines + [json.dumps(
+        {"type": "result", "result": "Final.", "num_turns": 9, "total_cost_usd": 2.0})])
+    assert a["final_text"] == "Final." and a["turns"] == 9 and a["cost_usd"] == 2.0
+    assert dashboard.summarize_claude_transcript([])["turns"] == 0
+
+
+def test_task_timeline_and_buckets_pure():
+    tl = dashboard.task_timeline([{"ts": "2026-09-20T10:00:00", "event": "finish", "detail": "failed: x"},
+                                  {"ts": "2026-09-20T10:00:01", "event": "announce(done)", "detail": "y"},
+                                  "junk", {"event": "grade", "detail": "partial: meh"}])
+    assert [(e["event"], e["tone"], e["secondary"]) for e in tl] == [
+        ("finish", "bad", False), ("announce(done)", "info", True), ("grade", "warn", False)]
+    assert tl[0]["time"] == "10:00:00" and tl[0]["day"] == "2026-09-20"
+    assert dashboard.task_bucket("interrupted", None) == "interrupted"
+    assert dashboard.task_bucket("interrupted", "cancelled") == "cancelled"
+    assert dashboard.task_bucket("awaiting_user", None) == "active"
+    assert dashboard.task_steps("not a list") == [] and dashboard.task_steps([None, {"n": 1}])[0]["status"] == "pending"
+
+
+def test_http_task_route(tasks_home):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def get(path):
+        try:
+            with urllib.request.urlopen(base + path, timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+    try:
+        code, body = get(f"/api/task?who=aiva&id={T_CODE}")
+        assert code == 200 and body["claude_jobs"][0]["runs"][0]["session"] == SESSION
+        assert get("/api/task?who=aiva&id=..%5C..%5Cx")[0] == 400
+        assert get(f"/api/task?who=nobody&id={T_CODE}")[0] == 404
+        code, body = get("/api/data?who=tasks")
+        assert code == 200 and len(body["tasks"]["rows"]) == 3
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_page_carries_the_tasks_tab(home):
+    html = dashboard.page()
+    assert '"who": "tasks"' in html and '"label": "Tasks"' in html
+    assert "function renderTasks" in html and "/api/task?who=" in html and "d.who==='tasks'" in html
+    assert "#tasks/" in html          # the sister tab's task rows link into it

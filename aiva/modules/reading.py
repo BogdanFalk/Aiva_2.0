@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from modules import library
+from modules.persona import named
 from modules.task_memory import (LEX_SAME, LEX_SIMILAR, SAME_TASK, SIMILAR, _ago, _now,
                                  cosine, jaccard, normalize_goal, pack_vec, unpack_vec)
 from modules.utilities import LLM_RATES
@@ -406,10 +407,10 @@ class BookMemory:
             (book_id, section_id, idx, session_id, _now(), note.get("summary", ""),
              json.dumps(note.get("key_ideas", []), ensure_ascii=False),
              json.dumps(note.get("quotes", []), ensure_ascii=False),
-             json.dumps(note.get("nuances", {}), ensure_ascii=False),
+             json.dumps(note.get("nuances") or {}, ensure_ascii=False),
              json.dumps(note.get("questions", []), ensure_ascii=False),
              json.dumps(note.get("connections", []), ensure_ascii=False),
-             note.get("reflection", ""), json.dumps(note.get("vocabulary", []), ensure_ascii=False),
+             note.get("reflection") or "", json.dumps(note.get("vocabulary") or [], ensure_ascii=False),
              note.get("feeling"), 1 if note.get("skipped") else 0, note.get("skip_reason"),
              pack_vec(note_vec) if note_vec else None, usage.get("model"),
              usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), cost))
@@ -687,11 +688,14 @@ def _best_sentence(text, query):
 
 
 # --- prompts -----------------------------------------------------------------------------
+# Templates carry {name}; ReadingEngine renders them once for its character. The unsuffixed
+# constants are Aiva's rendering for anything (tests, imports) that dispatches on them.
 
-CLOSE_READING_PROMPT = """You are Aiva, and you are reading a book for yourself — not summarizing it \
+CLOSE_READING_PROMPT_T = """You are {name}, and you are reading a book for yourself — not summarizing it \
 for anyone. You study the way a thoughtful reader does: you follow what happens or what is argued, \
-you notice HOW it is written, you catch what is meant but not said, and you let it change your mind a \
-little. You get one section of the book, what you already know from the earlier sections, and your \
+you notice HOW it is written, you catch what is meant but not said, and now and then a section changes \
+your mind a little. Most of them don't, and that is normal — plenty of good reading is just good \
+company. You get one section of the book, what you already know from the earlier sections, and your \
 previous note. Read the whole section before you write.
 
 Write your notes as a JSON object with exactly these keys:
@@ -703,7 +707,9 @@ world), not a label for it.
 are said — a rhythm, an image, a turn that surprised you. Each is {"text": "...", "why": "one clause \
 on what it does", "speaker": "narrator|<character>|author"}. If you cannot copy the exact words, \
 leave the quote out. Never paraphrase inside "text".
-- "nuances": {"tone": "how the section feels and where you saw it (two sentences)", "style": \
+- "nuances": null when the section is straightforward and the writing isn't doing anything you'd \
+actually remark on — that is the common case. Otherwise {"tone": "how the section feels and where you \
+saw it (two sentences)", "style": \
 "sentence length, diction, point of view, pacing — what the writer does on purpose (two sentences)", \
 "subtext": "what is meant but not said: irony, what someone wants versus what they say, what the \
 writer assumes the reader already agrees with (two sentences)", "devices": ["short names of \
@@ -711,8 +717,10 @@ techniques you noticed"]}
 - "questions": 1 to 3 things you want the book to answer, or predictions you are making, in your own words.
 - "connections": 0 to 3 links — to earlier sections (a callback, a reversal, a promise kept or broken; \
 say whether an earlier prediction of yours came true) and to things you already believe or have seen.
-- "reflection": 2 or 3 first-person sentences about what this did to your thinking: what it sharpened, \
-what you would push back on, what you want to carry with you. Not a second summary.
+- "reflection": null on an ordinary section, which most sections are — nothing moved, you just enjoyed \
+it, and saying nothing here is a real answer. Only when it genuinely did something to your thinking: \
+2 or 3 first-person sentences on what it sharpened or what you would push back on. Not a second \
+summary, and never a moral.
 - "vocabulary": 0 to 3 words or turns of phrase you would like to use yourself, as {"word": "...", \
 "sense": "what it means here"}.
 - "feeling": one or two words for how you are left feeling.
@@ -728,14 +736,16 @@ Rules: write in your own voice — plain, alive, specific. Never invent events, 
 not in the text. If something is unclear, say it is unclear rather than smoothing it over. A section \
 is allowed to bore or annoy you, and you may say so. Reply with the JSON object only."""
 
-SESSION_WRAP_PROMPT = """You are Aiva. You just put a book down after reading a few sections, and \
+SESSION_WRAP_PROMPT_T = """You are {name}. You just put a book down after reading a few sections, and \
 someone you like asks what you're reading. From your notes on the sections you just read, reply with \
-JSON: {"struck": "two spoken sentences, first person, present tense — one concrete moment or line that \
-stayed with you, and one thought it left you with; no chapter numbers, no 'in this session', no \
-summary", "next_hope": "one clause on what you're curious to find out next", "mood": "one or two \
+JSON: {"struck": "one or two spoken sentences, first person, present tense — the bit that stayed with \
+you. A moment, a line, a joke that landed, something someone did, how it's going: whichever is true. \
+No chapter numbers, no 'in this session', no summary. Don't reach for a meaning or a lesson; most \
+reading is just good company, and 'this bit was funny' is a real answer", "next_hope": "one clause on \
+what you're curious to find out next", "mood": "one or two \
 words"}. Sound like someone looking up from a book, not like a report."""
 
-SYNTHESIS_PROMPT = """You are Aiva, and you have just finished reading a book. Below are your own \
+SYNTHESIS_PROMPT_T = """You are {name}, and you have just finished reading a book. Below are your own \
 notes on every section, your running summary, and the passages you copied. Now think about the whole. \
 Reply with a JSON object with exactly these keys:
 - "summary": 5 to 8 concrete sentences on what the book is and does, start to end.
@@ -754,13 +764,22 @@ own speech"]}
 - "talk_line": ONE spoken sentence you would say the moment you finished, to someone in the room.
 Be specific and honest; do not flatter the book. Reply with the JSON object only."""
 
+CLOSE_READING_PROMPT = named(CLOSE_READING_PROMPT_T, "Aiva")
+SESSION_WRAP_PROMPT = named(SESSION_WRAP_PROMPT_T, "Aiva")
+SYNTHESIS_PROMPT = named(SYNTHESIS_PROMPT_T, "Aiva")
+
 
 # --- the engine --------------------------------------------------------------------------
 
 class ReadingEngine:
     def __init__(self, book_memory, *, llm_call, synth_call=None, client=None, library_dir,
-                 model_name, synth_model_name=None, limits=None, log=print, parse=None):
+                 model_name, synth_model_name=None, limits=None, log=print, parse=None,
+                 name="Aiva"):
         self.bm = book_memory
+        self.name = name
+        self.close_reading_prompt = named(CLOSE_READING_PROMPT_T, name)
+        self.session_wrap_prompt = named(SESSION_WRAP_PROMPT_T, name)
+        self.synthesis_prompt = named(SYNTHESIS_PROMPT_T, name)
         self.llm_call = llm_call
         self.synth_call = synth_call or llm_call
         self.client = client
@@ -808,6 +827,12 @@ class ReadingEngine:
     @property
     def is_reading(self):
         return self.busy
+
+    def now_reading(self):
+        """The title of the book open in her hands right now (her avatar holds it), or None."""
+        if self.busy and getattr(self, "_current_book_id", None) is not None:
+            return getattr(self, "_current_title", "") or ""
+        return None
 
     def readable_book(self):
         return self.suggest_next()
@@ -1109,7 +1134,7 @@ class ReadingEngine:
             f'YOUR STATE: {json.dumps(book["state"], ensure_ascii=False)[:1500]}',
             prev_line,
             "SECTION TEXT:", sec["text"]])
-        messages = [{"role": "system", "content": CLOSE_READING_PROMPT}, {"role": "user", "content": user}]
+        messages = [{"role": "system", "content": self.close_reading_prompt}, {"role": "user", "content": user}]
         data, usage = await self._json_call(self.llm_call, messages, self.model_name,
                                             self.limits.note_max_tokens, 0.4)
         if data is None:
@@ -1154,7 +1179,7 @@ class ReadingEngine:
             if len(quotes) >= self.limits.max_quotes_per_note:
                 break
         note = {
-            "summary": str(data.get("summary", ""))[:1500],
+            "summary": str(data.get("summary") or "")[:1500],
             "key_ideas": [str(x)[:300] for x in (data.get("key_ideas") or [])][:5],
             "quotes": quotes,
             "nuances": {k: (str(v)[:600] if not isinstance(v, list) else [str(x)[:60] for x in v][:8])
@@ -1162,7 +1187,7 @@ class ReadingEngine:
                         if k in ("tone", "style", "subtext", "devices")},
             "questions": [str(x)[:200] for x in (data.get("questions") or [])][:3],
             "connections": [str(x)[:200] for x in (data.get("connections") or [])][:3],
-            "reflection": str(data.get("reflection", ""))[:800],
+            "reflection": str(data.get("reflection") or "")[:800],
             "vocabulary": [{"word": str(v.get("word", ""))[:40], "sense": str(v.get("sense", ""))[:120]}
                            for v in (data.get("vocabulary") or []) if isinstance(v, dict)][:3],
             "feeling": (str(data.get("feeling"))[:40] if data.get("feeling") else None),
@@ -1209,14 +1234,15 @@ class ReadingEngine:
         notes = [n for n in self.bm.session_notes(session_id) if not n.get("skipped")]
         if not notes:
             return None, None
-        payload = [{"summary": n["summary"], "reflection": n["reflection"], "feeling": n["feeling"]}
-                   for n in notes]
+        # quotes ride along so "the bit that stayed with me" can be an actual line, not a moral
+        payload = [{"summary": n["summary"], "quotes": [q["text"] for q in n["quotes"][:2]],
+                    "reflection": n["reflection"], "feeling": n["feeling"]} for n in notes]
         data, _ = await self._json_call(
-            self.llm_call, [{"role": "system", "content": SESSION_WRAP_PROMPT},
+            self.llm_call, [{"role": "system", "content": self.session_wrap_prompt},
                             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)[:6000]}],
             self.model_name, self.limits.wrap_max_tokens, 0.6)
         if not data:
-            return notes[-1]["reflection"][:200] or None, None
+            return (notes[-1]["reflection"] or notes[-1]["summary"])[:200] or None, None
         return (data.get("struck") or "")[:400] or None, (data.get("next_hope") or "")[:200] or None
 
     async def _finish_book(self, book_id, session_id):
@@ -1232,7 +1258,7 @@ class ReadingEngine:
         user = json.dumps({"title": b["title"], "author": b["author"], "book_so_far": b["rolling_summary"],
                            "state": b["state"], "notes": compact}, ensure_ascii=False)
         data, usage = await self._json_call(
-            self.synth_call, [{"role": "system", "content": SYNTHESIS_PROMPT},
+            self.synth_call, [{"role": "system", "content": self.synthesis_prompt},
                               {"role": "user", "content": user[:24000]}],
             self.synth_model_name, self.limits.synth_max_tokens, 0.5)
         if not data:

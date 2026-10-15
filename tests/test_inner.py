@@ -114,10 +114,24 @@ def test_baseline_matches_config(brain):
 
 def test_save_load_roundtrip(tmp_path, brain):
     p = str(tmp_path / "inner_state.json")
-    s = InnerState(valence=-0.3, arousal=0.7, social=0.4, focus="x", last_update=iso(0))
+    s = InnerState(valence=-0.3, arousal=0.7, social=0.4, focus="x", focus_ts=iso(0), last_update=iso(0))
     s.save(p)
     back = InnerState.load(p, brain, now=iso(0))  # zero elapsed → no decay
     assert (back.valence, back.arousal, back.social, back.focus) == (-0.3, 0.7, 0.4, "x")
+
+
+def test_pre_v3_focus_without_timestamp_does_not_survive_load(tmp_path, brain):
+    p = str(tmp_path / "inner_state.json")
+    InnerState(focus="what remains after the brightness settles", last_update=iso(0)).save(p)
+    assert InnerState.load(p, brain, now=iso(0)).focus is None
+
+
+def test_focus_lets_go_after_a_day(brain):
+    s = InnerState(focus="the Pratchett book", focus_ts=iso(0), last_update=iso(0))
+    brain.decay(s, iso(20))
+    assert s.focus == "the Pratchett book"
+    brain.decay(s, iso(25))
+    assert s.focus is None and s.focus_ts is None
 
 
 def test_load_missing_file_is_fresh_baseline(tmp_path, brain):

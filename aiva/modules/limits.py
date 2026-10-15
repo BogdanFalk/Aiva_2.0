@@ -22,6 +22,10 @@ SERVICE_LABEL = {
     "tavily": "Web search & finds",
     "tts": "Voice (ElevenLabs)",
     "stt": "Listening (Deepgram)",
+    # per-character TTS counters (uncapped: counted for the dashboard, never alert or pause —
+    # the capped/alerting aggregate is "tts")
+    "tts.aiva": "Voice — Aiva",
+    "tts.saga": "Voice — Saga",
 }
 
 

@@ -349,6 +349,42 @@ async def test_bad_json_retry_then_fallback(tmp_path):
     assert note["summary"] and bm.get_book(book["id"])["cursor_section"] == 1   # cursor still advanced
 
 
+def plain_note_json():
+    """An ordinary section: nothing to say about the craft, nothing changed in her."""
+    return json.dumps({"summary": "She walks to the shop and buys bread.",
+                       "key_ideas": ["Bread is bought."], "quotes": [], "nuances": None,
+                       "questions": [], "connections": [], "reflection": None, "vocabulary": [],
+                       "feeling": "easy", "book_so_far": "She bought bread.",
+                       "state": {"characters": [], "threads": [], "open_questions": [], "motifs": []}})
+
+
+async def test_ordinary_section_may_have_no_nuances_or_reflection(tmp_path):
+    """Most sections don't change her, so the note may come back with nulls — and a null must never
+    be stored as the string 'None' or break the NOT NULL columns."""
+    eng, bm, lib_dir = make_engine(tmp_path, llm=FakeLLM(notes=[plain_note_json()]),
+                                   limits=StudyLimits(sections_per_session=1, milestone_min_gap_secs=0))
+    book = await _ingest(tmp_path, eng, bm)
+    await run_task_after(eng, book["id"], sections=1)
+    note = bm.notes_for(book["id"])[0]
+    assert note["nuances"] == {} and note["reflection"] == ""
+    assert note["summary"].startswith("She walks") and bm.get_book(book["id"])["cursor_section"] == 1
+
+
+async def test_wrap_falls_back_to_the_summary_when_nothing_was_reflected(tmp_path):
+    class NoWrap(FakeLLM):
+        async def __call__(self, messages, **kw):
+            if messages[0]["content"].startswith(reading.SESSION_WRAP_PROMPT[:40]):
+                return FakeReply("not json")
+            return await super().__call__(messages, **kw)
+
+    eng, bm, lib_dir = make_engine(tmp_path, llm=NoWrap(notes=[plain_note_json()]),
+                                   limits=StudyLimits(sections_per_session=1, milestone_min_gap_secs=0))
+    book = await _ingest(tmp_path, eng, bm)
+    await run_task_after(eng, book["id"], sections=1)
+    struck = bm.conn.execute("SELECT struck FROM book_sessions").fetchone()[0]
+    assert struck and struck.startswith("She walks to the shop")
+
+
 async def test_book_cost_cap(tmp_path):
     eng, bm, lib_dir = make_engine(tmp_path,
                                    limits=StudyLimits(sections_per_session=5, book_cost_usd=0.0000001,
@@ -524,3 +560,22 @@ def test_plan_session_extent_does_not_stop_before_a_continuation():
             {"words": 2000, "title": "Chapter 3", "kind": "chapter"}]
     # target hit after idx1, but idx2 is a '(part 2)' continuation -> read through it, stop before ch3
     assert plan_session_extent(secs, 0, 3500, 20) == 3
+
+
+def test_now_reading_names_the_open_book_only_while_a_session_runs():
+    """What her avatar holds: the title while a session is reading, else None."""
+    eng = ReadingEngine.__new__(ReadingEngine)          # only the session bookkeeping matters here
+    eng._task = None
+    assert eng.now_reading() is None
+
+    async def run():
+        eng._task = asyncio.ensure_future(asyncio.sleep(10))
+        eng._current_book_id = 3
+        eng._current_title = "Through the Looking-Glass"
+        try:
+            assert eng.now_reading() == "Through the Looking-Glass"
+            eng._current_book_id = None                 # the session put the book away
+            assert eng.now_reading() is None
+        finally:
+            eng._task.cancel()
+    asyncio.run(run())

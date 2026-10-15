@@ -17,6 +17,14 @@ Architecture (all in this file):
   Expressions   — the model's *.exp3.json toggles (Chinese names = file
                   stems); active params are re-applied every frame after
                   Update() because Cubism restores saved params each update.
+  Activity      — (modules/avatar_activity.py) what her body is doing: the
+                  book she pulls up while she reads, the work panel beside
+                  her while she's on a task. Pure choreography; the book and
+                  panel are painted by paint_book/paint_panel INTO the GL
+                  frame after the model, anchored through her placement.
+  Constellation — (modules/constellation.py) Saga's quiet witness: a faint sky of
+                  stars to her upper left, one lit per lived moment. Pure logic; painted
+                  by paint_sky in SkyWindow. Only an instance that has one (`enabled_for`).
   IpcServer     — daemon thread; mutations go to a queue the GL loop drains,
                   reads are answered from a lock-guarded snapshot.
   AvatarWindow  — the QOpenGLWidget; QTimer-paced paintGL owns ALL model
@@ -24,9 +32,25 @@ Architecture (all in this file):
 
 Standalone demo (never starts Aiva):   cd aiva && python -m modules.avatar_renderer --demo
   --demo      scripted sweep: mouth, all expressions, placement, sleep, layers
+  --demo-activity  loop what her body does while she reads (the book) and works
+                   (the work panel); pair with --instance demo next to a live sister
+  --demo-witness   loop moments into Saga's constellation (one of each kind, a burst, the hush
+                   while she speaks, sleep, a tilt, both layers); needs --instance saga, and uses a temp state file
+                   unless --state is given, so made-up moments never reach her real sky
   --windowed  small opaque movable window (GL-vs-transparency triage)
-  --selftest  load the model, render 3s, exit 0/1 (CI-ish smoke)
+  --selftest  load the model, render 3s, exit 0/1 (CI-ish smoke); a body with a witness
+              must also paint its sky. Exits 4 without testing if a live renderer owns the
+              state file — pass --state <a temp file> to run beside it
+  --instance NAME   which sister this body belongs to (default AIVA_AVATAR_INSTANCE
+                    or "aiva"); picks the state file, window title and log prefix
+  --state PATH      explicit state file (default: avatar_ipc.state_path(instance))
+  --write-model NAME  write NAME.model3.json beside --model, pointing at the
+                    NAME.2048/ textures (a retexture of the same mesh), then exit
 Quit a standalone renderer with Ctrl+C in its console or the `quit` IPC cmd.
+
+One process = one instance = one model = one state file. Two sisters are two
+renderer processes: `--instance saga --model .../saga.model3.json` owns
+aiva/saga_avatar_state.json and never collides with Aiva's body.
 """
 
 import argparse
@@ -37,12 +61,15 @@ import os
 import queue
 import socket
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from collections import deque
 
+from modules import avatar_activity
 from modules import avatar_ipc
+from modules import constellation
 
 # Cubism's view space is normalized by window HEIGHT: half-height = 1.0 view
 # units, half-width = the aspect ratio. So y=±1 puts the model center at the
@@ -79,10 +106,114 @@ MODEL_FIXUPS = {
         "mouth_part_floor": 0.35,
     },
 }
+# Saga is a retexture of the same ariu.moc3 mesh (saga.2048/*), so every
+# mesh/part fixup carries over verbatim — only the skin colour under the lips
+# differs. camo_skin was sampled with sample_skin_rgb() on the face atlas
+# (texture_06 — the only sheet with large flat skin fills; 229 dead-flat 32px
+# blocks vs <=53 anywhere else) at box=(224, 96, 32, 32): ariu's sheet reads
+# (0.988, 0.941, 0.898) there, within 0.008 of the hand-tuned ariu value above
+# (the calibration check), and saga's sheet reads (1.000, 0.929, 0.929) —
+# warmer/pinker, as the mean colour shift across her atlases suggested.
+# Re-sample after any texture change; AIVA_CAMO_SKIN="r,g,b" overrides live.
+MODEL_FIXUPS["saga"] = dict(MODEL_FIXUPS["ariu"], camo_skin=(1.0, 0.929, 0.929))
+
+_INSTANCE = "aiva"   # set once by main(); every log line names the body
+
+
+def _set_instance(name):
+    global _INSTANCE
+    _INSTANCE = name or "aiva"
 
 
 def _log(msg):
-    print(f"[avatar] {msg}", flush=True)
+    print(f"[avatar:{_INSTANCE}] {msg}", flush=True)
+
+
+# --- pure helpers (no Qt/GL at import — unit-testable) --------------------------
+
+def parse_rgb(text):
+    """'r,g,b' -> normalised (r, g, b) or None. Accepts 0..1 floats or
+    0..255 ints (AIVA_CAMO_SKIN override for tuning in --windowed)."""
+    if not text:
+        return None
+    try:
+        parts = [float(p) for p in str(text).replace(";", ",").split(",")]
+    except ValueError:
+        return None
+    if len(parts) != 3 or any(p < 0 for p in parts):
+        return None
+    if max(parts) > 1.0:
+        parts = [p / 255.0 for p in parts]
+    if max(parts) > 1.0:
+        return None
+    return tuple(round(p, 3) for p in parts)
+
+
+def sample_skin_rgb(png_path, box):
+    """Mean colour of the fully opaque pixels inside box=(x, y, w, h) of a
+    texture sheet, as a normalised (r, g, b) rounded to 3 dp.
+
+    Used by hand, once per model, to derive its `camo_skin` (see the saga
+    entry in MODEL_FIXUPS for the exact box). QImage needs no QApplication and
+    is imported lazily so the module stays light for tests.
+    """
+    from PyQt5.QtGui import QImage
+    img = QImage(str(png_path))
+    if img.isNull():
+        raise ValueError(f"can't read image {png_path}")
+    img = img.convertToFormat(QImage.Format_RGBA8888)
+    x, y, w, h = (int(v) for v in box)
+    if w <= 0 or h <= 0 or x < 0 or y < 0 or \
+            x + w > img.width() or y + h > img.height():
+        raise ValueError(f"box {box} lies outside {img.width()}x{img.height()}")
+    r = g = b = n = 0
+    for yy in range(y, y + h):
+        for xx in range(x, x + w):
+            c = img.pixelColor(xx, yy)
+            if c.alpha() < 255:
+                continue
+            r += c.red()
+            g += c.green()
+            b += c.blue()
+            n += 1
+    if not n:
+        raise ValueError(f"box {box} has no fully opaque pixels")
+    return tuple(round(v / n / 255.0, 3) for v in (r, g, b))
+
+
+def make_retexture_model3(src_model3, textures_dir):
+    """A model3 dict for the SAME mesh with its textures in another folder.
+
+    Copies FileReferences (Moc, Physics, DisplayInfo, ...) and Groups
+    untouched; only each texture's directory component is rewritten to
+    `textures_dir` (file names kept). The source dict is not mutated.
+    """
+    out = json.loads(json.dumps(src_model3))  # deep copy; model3 is plain JSON
+    refs = out.setdefault("FileReferences", {})
+    folder = str(textures_dir).replace("\\", "/").rstrip("/")
+    rewritten = []
+    for tex in refs.get("Textures") or []:
+        name = str(tex).replace("\\", "/").rsplit("/", 1)[-1]
+        rewritten.append(f"{folder}/{name}" if folder else name)
+    refs["Textures"] = rewritten
+    return out
+
+
+def cdi3_path_for(model_path):
+    """The model's display-info (cdi3) file: FileReferences.DisplayInfo from
+    the model3 json when it names an existing file, else the historical
+    <stem>.cdi3.json rule (kept as the fallback)."""
+    try:
+        with open(model_path, encoding="utf-8") as f:
+            refs = json.load(f).get("FileReferences") or {}
+        info = refs.get("DisplayInfo")
+        if info:
+            cand = os.path.join(os.path.dirname(model_path), str(info))
+            if os.path.isfile(cand):
+                return cand
+    except (OSError, ValueError, AttributeError):
+        pass
+    return model_path.replace(".model3.json", ".cdi3.json")
 
 
 # --- lip-sync envelope (no Qt/GL imports — unit-testable) --------------------
@@ -144,6 +275,11 @@ class MouthEnvelope:
                 self._queue.append([max(0.0, min(1.0, level)), dur,
                                     max(0.0, min(1.0, bright))])
                 self._queued_secs += dur
+
+    @property
+    def speaking(self):
+        """True between speech start and stop/interrupt (her voice is playing)."""
+        return self._speaking
 
     def speech(self, state):
         with self._lock:
@@ -287,6 +423,273 @@ class Expressions:
         for pid in set(self.params.values()):
             model.SetParameterValue(pid, 1.0 if pid in active_ids else 0.0)
 
+    def drives(self, param_id):
+        """True while a toggled-on expression holds this param at 1 (e.g. 手柄 -> shoubing)."""
+        return any(self.params.get(n) == param_id for n in self.active)
+
+
+# --- activity props: her book and her work panel ---------------------------------------------
+# Painted with QPainter INTO her GL scene right after model.Draw(), in model units mapped through
+# her live placement (avatar_activity.model_to_px) — so they follow her wherever she stands and
+# can't fall out of z-order with her body the way a separate top-level window did. Module-level
+# (lazy Qt imports) so they can be exercised offscreen without a window.
+
+def hue_rotate_rgb(rgb_array, degrees):
+    """Rotate the hue of an (..., 3) float RGB array (W3C feColorMatrix hueRotate): greys —
+    the book's white pages — stay put, the teal cover turns. Pure numpy."""
+    import numpy as np
+    a, b = math.cos(math.radians(degrees)), math.sin(math.radians(degrees))
+    m = np.array([
+        [0.213 + a * 0.787 - b * 0.213, 0.715 - a * 0.715 - b * 0.715, 0.072 - a * 0.072 + b * 0.928],
+        [0.213 - a * 0.213 + b * 0.143, 0.715 + a * 0.285 + b * 0.140, 0.072 - a * 0.072 - b * 0.283],
+        [0.213 - a * 0.213 - b * 0.787, 0.715 - a * 0.715 + b * 0.715, 0.072 + a * 0.928 + b * 0.072],
+    ])
+    return np.clip(rgb_array @ m.T, 0.0, 255.0)
+
+
+class PropArt:
+    """The held-book image: loaded once (png/jpg/webp, or svg), shrunk to a working size,
+    optionally hue-rotated for a sister, and cached smooth-scaled at the width she holds it."""
+
+    MAX_W = 900
+
+    def __init__(self, path, hue=0):
+        self.path = path
+        self.image = self._load(path, hue)
+        self._scaled = {}
+
+    @classmethod
+    def _load(cls, path, hue):
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtGui import QImage, QPainter
+        if not path or not os.path.isfile(path):
+            return None
+        if path.lower().endswith(".svg"):
+            from PyQt5.QtSvg import QSvgRenderer
+            r = QSvgRenderer(path)
+            if not r.isValid():
+                return None
+            size = r.defaultSize()
+            ratio = (size.width() / size.height()) if size.height() else 2.0
+            img = QImage(cls.MAX_W, max(1, int(cls.MAX_W / ratio)), QImage.Format_ARGB32_Premultiplied)
+            img.fill(Qt.transparent)
+            p = QPainter(img)
+            r.render(p)
+            p.end()
+        else:
+            img = QImage(path)
+            if img.isNull():
+                return None
+            if img.width() > cls.MAX_W:
+                img = img.scaledToWidth(cls.MAX_W, Qt.SmoothTransformation)
+        img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+        if hue:
+            img = cls._hue(img, hue)
+        return img
+
+    @staticmethod
+    def _hue(img, hue):
+        try:
+            import numpy as np
+            from PyQt5.QtGui import QImage
+            w, h = img.width(), img.height()
+            ptr = img.constBits()
+            ptr.setsize(img.byteCount())
+            arr = np.frombuffer(ptr, np.uint8).reshape(h, img.bytesPerLine())[:, :w * 4]
+            arr = arr.reshape(h, w, 4).astype(np.float32)        # BGRA, premultiplied
+            rgb = hue_rotate_rgb(arr[..., 2::-1], hue)           # BGR -> RGB, rotate
+            out = np.empty((h, w, 4), np.uint8)
+            out[..., 2::-1] = np.minimum(rgb, arr[..., 3:4]).astype(np.uint8)  # stay premultiplied
+            out[..., 3] = arr[..., 3].astype(np.uint8)
+            buf = out.tobytes()                                  # QImage borrows it until copy()
+            return QImage(buf, w, h, w * 4, QImage.Format_ARGB32_Premultiplied).copy()
+        except Exception as e:  # a tint is cosmetic — never lose the book over it
+            _log(f"book tint skipped: {e}")
+            return img
+
+    def at_width(self, width):
+        from PyQt5.QtCore import Qt
+        width = max(4, int(round(width)))
+        img = self._scaled.get(width)
+        if img is None and self.image is not None:
+            if len(self._scaled) > 16:
+                self._scaled.clear()
+            img = self._scaled[width] = self.image.scaledToWidth(width, Qt.SmoothTransformation)
+        return img
+
+
+def paint_book(p, art, book, placement, w, h, base_scale):
+    """Her book, centred on her hands. p: an active QPainter on her GL widget."""
+    from PyQt5.QtCore import QPointF
+    img = art.at_width(avatar_activity.model_len_px(book["w"], placement, h, base_scale))
+    if img is None:
+        return
+    cx, cy = avatar_activity.model_to_px((book["x"], book["y"]), placement, w, h, base_scale)
+    p.save()
+    p.translate(cx, cy)
+    # placement rotation is CCW on screen, QPainter.rotate is clockwise (y points down)
+    p.rotate(-(float(placement.get("rotation", 0.0)) + book.get("rot", 0.0)))
+    p.setOpacity(max(0.0, min(1.0, book["alpha"])))
+    p.drawImage(QPointF(-img.width() / 2, -img.height() / 2), img)
+    p.restore()
+
+
+_PANEL_WORDS = {"planning": "planning…", "running": "working…", "checking": "checking…",
+                "waiting": "waiting for you", "done": "done", "failed": "didn't work"}
+
+
+def paint_panel(p, pv, placement, w, h, base_scale, accent, show_text=True):
+    """Her work panel: a small glass screen beside her head that types while she works, fills a
+    progress bar step by step, turns amber and pulses while a task waits on him, and flashes a
+    check (or a cross) when it ends. pv: avatar_activity's panel view."""
+    from PyQt5.QtCore import QRectF, QPointF, Qt
+    from PyQt5.QtGui import QColor, QFont, QFontMetricsF, QLinearGradient, QPen
+
+    A = avatar_activity
+    state = pv["state"]
+    acc = {"waiting": A.WAITING_ACCENT, "done": A.DONE_ACCENT, "failed": A.FAILED_ACCENT}.get(state, accent)
+    t = pv["t"]
+
+    def col(rgb, a):
+        return QColor(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255),
+                      int(max(0.0, min(1.0, a)) * 255))
+
+    cx, cy = A.model_to_px((pv["cx"], pv["cy"]), placement, w, h, base_scale)
+    pw = A.model_len_px(pv["w"], placement, h, base_scale)
+    ph = A.model_len_px(pv["h"], placement, h, base_scale)
+    if pw < 8 or ph < 6:
+        return
+    pulse = 0.5 + 0.5 * math.sin(t * 2 * math.pi * 0.9) if state == "waiting" else 0.0
+
+    p.save()
+    p.translate(cx, cy)
+    p.rotate(-float(placement.get("rotation", 0.0)))
+    p.setOpacity(max(0.0, min(1.0, pv["alpha"])))
+    p.scale(1.0, max(0.03, pv["open"]))   # it materialises out of a bright line
+    r = QRectF(-pw / 2, -ph / 2, pw, ph)
+    rad = ph * 0.09
+
+    # glow, then glass, then the rim
+    p.setBrush(Qt.NoBrush)
+    for grow, a in ((ph * 0.09, 0.07), (ph * 0.05, 0.12), (ph * 0.025, 0.2)):
+        p.setPen(QPen(col(acc, a * (1.0 + 0.8 * pulse)), grow * 2))
+        p.drawRoundedRect(r, rad, rad)
+    g = QLinearGradient(0, -ph / 2, 0, ph / 2)
+    g.setColorAt(0.0, QColor(12, 32, 38, 200))
+    g.setColorAt(1.0, QColor(6, 16, 22, 176))
+    p.setBrush(g)
+    p.setPen(QPen(col(acc, 0.85 + 0.15 * pulse), max(1.0, ph * 0.016)))
+    p.drawRoundedRect(r, rad, rad)
+
+    pad = ph * 0.09
+    left, right, top, bottom = -pw / 2 + pad, pw / 2 - pad, -ph / 2 + pad, ph / 2 - pad
+    icon = ph * 0.17
+    icon_r = QRectF(left, top, icon, icon)
+    # header icon: a spinner while she works, a pulsing "?" while she waits, nothing on a result
+    if state in ("planning", "running", "checking"):
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(col(acc, 0.25), max(1.0, icon * 0.16)))
+        p.drawEllipse(icon_r)
+        p.setPen(QPen(col(acc, 0.95), max(1.0, icon * 0.16), Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(icon_r, int(-t * 330 * 16) % (360 * 16), 100 * 16)
+    elif state == "waiting":
+        p.setPen(Qt.NoPen)
+        p.setBrush(col(acc, 0.55 + 0.45 * pulse))
+        p.drawEllipse(icon_r)
+
+    text_px = ph * 0.125
+    if show_text and text_px >= 6:
+        f = QFont("Segoe UI")
+        f.setPixelSize(max(6, int(round(text_px))))
+        f.setBold(True)
+        small = QFont("Segoe UI")
+        small.setPixelSize(max(6, int(round(ph * 0.1))))
+        if state == "waiting":
+            p.setFont(f)
+            p.setPen(QColor(20, 14, 4, 230))
+            p.drawText(icon_r, Qt.AlignCenter, "?")
+        step = pv.get("step") or ""
+        step_w = QFontMetricsF(small).horizontalAdvance(step) + pad * 0.4 if step else 0.0
+        tx = left + icon + pad * 0.6
+        title = pv.get("title") or _PANEL_WORDS.get(state, "")
+        p.setFont(f)
+        p.setPen(QColor(236, 248, 248, 242))
+        p.drawText(QRectF(tx, top, right - tx - step_w, icon), Qt.AlignVCenter | Qt.AlignLeft,
+                   QFontMetricsF(f).elidedText(title, Qt.ElideRight, max(1.0, right - tx - step_w)))
+        if step:
+            p.setFont(small)
+            p.setPen(col(acc, 0.95))
+            p.drawText(QRectF(right - step_w, top, step_w, icon), Qt.AlignVCenter | Qt.AlignRight, step)
+        detail = pv.get("detail") if state == "running" and pv.get("detail") else _PANEL_WORDS.get(state, "")
+        if detail == title:
+            detail = ""
+        if detail:
+            p.setFont(small)
+            p.setPen(QColor(200, 226, 226, 190) if state != "waiting" else col(acc, 0.95))
+            dy = top + icon + pad * 0.15
+            p.drawText(QRectF(left, dy, right - left, ph * 0.13), Qt.AlignVCenter | Qt.AlignLeft,
+                       QFontMetricsF(small).elidedText(detail, Qt.ElideRight, right - left))
+        code_top = top + icon + ph * 0.13 + pad * 0.35
+    else:
+        code_top = top + icon + pad * 0.5
+
+    bar_h = max(1.5, ph * 0.035)
+    code_bottom = bottom - bar_h - pad * 0.5
+    code_r = QRectF(left, code_top, right - left, max(0.0, code_bottom - code_top))
+    if state in ("done", "failed"):
+        # the result, big and simple
+        s = min(code_r.height(), code_r.width()) * 0.9
+        c = code_r.center()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(col(acc, 0.95), max(1.5, s * 0.12), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        if state == "done":
+            p.drawPolyline(QPointF(c.x() - s * 0.32, c.y() + s * 0.02), QPointF(c.x() - s * 0.08, c.y() + s * 0.26),
+                           QPointF(c.x() + s * 0.36, c.y() - s * 0.24))
+        else:
+            d = s * 0.26
+            p.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
+            p.drawLine(QPointF(c.x() + d, c.y() - d), QPointF(c.x() - d, c.y() + d))
+    elif code_r.height() > 2:
+        # lines of "work" typing out, scrolling up; dimmed while she waits on him
+        lh = ph * 0.045
+        gap = ph * 0.085
+        rows = max(1, int(code_r.height() // gap))
+        lines = pv.get("lines") or []
+        dim = 0.35 if state == "waiting" else 1.0
+        p.setPen(Qt.NoPen)
+        for i, (indent, width, typed, alt) in enumerate(lines[-rows:]):
+            y = code_r.top() + i * gap + (gap - lh) / 2
+            x0 = code_r.left() + indent * code_r.width()
+            lw = max(0.0, (code_r.right() - x0) * width * typed)
+            p.setBrush(QColor(230, 240, 240, int(110 * dim)) if alt else col(acc, 0.6 * dim))
+            p.drawRoundedRect(QRectF(x0, y, lw, lh), lh / 2, lh / 2)
+            if typed < 1.0 and state != "waiting" and int(t * 3) % 2 == 0:
+                p.setBrush(col(acc, 0.95))
+                p.drawRect(QRectF(x0 + lw + lh * 0.4, y - lh * 0.3, lh * 0.9, lh * 1.6))
+        if state == "checking":
+            sy = code_r.top() + (t * 0.8 % 1.0) * code_r.height()
+            p.setPen(QPen(col(acc, 0.7), max(1.0, ph * 0.012)))
+            p.drawLine(QPointF(code_r.left(), sy), QPointF(code_r.right(), sy))
+
+    # progress
+    bar = QRectF(left, bottom - bar_h, right - left, bar_h)
+    p.setPen(Qt.NoPen)
+    p.setBrush(col(acc, 0.16))
+    p.drawRoundedRect(bar, bar_h / 2, bar_h / 2)
+    prog = max(0.0, min(1.0, pv.get("progress") or 0.0))
+    if prog > 0:
+        fill = QRectF(bar.left(), bar.top(), bar.width() * prog, bar_h)
+        p.setBrush(col(acc, 0.92))
+        p.drawRoundedRect(fill, bar_h / 2, bar_h / 2)
+    elif state in ("planning", "running", "checking"):
+        # no steps known yet: a sliding sheen says "busy"
+        x = bar.left() + ((t * 0.6) % 1.0) * bar.width() * 1.3 - bar.width() * 0.3
+        p.setBrush(col(acc, 0.6))
+        p.drawRoundedRect(QRectF(max(bar.left(), x), bar.top(),
+                                 max(0.0, min(bar.right(), x + bar.width() * 0.3) - max(bar.left(), x)), bar_h),
+                          bar_h / 2, bar_h / 2)
+    p.restore()
+
 
 # --- IPC server ----------------------------------------------------------------
 
@@ -347,70 +750,106 @@ class IpcServer(threading.Thread):
             msg = json.loads(line)
         except json.JSONDecodeError:
             return None
-        cmd = msg.get("cmd")
-        msg_id = msg.get("id")
+        return dispatch(self._win, msg)
 
-        # hot path: fire-and-forget, no reply
-        if cmd == "mouth":
-            self._win.envelope.feed(msg.get("chunks") or [])
-            return None
-        if cmd == "speech":
-            self._win.envelope.speech(msg.get("state", ""))
-            return None
 
-        if msg_id is None:
-            return None  # every remaining command requires an id
+def dispatch(window, msg):
+    """One decoded IPC message -> reply dict, or None when nothing is sent
+    back (hot-path commands, id-less requests, non-dict junk).
 
-        if cmd == "hello":
-            snap = self._win.snapshot()
-            return {"id": msg_id, "ok": True, "version": avatar_ipc.PROTOCOL_VERSION,
-                    "model": self._win.model_name,
-                    "expressions": list(self._win.expressions.params),
-                    "ready": snap["ready"]}
-        if cmd == "ping":
-            return {"id": msg_id, "ok": True}
-        if cmd == "get_position":
-            snap = self._win.snapshot()
-            return {"id": msg_id, "ok": True, "x": snap["x"], "y": snap["y"],
-                    "rotation": snap["rotation"], "size": snap["size"],
-                    "monitor": snap["monitor"], "layer": snap["layer"]}
-        if cmd == "expression":
-            matched = self._win.expressions.match(str(msg.get("name", "")))
-            if matched is None:
-                return {"id": msg_id, "ok": False,
-                        "error": f"no expression matching {msg.get('name')!r}"}
-            self._win.cmd_q.put(("expression", matched))
-            return {"id": msg_id, "ok": True, "toggled": matched}
-        if cmd == "move":
-            self._win.cmd_q.put(("move", {k: msg.get(k) for k in
-                                          ("x", "y", "rotation", "size")}))
-            return {"id": msg_id, "ok": True}
-        if cmd == "monitor":
-            idx = msg.get("index")
-            monitors = avatar_ipc.list_monitors()
-            if not isinstance(idx, int) or not 0 <= idx < len(monitors):
-                return {"id": msg_id, "ok": False,
-                        "error": f"monitor {idx} doesn't exist (have {len(monitors)})"}
-            self._win.cmd_q.put(("monitor", idx))
-            return {"id": msg_id, "ok": True}
-        if cmd == "layer":
-            mode = msg.get("mode")
-            if mode not in ("top", "desktop"):
-                return {"id": msg_id, "ok": False, "error": "mode must be top|desktop"}
-            self._win.cmd_q.put(("layer", mode))
-            return {"id": msg_id, "ok": True}
-        if cmd == "sleeping":
-            self._win.cmd_q.put(("sleeping", bool(msg.get("value"))))
-            return {"id": msg_id, "ok": True}
-        if cmd == "prop":
-            self._win.cmd_q.put(("prop", {"show": bool(msg.get("show")), "path": msg.get("path"),
-                                          "x": msg.get("x"), "y": msg.get("y"),
-                                          "scale": msg.get("scale")}))
-            return {"id": msg_id, "ok": True, "prop": bool(msg.get("show"))}
-        if cmd == "quit":
-            self._win.request_quit()
-            return {"id": msg_id, "ok": True}
-        return {"id": msg_id, "ok": False, "error": f"unknown cmd {cmd!r}"}
+    Module-level so it runs against any object with the window's surface
+    (envelope, expressions, cmd_q, snapshot(), model_name, instance,
+    request_quit()) — no socket, no Qt.
+    """
+    if not isinstance(msg, dict):
+        return None
+    cmd = msg.get("cmd")
+    msg_id = msg.get("id")
+
+    # hot path: fire-and-forget, no reply
+    if cmd == "mouth":
+        window.envelope.feed(msg.get("chunks") or [])
+        return None
+    if cmd == "speech":
+        window.envelope.speech(msg.get("state", ""))
+        return None
+
+    if cmd == "witness":  # fire-and-forget like the hot path; a reply only if asked for
+        kind = msg.get("kind")
+        ok = isinstance(kind, str) and kind in constellation.KINDS
+        if ok:
+            window.cmd_q.put(("witness", kind))
+        return {"id": msg_id, "ok": ok} if msg_id is not None else None
+
+    # what her body is doing (avatar_activity): fire-and-forget, a reply only if asked for.
+    # `activity` carries the whole state — reading {title} | null, working {label, detail, step,
+    # total, state} | null; `cue` is a one-shot beat (page | done | failed).
+    if cmd == "activity":
+        state = {k: msg.get(k) for k in ("reading", "working") if k in msg}
+        if state:
+            window.cmd_q.put(("activity", state))
+        return {"id": msg_id, "ok": bool(state)} if msg_id is not None else None
+    if cmd == "cue":
+        kind = msg.get("kind")
+        ok = kind in ("page", "done", "failed")
+        if ok:
+            window.cmd_q.put(("cue", kind))
+        return {"id": msg_id, "ok": ok} if msg_id is not None else None
+    if cmd == "prop":  # protocol v1 (a sister from before `activity`): show = she's reading
+        window.cmd_q.put(("activity", {"reading": {"title": ""} if msg.get("show") else None}))
+        return {"id": msg_id, "ok": True, "prop": bool(msg.get("show"))} if msg_id is not None else None
+
+    if msg_id is None:
+        return None  # every remaining command requires an id
+
+    if cmd == "hello":
+        snap = window.snapshot()
+        return {"id": msg_id, "ok": True, "version": avatar_ipc.PROTOCOL_VERSION,
+                "instance": getattr(window, "instance", "aiva"),
+                "model": window.model_name,
+                "expressions": list(window.expressions.params),
+                "witness": bool(getattr(window, "witness_enabled", False)),
+                "activity": getattr(window, "activity", None) is not None,
+                "ready": snap["ready"]}
+    if cmd == "ping":
+        return {"id": msg_id, "ok": True}
+    if cmd == "get_position":
+        snap = window.snapshot()
+        return {"id": msg_id, "ok": True, "x": snap["x"], "y": snap["y"],
+                "rotation": snap["rotation"], "size": snap["size"],
+                "monitor": snap["monitor"], "layer": snap["layer"]}
+    if cmd == "expression":
+        matched = window.expressions.match(str(msg.get("name", "")))
+        if matched is None:
+            return {"id": msg_id, "ok": False,
+                    "error": f"no expression matching {msg.get('name')!r}"}
+        window.cmd_q.put(("expression", matched))
+        return {"id": msg_id, "ok": True, "toggled": matched}
+    if cmd == "move":
+        window.cmd_q.put(("move", {k: msg.get(k) for k in
+                                   ("x", "y", "rotation", "size")}))
+        return {"id": msg_id, "ok": True}
+    if cmd == "monitor":
+        idx = msg.get("index")
+        monitors = avatar_ipc.list_monitors()
+        if not isinstance(idx, int) or not 0 <= idx < len(monitors):
+            return {"id": msg_id, "ok": False,
+                    "error": f"monitor {idx} doesn't exist (have {len(monitors)})"}
+        window.cmd_q.put(("monitor", idx))
+        return {"id": msg_id, "ok": True}
+    if cmd == "layer":
+        mode = msg.get("mode")
+        if mode not in ("top", "desktop"):
+            return {"id": msg_id, "ok": False, "error": "mode must be top|desktop"}
+        window.cmd_q.put(("layer", mode))
+        return {"id": msg_id, "ok": True}
+    if cmd == "sleeping":
+        window.cmd_q.put(("sleeping", bool(msg.get("value"))))
+        return {"id": msg_id, "ok": True}
+    if cmd == "quit":
+        window.request_quit()
+        return {"id": msg_id, "ok": True}
+    return {"id": msg_id, "ok": False, "error": f"unknown cmd {cmd!r}"}
 
 
 # --- the window ------------------------------------------------------------------
@@ -434,76 +873,119 @@ _HWND_BOTTOM = 1
 _SWP_ZONLY = 0x0010 | 0x0002 | 0x0001  # NOACTIVATE | NOMOVE | NOSIZE
 
 
+def layer_z(mode):
+    """Her Win32 z-order slot: over every window ("top") or behind them all ("desktop"). The body
+    and her sky both take it, so the stars never float over windows she is sitting behind."""
+    return _HWND_TOPMOST if mode == "top" else _HWND_BOTTOM
+
+
+def persisted_sky(sky, saved):
+    """The state file's `constellation` entry: the live sky, or — while this body's witness is
+    switched off (SAGA_CONSTELLATION=off) — the saved one carried through untouched, so turning
+    it off never erases the moments she has lived."""
+    if sky is not None:
+        return sky.to_dict()
+    return saved if isinstance(saved, dict) else None
+
+
+def next_sky_frame(sky, frame_no, fps, now, sleeping=False, speaking=False):
+    """_tick_sky's frame to paint, or None when none is due. The sky only breathes, so ~8 fps is
+    plenty — but while her voice is hushing it or it is easing back, every frame repaints so the
+    fade is smooth. `speaking` is her voice actually playing (MouthEnvelope.speaking)."""
+    if frame_no % max(1, fps // 8) == 0 or not sky.hush.settled(speaking):
+        return sky.frame(now, sleeping, speaking)
+    sky.hush.step(now, speaking)   # settled: moves nothing, but keeps its clock current
+    return None
+
+
+def _alpha8(a):
+    return max(0, min(255, int(round(255 * a))))
+
+
+def paint_sky(p, frame, w, h, tint):
+    """Her constellation (Constellation.frame) on a w x h sky. p: an active QPainter. It paints
+    exactly what the frame says: a star is one disc `size_px` across with no glow, a line is a
+    LINE_PX hairline whose two ends carry the frame's two end alphas."""
+    from PyQt5.QtCore import QLineF, QPointF, Qt
+    from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
+    p.setRenderHint(QPainter.Antialiasing, True)
+    r, g, b = (int(c * 255) for c in tint)
+    for x1, y1, x2, y2, a1, a2 in frame["edges"]:
+        p1, p2 = QPointF(x1 * w, y1 * h), QPointF(x2 * w, y2 * h)
+        grad = QLinearGradient(p1, p2)
+        grad.setColorAt(0.0, QColor(r, g, b, _alpha8(a1)))
+        grad.setColorAt(1.0, QColor(r, g, b, _alpha8(a2)))
+        p.setPen(QPen(QBrush(grad), constellation.LINE_PX))
+        # sub-pixel, like the stars: a drifting line glides with them, never steps
+        p.drawLine(QLineF(p1, p2))
+    p.setPen(Qt.NoPen)
+    for x, y, a, size in frame["stars"]:
+        p.setBrush(QColor(r, g, b, _alpha8(a)))
+        p.drawEllipse(QPointF(x * w, y * h), size / 2.0, size / 2.0)
+
+
+def selftest_verdict(ready, expect_sky=False, sky_paints=0, sky_failed=None):
+    """--selftest's answer as (ok, why). A body with a witness passes only if its sky painted."""
+    if not ready:
+        return False, "the model never became ready"
+    if expect_sky and sky_failed:
+        return False, f"the constellation stopped drawing ({sky_failed})"
+    if expect_sky and not sky_paints:
+        return False, "the constellation never painted"
+    return True, "ok"
+
+
 def build_window_class():
     """AvatarWindow must be defined after QApplication's deps import cleanly;
     building it in a factory keeps module import light for unit tests."""
     Qt, QTimer, QMetaObject, _fmt, QApplication, QOpenGLWidget = _qt()
-    from PyQt5.QtCore import QRectF
-    from PyQt5.QtGui import QPainter, QPixmap
+    from PyQt5.QtGui import QPainter
     from PyQt5.QtWidgets import QWidget
     import live2d.v3 as live2d
 
-    class PropWindow(QWidget):
-        """A frameless, translucent, click-through top-level window that shows a
-        held prop (her book while reading) in front of the avatar. Kept OUT of
-        the GL widget so it can never disturb the model's transparent render."""
+    class SkyWindow(QWidget):
+        """Her constellation witness: a frameless, translucent, click-through
+        window over the monitor, to her upper left. It lives OUTSIDE the GL
+        widget so it can never disturb the model's transparent render. It only paints what Constellation.frame() hands it."""
 
-        def __init__(self):
+        def __init__(self, tint, layer="top"):
             super().__init__()
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setAttribute(Qt.WA_ShowWithoutActivating)
             self.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self._pix = None
-            self._loaded_path = None
+            self._tint = tint
+            self._layer = layer        # follows her body's top|desktop layer
+            self._frame = {"stars": [], "edges": []}
+            self._rect = None
+            self.paints = 0            # finished paints (the selftest asks)
+            self.broken = None         # the paint error that switched drawing off
 
-        def load(self, path):
-            if path == self._loaded_path and self._pix is not None:
-                return True
-            try:
-                if path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                    pix = QPixmap(path)
-                    if pix.isNull():
-                        return False
-                else:  # SVG
-                    from PyQt5.QtSvg import QSvgRenderer
-                    r = QSvgRenderer(path)
-                    if not r.isValid():
-                        return False
-                    size = r.defaultSize()
-                    target_h = 1024
-                    ratio = (size.width() / size.height()) if size.height() else 1.0
-                    pix = QPixmap(int(target_h * ratio), target_h)
-                    pix.fill(Qt.transparent)
-                    p = QPainter(pix)
-                    r.render(p)
-                    p.end()
-                self._pix = pix
-                self._loaded_path = path
-                return True
-            except Exception as e:
-                _log(f"prop load failed for {path}: {e}")
-                return False
+        def set_frame(self, frame):
+            self._frame = frame
+            self.update()
 
-        def place(self, monitor_rect, frac_x=None, frac_y=None, frac_h=None):
-            x, y, w, h = monitor_rect
-            frac_h = frac_h if frac_h is not None else float(os.getenv("AIVA_READING_PROP_SCALE", "0.09"))
-            frac_y = frac_y if frac_y is not None else float(os.getenv("AIVA_READING_PROP_Y", "0.80"))
-            frac_x = frac_x if frac_x is not None else float(os.getenv("AIVA_READING_PROP_X", "0.85"))
-            ph = int(h * frac_h)
-            ratio = (self._pix.width() / self._pix.height()) if self._pix else 1.0
-            pw = int(ph * ratio)
-            px = x + int(w * frac_x) - pw // 2
-            py = y + int(h * frac_y) - ph // 2
-            self.setGeometry(px, py, pw, ph)
+        def place(self, rect):
+            if rect != self._rect:
+                self._rect = rect
+                self.setGeometry(*rect)
+
+        def set_layer(self, mode):
+            self._layer = mode
+            if self.isVisible():
+                ctypes.windll.user32.SetWindowPos(int(self.winId()), layer_z(mode), 0, 0, 0, 0, _SWP_ZONLY)
 
         def paintEvent(self, event):
-            if self._pix is None:
+            if self.broken:
                 return
             p = QPainter(self)
-            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            p.drawPixmap(self.rect(), self._pix)
-            p.end()
+            try:
+                paint_sky(p, self._frame, self.width(), self.height(), self._tint)
+                self.paints += 1
+            except Exception as e:  # escaping a Qt virtual, PyQt5 aborts her whole body
+                self.broken = repr(e)
+            finally:
+                p.end()
 
         def apply_click_through(self):
             hwnd = int(self.winId())
@@ -511,15 +993,18 @@ def build_window_class():
             style = user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
             style |= (_WS_EX_LAYERED | _WS_EX_TRANSPARENT | _WS_EX_NOACTIVATE | _WS_EX_TOOLWINDOW)
             user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, style)
-            user32.SetWindowPos(hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_ZONLY)
+            user32.SetWindowPos(hwnd, layer_z(self._layer), 0, 0, 0, 0, _SWP_ZONLY)
 
         def showEvent(self, event):
             super().showEvent(event)
             self.apply_click_through()
 
     class AvatarWindow(QOpenGLWidget):
-        def __init__(self, model_path, fps, sway, windowed, state):
+        def __init__(self, model_path, fps, sway, windowed, state,
+                     instance="aiva", state_file=None):
             super().__init__()
+            self.instance = instance or "aiva"
+            self.state_file = state_file or avatar_ipc.state_path(self.instance)
             self.model_path = model_path
             self.model_name = os.path.basename(model_path).split(".")[0]
             self.model = None
@@ -545,7 +1030,26 @@ def build_window_class():
             self._last_frame = self._t0
             self._dirty_at = None      # debounced state persistence
             self._server = None        # set by main() before show()
-            self._prop = None          # PropWindow, lazily created (her book while reading)
+            # what her body is doing: the book in her hands while she reads, the work panel
+            # beside her while she's on a task (modules/avatar_activity.py). A mesh without a
+            # rig entry simply doesn't do it.
+            self.activity = avatar_activity.ActivityDirector(avatar_activity.RIGS.get(self.model_name))
+            self._look = avatar_activity.LOOKS.get(self.model_name, avatar_activity.LOOKS["ariu"])
+            self._task_text = os.getenv("AIVA_AVATAR_TASK_LABEL", "1") == "1"
+            self._book_art = None      # PropArt, loaded the first time she reads
+            self._held_part = None     # index of the rig's held-object part (resolved at GL init)
+            self._held_hidden = False
+            self._activity_errors = 0
+            # her quiet constellation witness — only for an instance that has one (Saga)
+            sky_cfg = constellation.WitnessConfig.from_env()
+            self.witness_enabled = constellation.enabled_for(self.instance, sky_cfg)
+            saved_sky = (state or {}).get("constellation")
+            self.sky = constellation.Constellation(sky_cfg, saved_sky) if self.witness_enabled else None
+            self._sky_saved = None if self.witness_enabled else saved_sky  # switched off: kept as-is
+            self._sky_win = None       # SkyWindow, created on first tick (never in --windowed)
+            self._sky_failed = None    # why drawing stopped; the sky itself keeps witnessing
+            self._sky_frames = 0
+            self._sky_mon = None       # (monitor index, its rect): looked up when she changes screens
             _assets = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
             self._prop_path = os.getenv("AIVA_READING_PROP") or (
                 os.path.join(_assets, "reading_prop.png")
@@ -558,7 +1062,8 @@ def build_window_class():
                 0 <= saved_mon < len(monitors) else 0
             self.layer = (state or {}).get("layer", "top")
 
-            self.setWindowTitle("Aiva Avatar")
+            # "Aiva Avatar" for aiva (unchanged), "Saga Avatar" for saga
+            self.setWindowTitle(f"{self.instance.capitalize()} Avatar")
             if windowed:
                 self.resize(480, 720)
             else:
@@ -591,6 +1096,10 @@ def build_window_class():
             self.model.SetAutoBlinkEnable(True)
             self.model.SetAutoBreathEnable(True)
             self._compute_model_fixups()
+            rig = self.activity.rig
+            if rig is not None:
+                part_ids = self.model.GetPartIds()
+                self._held_part = part_ids.index(rig.held_part) if rig.held_part in part_ids else None
             self._ready = True
             _log(f"model '{self.model_name}' loaded "
                  f"({len(self.expressions.params)} expressions)")
@@ -606,7 +1115,7 @@ def build_window_class():
             self._mouth_floor = 1.0
             try:
                 names = {}
-                cdi_path = self.model_path.replace(".model3.json", ".cdi3.json")
+                cdi_path = cdi3_path_for(self.model_path)
                 if os.path.isfile(cdi_path):
                     with open(cdi_path, encoding="utf-8") as f:
                         cdi = json.load(f)
@@ -619,7 +1128,11 @@ def build_window_class():
                 fixups = MODEL_FIXUPS.get(self.model_name, {})
                 targets = set(fixups.get("camo_drawables", ()))
                 if targets:
-                    self._camo_skin = fixups.get("camo_skin", self._camo_skin)
+                    self._camo_skin = tuple(fixups.get("camo_skin", self._camo_skin))
+                    override = parse_rgb(os.getenv("AIVA_CAMO_SKIN"))
+                    if override:
+                        self._camo_skin = override
+                        _log(f"camo skin overridden by AIVA_CAMO_SKIN -> {override}")
                     self._camo_drawables = [
                         i for i, did in enumerate(self.model.GetDrawableIds())
                         if did in targets]
@@ -635,7 +1148,8 @@ def build_window_class():
                         self._mouth_part is not None:
                     _log(f"model fixups: hiding {len(self._junk_parts)} junk "
                          f"part(s), camouflaging {len(self._camo_drawables)} "
-                         f"leaky mouth mesh(es), mouth-part fade "
+                         f"leaky mouth mesh(es) with skin {self._camo_skin}, "
+                         f"mouth-part fade "
                          f"{'on' if self._mouth_part is not None else 'off'}")
             except Exception as exc:  # never let a fixup kill the renderer
                 _log(f"model fixups skipped: {exc}")
@@ -664,8 +1178,7 @@ def build_window_class():
 
         def _apply_layer(self):
             hwnd = int(self.winId())
-            z = _HWND_TOPMOST if self.layer == "top" else _HWND_BOTTOM
-            ctypes.windll.user32.SetWindowPos(hwnd, z, 0, 0, 0, 0, _SWP_ZONLY)
+            ctypes.windll.user32.SetWindowPos(hwnd, layer_z(self.layer), 0, 0, 0, 0, _SWP_ZONLY)
 
         def paintGL(self):
             now = time.monotonic()
@@ -688,10 +1201,11 @@ def build_window_class():
                 self.model.SetDrawableScreenColor(i, *self._camo_skin, 1.0)
 
             self.model.Update()
+            sway_x = None
             if self._sway and not self._sleeping:
                 t = now - self._t0
-                self.model.SetParameterValue(
-                    "ParamAngleX", 3.0 * math.sin(2 * math.pi * t / 9.3))
+                sway_x = 3.0 * math.sin(2 * math.pi * t / 9.3)
+                self.model.SetParameterValue("ParamAngleX", sway_x)
                 self.model.SetParameterValue(
                     "ParamBodyAngleZ", 2.0 * math.sin(2 * math.pi * t / 12.7))
             self.expressions.apply(self.model)
@@ -707,8 +1221,15 @@ def build_window_class():
                 self.model.SetParameterValue("ParamEyeLOpen", 0.0)
                 self.model.SetParameterValue("ParamEyeROpen", 0.0)
             self.placement.tick(dt)
+            pose = self.activity.step(
+                dt, now, talking=self.envelope.speaking, sleeping=self._sleeping,
+                side_hint=avatar_activity.panel_side(self.placement.cur["x"]))
+            self._apply_pose(pose, sway_x)
             self.placement.apply(self.model, self.width() / max(1, self.height()))
             self.model.Draw()
+            if pose.book or pose.panel:
+                self._paint_activity(pose)
+            self._tick_sky(now)
 
             with self._lock:
                 self._snapshot = {
@@ -744,37 +1265,109 @@ def build_window_class():
                     self.layer = arg
                     if not self._windowed:
                         self._apply_layer()
+                        if self._sky_win is not None:
+                            self._sky_win.set_layer(arg)   # her stars sink behind windows with her
                     self._mark_dirty()
                 elif kind == "sleeping":
                     self._sleeping = arg
                     if self.model:
                         self.model.SetAutoBlinkEnable(not arg)
-                elif kind == "prop":
-                    self._toggle_prop(arg)
+                elif kind == "activity":
+                    was = (bool(self.activity.reading), bool(self.activity.working))
+                    self.activity.set_state(**arg)
+                    now_ = (bool(self.activity.reading), bool(self.activity.working))
+                    if now_ != was:
+                        _log(f"activity: reading={'on' if now_[0] else 'off'} "
+                             f"working={'on' if now_[1] else 'off'}")
+                elif kind == "cue":
+                    self.activity.cue(arg, time.monotonic())
+                elif kind == "witness" and self.sky is not None:
+                    if self.sky.witness(arg, time.monotonic()):   # a new star, or a burst brightened one
+                        self._mark_dirty()
 
-        def _toggle_prop(self, arg):
-            if self._windowed:
-                return  # the GL-triage window has no monitor geometry to anchor to
-            show = bool(arg.get("show"))
-            path = arg.get("path") or self._prop_path
-            if not show:
-                if self._prop:
-                    self._prop.hide()
+        def _tick_sky(self, now):
+            """Repaint the witness at ~8 fps (it only breathes; every frame while her voice eases
+            it) and keep it to her upper left."""
+            if self.sky is None or self._windowed or self._sky_failed:
                 return
+            self._sky_frames += 1
             try:
-                if self._prop is None:
-                    self._prop = PropWindow()
-                if not self._prop.load(path):
-                    _log(f"prop not shown: couldn't load {path}")
+                frame = next_sky_frame(self.sky, self._sky_frames, self._fps, now,
+                                       self._sleeping, self.envelope.speaking)
+                if frame is None:
                     return
-                monitors = avatar_ipc.list_monitors()
-                rect = monitors[min(self.monitor, len(monitors) - 1)]
-                self._prop.place(rect, arg.get("x"), arg.get("y"), arg.get("scale"))
-                self._prop.show()
-                self._prop.raise_()
-                self._prop.update()
-            except Exception as e:
-                _log(f"prop show failed: {e}")
+                if self._sky_win is not None and self._sky_win.broken:
+                    raise RuntimeError(f"paint failed: {self._sky_win.broken}")
+                if self._sky_win is None:
+                    tint = parse_rgb(os.getenv("SAGA_CONSTELLATION_TINT")) or constellation.TINT
+                    self._sky_win = SkyWindow(tint, self.layer)
+                if self._sky_mon is None or self._sky_mon[0] != self.monitor:
+                    monitors = avatar_ipc.list_monitors()   # once per screen, not ~8x a second
+                    self._sky_mon = (self.monitor, monitors[min(self.monitor, len(monitors) - 1)])
+                self._sky_win.place(constellation.sky_rect(self._sky_mon[1], self.placement.cur,
+                                                           self.sky.cfg.scale))
+                self._sky_win.set_frame(frame)
+                if not self._sky_win.isVisible():
+                    self._sky_win.show()
+            except Exception as e:  # a witness must never take her body down
+                # stop DRAWING only: the sky keeps witnessing and stays in her state file, so a
+                # paint failure can't erase it (it shows again when her body restarts)
+                self._sky_failed = str(e) or repr(e)
+                _log(f"constellation hidden: {self._sky_failed}")
+                if self._sky_win is not None:
+                    self._sky_win.hide()
+
+        def _apply_pose(self, pose, sway_x):
+            """Her activity on top of idle life: the hold (max'ed with a 手柄 toggle so the
+            user's controller pose still wins), the held part hidden while a book is out, head
+            and eyes. Runs after Update() and before Draw() like every other param here."""
+            rig = self.activity.rig
+            if rig is None:
+                return
+            if pose.hold > 0:
+                self.model.SetParameterValue(
+                    rig.hold_param, max(pose.hold, 1.0 if self.expressions.drives(rig.hold_param) else 0.0))
+            if self._held_part is not None:
+                if pose.hide_held:
+                    self.model.SetPartOpacity(self._held_part, 0.0)
+                    self._held_hidden = True
+                elif self._held_hidden:
+                    self.model.SetPartOpacity(self._held_part, 1.0)   # the controller comes back
+                    self._held_hidden = False
+            for pid, value in pose.params.items():
+                self.model.SetParameterValue(pid, value)
+            if pose.head_turn:
+                # absolute, never additive: a turn on top of the sway (or on its own)
+                self.model.SetParameterValue("ParamAngleX", (sway_x or 0.0) + pose.head_turn)
+
+        def _paint_activity(self, pose):
+            """Her book and/or work panel, painted into this GL frame after the model."""
+            p = QPainter(self)
+            try:
+                p.setRenderHint(QPainter.Antialiasing, True)
+                p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                p.setRenderHint(QPainter.TextAntialiasing, True)
+                cur = self.placement.cur
+                w, h = self.width(), self.height()
+                if pose.book:
+                    if self._book_art is None:
+                        self._book_art = PropArt(self._prop_path, self._look.get("book_hue", 0))
+                        if self._book_art.image is None:
+                            _log(f"no book art at {self._prop_path} — reading without a book")
+                    if self._book_art.image is not None:
+                        paint_book(p, self._book_art, pose.book, cur, w, h, BASE_SCALE)
+                if pose.panel:
+                    paint_panel(p, pose.panel, cur, w, h, BASE_SCALE, self._look["accent"],
+                                show_text=self._task_text)
+            except Exception as e:  # a prop must never take her body down
+                self._activity_errors += 1
+                if self._activity_errors <= 3:
+                    _log(f"activity paint failed: {e!r}")
+                if self._activity_errors >= 30:
+                    _log("activity props switched off after repeated failures")
+                    self.activity = avatar_activity.ActivityDirector(None)
+            finally:
+                p.end()
 
         def _mark_dirty(self):
             self._dirty_at = time.monotonic() + 2.0  # debounce disk writes
@@ -783,12 +1376,19 @@ def build_window_class():
             self._dirty_at = None
             if not self._server:
                 return
-            avatar_ipc.write_state_atomic({
-                "port": self._server.port, "pid": os.getpid(),
-                "boot_id": self._server.boot_id,
-                "placement": dict(self.placement.target),
-                "monitor": self.monitor, "layer": self.layer,
-            })
+            sky = persisted_sky(self.sky, self._sky_saved)
+            try:
+                avatar_ipc.write_state_atomic({
+                    "port": self._server.port, "pid": os.getpid(),
+                    "boot_id": self._server.boot_id,
+                    "instance": self.instance, "model": self.model_name,
+                    "placement": dict(self.placement.target),
+                    "monitor": self.monitor, "layer": self.layer,
+                    **({"constellation": sky} if sky is not None else {}),
+                }, self.state_file)
+            except OSError as e:  # e.g. a reader holding the file; this runs inside paintGL,
+                _log(f"state not saved ({e}) — retrying")  # where an escaped error aborts her body
+                self._mark_dirty()
 
     return AvatarWindow, live2d
 
@@ -840,6 +1440,97 @@ def _run_demo(window):
                                (_log(f"demo: {l}"), f())))
 
 
+def _run_activity_demo(window):
+    """--demo-activity: what her body does while she reads and works, through the same
+    queue the IPC uses. Loops every ~40 s so it can be watched from any angle."""
+    from PyQt5.QtCore import QTimer
+
+    def act(**state):
+        return lambda: window.cmd_q.put(("activity", state))
+
+    def cue(kind):
+        return lambda: window.cmd_q.put(("cue", kind))
+
+    def talk(secs):
+        def go():
+            chunks = [[0.075 + 0.075 * math.sin(i / 3.0), 0.05, 0.5 + 0.5 * math.sin(i / 7.0)]
+                      for i in range(int(secs / 0.05))]
+            window.envelope.feed(chunks)
+            window.envelope.speech("start")
+            QTimer.singleShot(int(secs * 1000), lambda: window.envelope.speech("stop"))
+        return go
+
+    task = {"label": "Fix the dashboard chat box", "detail": "read dashboard.py", "step": 0,
+            "total": 4, "state": "running"}
+    script = [
+        (500, "she pulls up a book", act(reading={"title": "Through the Looking-Glass"})),
+        (6000, "a section ends: page turn", cue("page")),
+        (9000, "she talks: looks up from the page", talk(2.5)),
+        (14000, "she puts the book away", act(reading=None)),
+        (16000, "a task starts: the work panel opens", act(working=dict(task, state="planning", total=0))),
+        (18500, "step 1 of 4", act(working=task)),
+        (22000, "step 2 of 4", act(working=dict(task, step=1, detail="edit the chat box"))),
+        (25000, "it waits on you", act(working=dict(task, step=2, state="waiting", detail=""))),
+        (29000, "checking", act(working=dict(task, step=3, state="checking", detail=""))),
+        (32000, "done", lambda: (window.cmd_q.put(("cue", "done")),
+                                 window.cmd_q.put(("activity", {"working": None})))),
+        (35500, "reading and working at once", act(reading={"title": "x"}, working=dict(task, step=1))),
+        (41000, "both away", act(reading=None, working=None)),
+    ]
+    for ms, label, fn in script:
+        QTimer.singleShot(ms, (lambda l=label, f=fn: (_log(f"activity demo: {l}"), f())))
+    QTimer.singleShot(44000, lambda: _run_activity_demo(window))
+
+
+def witness_demo_script(gap):
+    """--demo-witness as [(seconds, label, queued command)]: one moment of each kind, spaced past
+    her burst gap so each lights a star (the first followed by one that only brightens it), then
+    she speaks (the sky hushes) and stops (it eases back), the house sleeps and wakes, she tilts
+    and moves, and her layer goes to the desktop and back.
+    Pure, so a test can check it only queues what the IPC would."""
+    step = gap + 1.0
+    out, t = [], 1.0
+    for i, kind in enumerate(constellation.KINDS):
+        out.append((t, f"a moment ({kind}): a star lights", ("witness", kind)))
+        if i == 0:
+            out.append((t + 1.0, "another straight after: inside the gap it only brightens",
+                        ("witness", "said")))
+        t += step
+    return out + [
+        (t, "she speaks: stars and lines hush to about 30%", ("speech", "start")),
+        (t + 4, "she stops: the sky eases back over a second", ("speech", "stop")),
+        (t + 7, "the house sleeps: brighter, slower", ("sleeping", True)),
+        (t + 13, "she wakes", ("sleeping", False)),
+        (t + 15, "she tilts and moves: the sky follows",
+         ("move", {"x": -0.4, "y": -0.3, "rotation": 25.0, "size": None})),
+        (t + 19, "back", ("move", {"x": 0.0, "y": 0.0, "rotation": 0.0, "size": None})),
+        (t + 21, "layer -> desktop: the stars sink behind windows with her", ("layer", "desktop")),
+        (t + 25, "layer -> top", ("layer", "top")),
+    ]
+
+
+def _run_witness_demo(window):
+    """--demo-witness: her constellation without a sister, through the same queue the IPC uses.
+    Loops, so the sky fills to its cap and the oldest stars start dimming out."""
+    from PyQt5.QtCore import QTimer
+
+    if window.sky is None or window._windowed:
+        _log("witness demo: this body draws no sky — only --instance saga has one "
+             "(SAGA_CONSTELLATION on, not --windowed)")
+        return
+    def play(label, cmd):
+        _log(f"witness demo: {label}")
+        if cmd[0] == "speech":
+            window.envelope.speech(cmd[1])   # where the IPC's `speech` lands, not the queue
+        else:
+            window.cmd_q.put(cmd)
+
+    script = witness_demo_script(window.sky.cfg.min_gap)
+    for secs, label, cmd in script:
+        QTimer.singleShot(int(secs * 1000), (lambda l=label, c=cmd: play(l, c)))
+    QTimer.singleShot(int((script[-1][0] + 2) * 1000), lambda: _run_witness_demo(window))
+
+
 # --- process entry -----------------------------------------------------------------
 
 def _hello_probe(state, timeout=2.0):
@@ -856,22 +1547,83 @@ def _hello_probe(state, timeout=2.0):
         return False
 
 
+def write_model(src_model_path, name):
+    """`--write-model NAME`: NAME.model3.json beside `src_model_path`, same
+    mesh, textures from NAME.2048/. Prints the written path; 0 on success."""
+    name = (name or "").strip()
+    if not name or any(ch in name for ch in "/\\ .:"):
+        _log(f"bad model name {name!r} (one word, no dots/slashes)")
+        return 2
+    if not os.path.isfile(src_model_path):
+        _log(f"source model not found: {src_model_path}")
+        return 3
+    folder = os.path.dirname(os.path.abspath(src_model_path))
+    textures_dir = f"{name}.2048"
+    if not os.path.isdir(os.path.join(folder, textures_dir)):
+        _log(f"textures folder missing: {os.path.join(folder, textures_dir)}")
+        return 3
+    try:
+        with open(src_model_path, encoding="utf-8") as f:
+            src = json.load(f)
+    except (OSError, ValueError) as exc:
+        _log(f"can't read {src_model_path}: {exc}")
+        return 3
+    out = make_retexture_model3(src, textures_dir)
+    textures = out["FileReferences"]["Textures"]
+    missing = [t for t in textures if not os.path.isfile(os.path.join(folder, t))]
+    if missing:
+        _log(f"{len(missing)} texture(s) missing under {textures_dir}: {missing[:3]}")
+        return 3
+    dest = os.path.join(folder, f"{name}.model3.json")
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent="\t", ensure_ascii=False)
+        f.write("\n")
+    _log(f"wrote model '{name}' ({len(textures)} textures from {textures_dir}/, "
+         f"mesh {out['FileReferences'].get('Moc')})")
+    print(dest, flush=True)
+    return 0
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Aiva's Live2D avatar renderer")
+    parser = argparse.ArgumentParser(description="Live2D avatar renderer (one per sister)")
     parser.add_argument("--model", default=os.getenv("AIVA_AVATAR_MODEL", DEFAULT_MODEL))
     parser.add_argument("--fps", type=int,
                         default=int(os.getenv("AIVA_AVATAR_FPS", "32")))
     parser.add_argument("--monitor", type=int, default=None)
+    parser.add_argument("--instance", default=os.getenv("AIVA_AVATAR_INSTANCE", "aiva"),
+                        help="which sister this body belongs to (state file, title, log prefix)")
+    parser.add_argument("--state", default=None,
+                        help="state file path (default: avatar_ipc.state_path(instance))")
+    parser.add_argument("--write-model", metavar="NAME", default=None,
+                        help="write NAME.model3.json beside --model using NAME.2048/ textures, then exit")
     parser.add_argument("--demo", action="store_true")
+    parser.add_argument("--demo-activity", action="store_true",
+                        help="loop the reading/working choreography (book, work panel)")
+    parser.add_argument("--demo-witness", action="store_true",
+                        help="loop moments into the constellation (needs --instance saga)")
     parser.add_argument("--windowed", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args(argv)
+    _set_instance(args.instance)
+    if args.demo_witness and not args.state:
+        # the demo's moments are made up: they must never land in her real sky
+        args.state = os.path.join(tempfile.gettempdir(), f"{args.instance}_witness_demo_state.json")
+    state_file = args.state or avatar_ipc.state_path(args.instance)
 
-    # single-instance guard: a live renderer already owns the desktop
-    state = avatar_ipc.read_state()
+    if args.write_model:
+        return write_model(args.model, args.write_model)
+
+    # single-instance guard: a live renderer already owns THIS instance's body
+    # (each sister has her own state file, so two sisters never collide here)
+    state = avatar_ipc.read_state(state_file)
     if state and state.get("pid") and avatar_ipc.pid_alive(state["pid"]) \
             and _hello_probe(state):
-        _log(f"renderer already running (pid {state['pid']}) — exiting")
+        if args.selftest:  # nothing was rendered, so nothing may pass
+            _log(f"selftest NOT RUN: a live renderer owns {state_file} (pid {state['pid']}) "
+                 f"— pass --state <a temp file> to test beside it")
+            return 4
+        _log(f"renderer already running for instance {args.instance!r} "
+             f"(pid {state['pid']}) — exiting")
         return 0
 
     if not os.path.isfile(args.model):
@@ -898,7 +1650,8 @@ def main(argv=None):
     live2d.init()
 
     sway = os.getenv("AIVA_AVATAR_SWAY", "1") == "1"
-    window = AvatarWindow(args.model, args.fps, sway, args.windowed, state)
+    window = AvatarWindow(args.model, args.fps, sway, args.windowed, state,
+                          instance=args.instance, state_file=state_file)
     if args.monitor is not None:
         window.monitor = args.monitor
         if not args.windowed:
@@ -909,11 +1662,16 @@ def main(argv=None):
     window._server = server
     server.start()
     window._persist()  # publish port/pid/boot_id before anyone can look
-    _log(f"IPC listening on 127.0.0.1:{server.port} (pid {os.getpid()})")
+    _log(f"IPC listening on 127.0.0.1:{server.port} (pid {os.getpid()}, "
+         f"model '{window.model_name}', state {state_file})")
 
     window.show()
     if args.demo:
         _run_demo(window)
+    if args.demo_activity:
+        _run_activity_demo(window)
+    if args.demo_witness:
+        _run_witness_demo(window)
     if args.selftest:
         QTimer.singleShot(3000, app.quit)
 
@@ -928,8 +1686,14 @@ def main(argv=None):
             pass
 
     if args.selftest:
-        ok = window.snapshot().get("ready")
-        _log(f"selftest {'OK' if ok else 'FAILED'}")
+        sky_win = window._sky_win
+        expect_sky = window.sky is not None and not args.windowed
+        ok, why = selftest_verdict(window.snapshot().get("ready"), expect_sky,
+                                   sky_win.paints if sky_win else 0,
+                                   window._sky_failed or (sky_win.broken if sky_win else None))
+        sky_note = (f" — sky painted {sky_win.paints}x, {len(window.sky.stars)} star(s)"
+                    if expect_sky and sky_win else "")
+        _log(f"selftest {'OK' if ok else 'FAILED: ' + why}{sky_note}")
         return 0 if ok else 1
     return 0
 

@@ -1,4 +1,10 @@
-from modules.persona import baseline_traits, build_system_prompt
+import os
+import re
+
+from modules.persona import (AIVA_PERSONALITY_WITH_SISTER, PERSONALITY, SAGA_FLOOR, baseline_traits,
+                             build_system_prompt, named)
+
+GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_personality.txt")
 
 
 def test_baseline_traits_is_temperament_only():
@@ -104,3 +110,74 @@ def test_who_youre_talking_to_block():
     assert "talking to Frank" in p2 and "Frank, Sarah" in p2
     block = p2.split("WHO YOU'RE TALKING TO")[1]
     assert "never announce that you 'matched a voiceprint'" in block and "enroll_speaker" in block
+
+
+# --- the section split (sisters) ---------------------------------------------------------
+
+def test_personality_is_byte_identical_to_golden():
+    # PERSONALITY is rebuilt from section constants; Aiva's string must not change by a byte
+    with open(GOLDEN, encoding="utf-8", newline="") as f:
+        golden = f.read()
+    assert PERSONALITY == golden
+
+
+def test_aiva_with_sister_is_personality_plus_the_sister_section():
+    assert AIVA_PERSONALITY_WITH_SISTER.startswith(PERSONALITY)
+    tail = AIVA_PERSONALITY_WITH_SISTER[len(PERSONALITY):]
+    assert tail.startswith("\n\nYour sister, Saga:")
+    assert "I haven't seen her do that" in tail and "two people, not one voice" in tail
+    assert "{sister}" not in tail
+
+
+def test_saga_floor_shape():
+    f = SAGA_FLOOR
+    assert f.startswith("You are Saga.") and "your sister, Aiva" in f
+    assert "Nobody authored who you are" in f and "honesty beats performing" in f
+    assert "Personality Traits" not in f                          # no authored temperament
+    for word in ("smartass", "cookies", "Japanese", "dryness and edge"):
+        assert word not in f                                      # Aiva's core stays Aiva's
+    assert not re.search(r"\bcats?\b", f, re.I)                   # no desktop cat
+    assert "Romanian" in f and "voice recognition" in f           # shared user/STT rules
+    assert "Books and reading:" in f and "Finding things online, and your space:" in f
+    assert "never buy" in f.lower()                               # the hard web line
+    assert "Your and your sister's source code" in f
+    assert "Your sister, Aiva:" in f and "no help-desk politeness" in f
+    for slot in ("{name}", "{sister}", "{edge}", "{whose}"):
+        assert slot not in f
+
+
+def test_build_system_prompt_takes_personality_name_and_tag():
+    p = build_system_prompt(personality=SAGA_FLOOR, name="Saga", tag="still Saga",
+                            traits=["I value quiet since reading X"], mood_line="You feel calm.",
+                            preferences={"likes": ["rain"]})
+    assert p.startswith("You are Saga.")
+    assert "you're still Saga, with more in her" in p
+    assert "the same Saga, just in this mood" in p and "the same Saga in temperament" in p
+    assert "cheeky" not in p
+    # defaults: Aiva's guard phrases are exactly as before
+    q = build_system_prompt(traits=["t"], mood_line="m", preferences={"likes": ["x"]})
+    assert "same cheeky Aiva" in q and "same Aiva, just in this mood" in q and "same Aiva in temperament" in q
+    # a name without a tag gets a sensible default
+    assert "you're still Nova, with more in her" in build_system_prompt(name="Nova", traits=["t"])
+
+
+def test_temperament_forming_and_sister_blocks_only_when_fed():
+    p = build_system_prompt()
+    for marker in ("WHO YOU ARE —", "You're new.", "YOUR SISTER,"):
+        assert marker not in p
+    p2 = build_system_prompt(personality=SAGA_FLOOR, name="Saga", tag="still Saga",
+                             temperament=["I tend to ask before I assume"], forming_note=True,
+                             sister={"name": "Aiva", "lines": ["she can look things up online (seen 3x)"]})
+    assert "WHO YOU ARE — your temperament, formed from what you've lived through" in p2
+    assert "I tend to ask before I assume" in p2 and "just be it" in p2
+    assert "You're new. You're still finding out who you are" in p2
+    assert "YOUR SISTER, Aiva — what you've noticed about her" in p2
+    assert "seen 3x" in p2 and "don't claim more" in p2 and "haven't seen her do it" in p2
+    # empty sister lines still render the honest "nothing yet" line
+    p3 = build_system_prompt(sister={"name": "Aiva", "lines": []})
+    assert "YOUR SISTER, Aiva" in p3 and "nothing yet" in p3
+    assert "WHO YOU ARE —" not in build_system_prompt(temperament=[])
+
+
+def test_named_replaces_without_format():
+    assert named("{name} likes {x} and {y}", "Saga", x="{}") == "Saga likes {} and {y}"

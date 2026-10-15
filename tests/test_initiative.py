@@ -226,3 +226,53 @@ async def test_tick_without_act_hook_does_not_act():
     await eng.add_desire("find a wallpaper", "make")
     # with no _act, _actionable_desire() returns None → falls through to 'ask', never 'act'
     assert await eng.initiative_tick() == "ask"
+
+
+# -- 'chat': talking to her sister when he's away ------------------------------------
+
+def test_chat_when_away_with_sister_present():
+    ctx = base_ctx(present=False, sister_present=True, voice_idle_s=11 * 60)
+    assert initiative_decision(ctx) == "chat"
+
+
+def test_no_chat_without_a_sister_and_away_stays_silent():
+    assert initiative_decision(base_ctx(present=False)) is None
+    assert initiative_decision(base_ctx(present=False, sister_present=False)) is None
+
+
+def test_chat_daily_cap():
+    ctx = base_ctx(present=False, sister_present=True, voice_idle_s=11 * 60,
+                   chats_today=INITIATIVE["max_chats_per_day"])
+    assert initiative_decision(ctx) is None
+
+
+def test_chat_needs_something_on_her_mind():
+    ctx = base_ctx(present=False, sister_present=True, voice_idle_s=11 * 60, valence=0.0,
+                   social=0.0, focus=False, has_askable_desire=False)
+    assert initiative_decision(ctx) is None
+    ctx["has_askable_desire"] = True
+    assert initiative_decision(ctx) == "chat"
+
+
+def test_chat_when_present_needs_double_idle():
+    ctx = base_ctx(present=True, sister_present=True, voice_idle_s=11 * 60)
+    assert initiative_decision(ctx) == "express"          # he's here: talk to him first
+    ctx["voice_idle_s"] = 2 * INITIATIVE["idle_chat_s"] + 1
+    assert initiative_decision(ctx) == "chat"
+
+
+@pytest.mark.asyncio
+async def test_initiative_tick_chat_asks_the_house_for_the_floor():
+    con = sqlite3.connect(":memory:")
+    clock = Clock()
+    eng = SelfEngine(con, ExperienceBus(con), InnerBrain(CFG), now=clock, log=lambda m: None)
+    eng._boot_mono -= 10 * 60
+    eng.state.valence = 0.7
+    asked = []
+    eng.attach_voice(announce=lambda note: None, idle_for=lambda: 15 * 60,
+                     user_present=lambda within=180: False,
+                     want_floor=lambda kind, to: asked.append((kind, to)),
+                     sister_present=lambda: "saga")
+    assert await eng.initiative_tick() == "chat"
+    assert asked == [("initiative", "saga")]
+    assert eng._day_count("chat_day") == 1

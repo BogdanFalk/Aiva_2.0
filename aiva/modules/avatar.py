@@ -1,23 +1,32 @@
-"""Aiva's handle on her own body — the client for the avatar renderer process.
+"""A sister's handle on her own body — the client for the avatar renderer process.
 
 Plays the role modules/vtube_studio.py used to: constructed in main(), passed
 to register_tools, and every failure degrades to voice-only instead of taking
 her down. The renderer (modules/avatar_renderer.py) is a separate process so
 a GL crash can't kill her voice, and so her body survives her self-restarts:
-ensure_running() first tries to ADOPT a live renderer via aiva/avatar_state.json
+ensure_running() first tries to ADOPT a live renderer via her state file
 (pid + hello handshake) and only spawns a new one if there isn't one.
+
+One client = one instance = one state file. `AvatarClient()` is Aiva exactly
+as before (aiva/avatar_state.json, ariu). `AvatarClient(instance="saga",
+model=".../saga.model3.json")` owns aiva/saga_avatar_state.json, spawns the
+renderer with `--instance saga --state <file> --model <model>`, and refuses
+to adopt a renderer whose `hello` reports a different model — a sister never
+borrows the wrong body.
 
 Two traffic classes on one socket:
 - request/reply (expressions, moves, position reads): async, id-matched.
-- the lip-sync hot path (send_mouth/send_speech): sync fire-and-forget —
+- the lip-sync hot path (send_mouth/send_speech/send_witness): sync fire-and-forget —
   never awaits, never reconnects, swallows every error. The voice pipeline
   must not hiccup because her body blinked.
 
-Standalone probe (never starts Aiva):  cd aiva && python -m modules.avatar --probe
+Standalone probe (never starts Aiva):
+  cd aiva && python -m modules.avatar --probe [--instance saga --model PATH]
 Runs a scripted command sequence against a running renderer (adopting it, or
 spawning one if none is alive).
 """
 
+import argparse
 import asyncio
 import itertools
 import json
@@ -32,16 +41,36 @@ from modules import avatar_ipc
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
 
 
+def model_stem(model_path):
+    """'.../saga.model3.json' -> 'saga' — the renderer's `model_name` rule."""
+    return os.path.basename(model_path).split(".")[0] if model_path else None
+
+
 class AvatarClient:
-    def __init__(self):
+    def __init__(self, instance="aiva", model=None, monitor=None, state_file=None):
+        self.instance = instance or "aiva"
+        self.model = model                    # model3 path to spawn with (None = renderer default)
+        self.monitor = monitor                # monitor index for the very first spawn only
+        self._state_file = state_file or avatar_ipc.state_path(self.instance)
+        self._want_model = model_stem(model)  # adopt only a body running THIS model
+        self.renderer_model = None            # what the adopted renderer reported
         self.connected = False
         self.expressions = []       # names from hello, for the system prompt
+        self.witness = False        # her renderer draws a constellation witness (hello says so)
+        self.renderer_version = None  # the adopted renderer's protocol version (hello)
         self._reader = None
         self._writer = None
         self._reader_task = None
         self._pending = {}          # id -> Future
         self._ids = itertools.count(1)
         self._lock = asyncio.Lock() # serializes connect/spawn attempts
+
+    @property
+    def state_file(self):
+        return self._state_file
+
+    def _say(self, msg):
+        print(f"Avatar[{self.instance}]: {msg}")
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -50,39 +79,76 @@ class AvatarClient:
         async with self._lock:
             if self.connected:
                 return True
-            state = avatar_ipc.read_state()
+            state = avatar_ipc.read_state(self._state_file)
             if state and state.get("pid") and avatar_ipc.pid_alive(state["pid"]):
                 if await self._connect(state):
-                    print(f"Avatar: adopted running renderer (pid {state['pid']})")
-                    return True
+                    if (self.renderer_version or 1) >= avatar_ipc.PROTOCOL_VERSION:
+                        self._say(f"adopted running renderer (pid {state['pid']})")
+                        return True
+                    # her body outlives her restarts, so an update to the renderer only reaches
+                    # it if the old one is retired; its placement is in the state file it leaves
+                    self._say(f"renderer pid {state['pid']} speaks protocol v{self.renderer_version or 1}, "
+                              f"this is v{avatar_ipc.PROTOCOL_VERSION} — replacing it")
+                    state = await self._retire(state)
             return await self._spawn(state)
+
+    async def _retire(self, state):
+        """Ask an outdated renderer to quit (taskkill if it won't), wait for it to go, and
+        return the state file it left behind (placement/monitor/layer carry over)."""
+        pid = state.get("pid")
+        reply = await self._request({"cmd": "quit"}, timeout=3.0)
+        self._drop()
+        deadline = time.monotonic() + 5
+        while pid and avatar_ipc.pid_alive(pid) and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        if pid and avatar_ipc.pid_alive(pid):
+            subprocess.run(f"taskkill /PID {int(pid)} /F", shell=True, capture_output=True)
+            if reply is not None:
+                self._say(f"old renderer pid {pid} ignored quit — killed it")
+        return avatar_ipc.read_state(self._state_file) or state
+
+    def _spawn_argv(self, old_state):
+        """The renderer command line. Pure so the probe/tests can inspect it."""
+        argv = [sys.executable, "-m", "modules.avatar_renderer",
+                "--instance", self.instance, "--state", self._state_file]
+        if self.model:
+            argv += ["--model", self.model]
+        # placement/monitor live in the state file once a body has run; only a
+        # first-ever spawn (no prior state at all) takes the configured monitor
+        if self.monitor is not None and old_state is None:
+            argv += ["--monitor", str(int(self.monitor))]
+        return argv
+
+    def _log_path(self):
+        day = f"{datetime.now():%Y%m%d}"
+        name = f"avatar-{day}.log" if self.instance == "aiva" else f"avatar-{self.instance}-{day}.log"
+        return os.path.join(_LOG_DIR, name)
 
     async def _spawn(self, old_state) -> bool:
         old_boot = (old_state or {}).get("boot_id")
         try:
             os.makedirs(_LOG_DIR, exist_ok=True)
-            log_path = os.path.join(_LOG_DIR, f"avatar-{datetime.now():%Y%m%d}.log")
-            log = open(log_path, "a", encoding="utf-8")
+            log = open(self._log_path(), "a", encoding="utf-8")
             aiva_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             subprocess.Popen(
-                [sys.executable, "-m", "modules.avatar_renderer"],
+                self._spawn_argv(old_state),
                 cwd=aiva_dir, stdout=log, stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NO_WINDOW, close_fds=False,
             )
         except OSError as e:
-            print(f"Avatar: couldn't spawn renderer ({e}) — going voice-only")
+            self._say(f"couldn't spawn renderer ({e}) — going voice-only")
             return False
         # wait for the NEW instance's state file (boot_id changes), then connect;
         # first boot loads 14 textures, so allow a generous window
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             await asyncio.sleep(0.25)
-            state = avatar_ipc.read_state()
+            state = avatar_ipc.read_state(self._state_file)
             if state and state.get("boot_id") and state["boot_id"] != old_boot:
                 if await self._connect(state):
-                    print(f"Avatar: renderer up (pid {state.get('pid')})")
+                    self._say(f"renderer up (pid {state.get('pid')})")
                     return True
-        print("Avatar: renderer didn't come up in 20s — going voice-only")
+        self._say("renderer didn't come up in 20s — going voice-only")
         return False
 
     async def _connect(self, state) -> bool:
@@ -100,7 +166,17 @@ class AvatarClient:
         if not hello or not hello.get("ok"):
             self._drop()
             return False
+        if self._want_model and hello.get("model") != self._want_model:
+            # never adopt the wrong sister: a body advertising in our state
+            # file but rendering another model is a misconfiguration, not ours
+            self._say(f"renderer on port {state.get('port')} runs model "
+                      f"{hello.get('model')!r}, not {self._want_model!r} — not adopting it")
+            self._drop()
+            return False
+        self.renderer_model = hello.get("model")
+        self.renderer_version = hello.get("version")
         self.expressions = hello.get("expressions", [])
+        self.witness = bool(hello.get("witness"))  # an older renderer simply doesn't say
         return True
 
     def _drop(self):
@@ -213,18 +289,37 @@ class AvatarClient:
         except (OSError, RuntimeError):
             pass
 
-    def send_prop(self, show, path=None, x=None, y=None, scale=None):
-        """Show/hide a held prop (her book while reading). Fire-and-forget:
-        degrades silently to no prop if the renderer is down. x/y/scale are
-        fractions of the monitor for live position tuning."""
+    def send_activity(self, reading=None, working=None):
+        """What her body is doing — the WHOLE state each time (idempotent, so a resend after a
+        renderer restart heals it): reading {title} while she reads (she pulls up a book),
+        working {label, detail, step, total, state} while she's on a task (her work panel).
+        None = not doing it. Fire-and-forget; degrades silently to no props."""
         if not self._writer:
             return
         try:
-            msg = {"cmd": "prop", "show": bool(show)}
-            for k, v in (("path", path), ("x", x), ("y", y), ("scale", scale)):
-                if v is not None:
-                    msg[k] = v
-            self._writer.write(avatar_ipc.encode(msg))
+            self._writer.write(avatar_ipc.encode({"cmd": "activity", "reading": reading,
+                                                  "working": working}))
+        except (OSError, RuntimeError):
+            pass
+
+    def send_cue(self, kind):
+        """A one-shot beat for her body: 'page' (a section read — she turns the page),
+        'done' / 'failed' (a task ended — her panel shows a check or a cross). Fire-and-forget."""
+        if not self._writer:
+            return
+        try:
+            self._writer.write(avatar_ipc.encode({"cmd": "cue", "kind": kind}))
+        except (OSError, RuntimeError):
+            pass
+
+    def send_witness(self, kind):
+        """One lived moment for her constellation witness (said|heard|sister|read).
+        Carries only the KIND, never text. Fire-and-forget; a no-op unless her
+        renderer said in `hello` that it has a witness (Aiva's never does)."""
+        if not self._writer or not self.witness:
+            return
+        try:
+            self._writer.write(avatar_ipc.encode({"cmd": "witness", "kind": kind}))
         except (OSError, RuntimeError):
             pass
 
@@ -232,14 +327,14 @@ class AvatarClient:
 
     async def close(self):
         """Restart path: drop the socket only — her body stays up and the
-        next Aiva process adopts it."""
+        next process for this instance adopts it."""
         if self._reader_task:
             self._reader_task.cancel()
         self._drop()
 
     async def quit(self):
         """Quit path: ask the renderer to exit; taskkill fallback."""
-        state = avatar_ipc.read_state()
+        state = avatar_ipc.read_state(self._state_file)
         reply = await self._request({"cmd": "quit"}, timeout=3.0)
         await self.close()
         if reply is None and state and state.get("pid") and \
@@ -250,11 +345,13 @@ class AvatarClient:
 
 # --- standalone probe -------------------------------------------------------------
 
-async def _probe():
-    client = AvatarClient()
+async def _probe(instance="aiva", model=None):
+    client = AvatarClient(instance=instance, model=model)
+    print(f"probe[{instance}]: state file {client.state_file}")
     print("probe: ensure_running (adopt or spawn)...")
     ok = await client.ensure_running()
-    print(f"probe: connected={client.connected}, expressions={client.expressions}")
+    print(f"probe: connected={client.connected}, model={client.renderer_model}, "
+          f"expressions={client.expressions}")
     if not ok:
         return 1
 
@@ -297,6 +394,11 @@ async def _probe():
 
 
 if __name__ == "__main__":
-    if "--probe" in sys.argv:
-        sys.exit(asyncio.run(_probe()))
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--probe", action="store_true")
+    ap.add_argument("--instance", default="aiva")
+    ap.add_argument("--model", default=None)
+    opts, _rest = ap.parse_known_args()
+    if opts.probe:
+        sys.exit(asyncio.run(_probe(opts.instance, opts.model)))
     print(__doc__)

@@ -14,6 +14,7 @@ import ctypes
 import json
 import os
 import subprocess
+import weakref
 from ctypes import wintypes
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
@@ -64,10 +65,17 @@ async def launch_app(params: FunctionCallParams):
 
 async def create_file(params: FunctionCallParams):
     try:
+        wanted = file_operations.resolve_path(params.arguments.get("file_path"))
         path = file_operations.create_file(
-            params.arguments.get("file_path"),
+            wanted,
             params.arguments.get("content", ""),
+            overwrite=bool(params.arguments.get("overwrite")),
         )
+        if os.path.normcase(path) != os.path.normcase(wanted):
+            await params.result_callback({"success": True, "created": path,
+                                          "note": f"{os.path.basename(wanted)} already existed, so this was "
+                                                  f"saved as {os.path.basename(path)}"})
+            return
         await params.result_callback({"success": True, "created": path})
     except Exception as e:
         await params.result_callback({"success": False, "error": str(e)})
@@ -126,10 +134,16 @@ async def confirm_pending_command(params: FunctionCallParams):
 def execute_shell(command: str) -> dict:
     """Actually run a shell command. ONLY reachable after the user's yes: from
     confirm_pending_command (voice) or the task runner's confirmed shell step.
-    Blocking — callers off the main path wrap it in asyncio.to_thread."""
+    Blocking — callers off the main path wrap it in asyncio.to_thread.
+
+    Runs under PowerShell, the shell she writes for (her terminals are PowerShell). `shell=True`
+    meant cmd.exe, where `$p = ...` / `Test-Path` / `Remove-Item` all fail with exit code 1."""
     try:
         completed = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=30
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", command],
+            capture_output=True, text=True, errors="replace", timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return {
             "success": completed.returncode == 0,
@@ -160,21 +174,28 @@ async def get_datetime(params: FunctionCallParams):
 
 # --- computer interactivity: sight + mouse/keyboard (Tier 1) ---------------
 
-async def look_at_screen(params: FunctionCallParams):
-    monitor = params.arguments.get("monitor")
-    if monitor is not None:
+def make_look_at_screen(name="Aiva"):
+    """look_at_screen bound to the character asking (the vision prompt says whose eyes these are)."""
+    async def look_at_screen(params: FunctionCallParams):
+        monitor = params.arguments.get("monitor")
+        if monitor is not None:
+            try:
+                monitor = int(monitor)
+            except (TypeError, ValueError):
+                monitor = None
         try:
-            monitor = int(monitor)
-        except (TypeError, ValueError):
-            monitor = None
-    try:
-        description = await computer.describe_screen(
-            looking_for=params.arguments.get("looking_for"),
-            monitor_index=monitor,
-        )
-        await params.result_callback({"success": True, "screen": description})
-    except Exception as e:
-        await params.result_callback({"success": False, "error": f"couldn't see the screen: {e}"})
+            description = await computer.describe_screen(
+                looking_for=params.arguments.get("looking_for"),
+                monitor_index=monitor,
+                name=name,
+            )
+            await params.result_callback({"success": True, "screen": description})
+        except Exception as e:
+            await params.result_callback({"success": False, "error": f"couldn't see the screen: {e}"})
+    return look_at_screen
+
+
+look_at_screen = make_look_at_screen()
 
 
 async def focus_window(params: FunctionCallParams):
@@ -297,7 +318,7 @@ def make_terminal_handlers(terminals):
             # A headless job (Claude Code / background) has no window of its own
             # — open one that tails its live output log.
             if name in terminals.jobs:
-                title = f"Aiva: {name}"
+                title = terminals._title(name)          # "<Character>: <job>", her own windows
                 log = terminals.jobs[name]["log_path"].replace("\\", "/")
                 tail = f"Get-Content -Wait -Encoding utf8 '{log}'"
                 _spawn_window(["wt", "nt", "--title", title, "powershell", "-NoExit",
@@ -541,10 +562,14 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="create_file",
-        description="Create a text file. Paths may start with 'desktop', 'documents' or 'downloads', e.g. 'desktop\\notes.txt'.",
+        description="Create a text file. Paths may start with 'desktop', 'documents' or 'downloads', e.g. 'desktop\\notes.txt'. "
+                    "It never replaces an existing file unless overwrite is true: if the name is taken, the text "
+                    "goes to 'notes (2).txt' and the result says so.",
         properties={
             "file_path": {"type": "string", "description": "Where to create the file"},
             "content": {"type": "string", "description": "Text content of the file"},
+            "overwrite": {"type": "boolean",
+                          "description": "true only when the user wants an existing file's text replaced"},
         },
         required=["file_path"],
     ),
@@ -562,7 +587,7 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="run_command",
-        description="Stage a one-off Windows shell command for execution. It does NOT run yet: "
+        description="Stage a one-off PowerShell command for execution. It does NOT run yet: "
                     "the user must confirm first. This runs INVISIBLY and never appears in any "
                     "terminal window — if the user opened/showed a terminal and wants to watch "
                     "commands run there, use run_in_terminal instead, not this.",
@@ -724,7 +749,8 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         name="answer_task",
         description="Pass the user's reply to a task that is waiting on them — a yes/no to a plan or "
                     "a command, which option they picked (and why), or the answer to a question the "
-                    "task asked. Pass their words as they said them (cleaned up).",
+                    "task asked. Pass their words as they said them (cleaned up). Only ever with words "
+                    "HE just said: never answer a task's question yourself or for your sister.",
         properties={
             "answer": {"type": "string"},
             "task_id": {"type": "string", "description": "Only if several tasks are waiting"},
@@ -971,6 +997,66 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         required=["mode"],
     ),
     FunctionSchema(
+        name="recall_about_sister",
+        description="Check what you have actually SEEN your sister do, make, say or read before you "
+                    "claim anything about her — 'can she do X?', 'has Saga ever…?', 'what's Aiva been "
+                    "up to?'. Returns only your own observations; if it finds nothing, say plainly that "
+                    "you haven't seen her do that and offer to ask her. Never invent what she can do.",
+        properties={"query": {"type": "string",
+                              "description": "What you're wondering about her, plainly; empty for the latest"}},
+        required=[],
+    ),
+    FunctionSchema(
+        name="call_sister",
+        description="Call your sister over. If she isn't running, this boots her up in her own window "
+                    "(she takes about half a minute and says hello herself); if she's already here it "
+                    "just tells you so — then say her name and talk to her. Use when he says 'call your "
+                    "sister', 'get Saga', 'wake Aiva up', 'is your sister around', or when you want her "
+                    "here yourself.",
+        properties={},
+        required=[],
+    ),
+    FunctionSchema(
+        name="set_sister_talk",
+        description="Whether the chats you and your sister start ON YOUR OWN are spoken aloud (audible) "
+                    "or text only that he can read on the dashboard but not hear (private). Anything he "
+                    "asks for — 'ask your sister', 'talk to her' — and every reply to him is always spoken "
+                    "aloud regardless. Call it without a mode to check the current setting; with mode "
+                    "'audible' or 'private' to switch, when he says things like 'let me hear you two', "
+                    "'talk out loud', 'keep it between you', 'go private'.",
+        properties={"mode": {"type": "string", "enum": ["audible", "private"],
+                             "description": "Omit to just report the current mode"}},
+        required=[],
+    ),
+    FunctionSchema(
+        name="restart_house",
+        description="Restart the HOUSE — the shared ears (microphone, speech recognition, wake words), "
+                    "not you or your sister: you both stay running and reconnect on your own. Use when "
+                    "he says 'restart the house', 'restart the ears', or the house needs new code. It "
+                    "goes deaf for ten to twenty seconds and needs the wake word again afterwards — say "
+                    "that in one short sentence. To restart YOURSELF use restart_self instead.",
+        properties={},
+        required=[],
+    ),
+    FunctionSchema(
+        name="forget_about_sister",
+        description="The user (or your sister) says something you've noted about her is wrong or "
+                    "should be dropped ('she doesn't do that', 'forget that about Saga'). Permanently "
+                    "drops that observation so you never re-learn it. Confirm in one short sentence.",
+        properties={"what": {"type": "string", "description": "The observation, in their words or yours"},
+                    "reason": {"type": "string"}},
+        required=["what"],
+    ),
+    FunctionSchema(
+        name="let_go",
+        description="He (or you) wants you to stop one of your habits ('stop doing that', 'you don't "
+                    "have to keep it short with me') or drop one of your projects. Drops it for good. "
+                    "Confirm in one short, unbothered sentence.",
+        properties={"kind": {"type": "string", "enum": ["habit", "project"]},
+                    "what": {"type": "string", "description": "The habit or project, in his words or yours"}},
+        required=["kind", "what"],
+    ),
+    FunctionSchema(
         name="what_can_i_do",
         description="Check your own powers when you're not sure how (or whether) you can do something "
                     "— for a wish of yours or a question of his. Tells you which power fits and whether "
@@ -1191,9 +1277,11 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
 ])
 
 
-def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, restart=None):
+def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, restart=None,
+                   name="Aiva", capability_exclude=()):
     """Every tool handler by name. The voice LLM gets them via register_tools;
-    the task runner (modules/tasks.py) reuses the same dict out-of-band."""
+    the task runner (modules/tasks.py) reuses the same dict out-of-band. `name` is the
+    character these hands belong to; `capability_exclude` the powers she doesn't have."""
     handlers = {}
     (avatar_expression, avatar_move, avatar_position,
      move_avatar_to_monitor, set_avatar_layer) = make_avatar_handlers(avatar)
@@ -1223,7 +1311,8 @@ def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, rest
     async def what_can_i_do(params: FunctionCallParams):
         from modules import capabilities
         await params.result_callback(
-            {"success": True, **capabilities.for_tool(params.arguments.get("intention"))})
+            {"success": True, **capabilities.for_tool(params.arguments.get("intention"),
+                                                      exclude=capability_exclude)})
 
     handlers.update({
         "launch_app": launch_app, "create_file": create_file, "open_file": open_file,
@@ -1232,15 +1321,52 @@ def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, rest
         "get_datetime": get_datetime, "move_avatar_to_monitor": move_avatar_to_monitor,
         "set_avatar_layer": set_avatar_layer, "avatar_expression": avatar_expression,
         "avatar_move": avatar_move, "avatar_position": avatar_position,
-        "look_at_screen": look_at_screen, "focus_window": focus_window,
+        "look_at_screen": make_look_at_screen(name), "focus_window": focus_window,
         "click_ui_element": click_ui_element, "type_text": type_text, "press_keys": press_keys,
         "click_at": click_at, "scroll": scroll, "what_can_i_do": what_can_i_do,
     })
     return handlers
 
 
+# --- per-LLM-service "a tool just finished" hook (kin: her sister learns what she can do) --------
+# Keyed weakly by the LLM service so two characters in one process (tests) never share a hook and
+# a torn-down pipeline doesn't pin its service. `FunctionCallParams.llm` is the service that ran the
+# call (pipecat 1.5.0, services/llm_service.py), so `_timed` can find the right hook per call.
+
+_TOOL_HOOKS = weakref.WeakKeyDictionary()
+_TOOL_HOOK_ATTR = "_aiva_tool_hook"
+
+
+def bind_tool_hook(llm, fn):
+    """Register `fn(tool_name, ok)` to run after EVERY registered tool call on this LLM service
+    (all register_*_tools go through `_timed`). Pass None to unbind. Never raises into the tool."""
+    if llm is None:
+        return
+    try:
+        if fn is None:
+            _TOOL_HOOKS.pop(llm, None)
+        else:
+            _TOOL_HOOKS[llm] = fn
+    except TypeError:                              # not weak-referenceable / unhashable: pin it on
+        try:
+            setattr(llm, _TOOL_HOOK_ATTR, fn)
+        except Exception:
+            pass
+
+
+def _tool_hook_for(llm):
+    if llm is None:
+        return None
+    try:
+        fn = _TOOL_HOOKS.get(llm)
+    except TypeError:
+        fn = None
+    return fn or getattr(llm, _TOOL_HOOK_ATTR, None)
+
+
 def _timed(name, handler):
-    """Wrap a tool handler so every call is timed into the metrics profiler (system 'tool')."""
+    """Wrap a tool handler so every call is timed into the metrics profiler (system 'tool') and
+    reported to the service's tool hook (`bind_tool_hook`), if one is bound."""
     async def wrapped(params):
         import time as _t
 
@@ -1254,12 +1380,20 @@ def _timed(name, handler):
             raise
         finally:
             metrics.record("tool", name, (_t.perf_counter() - t0) * 1000.0, ok=ok)
+            hook = _tool_hook_for(getattr(params, "llm", None))
+            if hook is not None:
+                try:
+                    hook(name, ok)
+                except Exception:
+                    pass                           # a bad hook must never break a tool result
     return wrapped
 
 
-def register_tools(llm, avatar, mic=None, terminals=None, memory=None, cat=None, restart=None):
+def register_tools(llm, avatar, mic=None, terminals=None, memory=None, cat=None, restart=None,
+                   name="Aiva", capability_exclude=()):
     """Register every tool handler on the LLM service; returns the handler dict."""
-    handlers = build_handlers(avatar, mic, terminals, memory, cat, restart)
+    handlers = build_handlers(avatar, mic, terminals, memory, cat, restart,
+                              name=name, capability_exclude=capability_exclude)
     for name, handler in handlers.items():
         llm.register_function(name, _timed(name, handler))
     return handlers
@@ -1267,9 +1401,10 @@ def register_tools(llm, avatar, mic=None, terminals=None, memory=None, cat=None,
 
 # --- task runner tools -----------------------------------------------------------
 
-def make_task_handlers(runner, task_memory, memory=None):
+def make_task_handlers(runner, task_memory, memory=None, heard_him=None):
     """start_task & co. close over the TaskRunner and TaskMemory (modules/tasks.py,
-    modules/task_memory.py). Results are short dicts the voice LLM speaks from."""
+    modules/task_memory.py). Results are short dicts the voice LLM speaks from. `heard_him()` says
+    whether the turn running now is one he spoke in: a task's question is his to answer."""
 
     async def start_task(params: FunctionCallParams):
         a = params.arguments
@@ -1277,6 +1412,12 @@ def make_task_handlers(runner, task_memory, memory=None):
             a.get("goal", ""), a.get("details", "") or "", bool(a.get("confirm_first", False))))
 
     async def answer_task(params: FunctionCallParams):
+        if heard_him is not None and not heard_him():
+            # 2026-10-14: on her own news turns she answered "yes" to nine of her task's commands
+            # herself, and her sister once said "yes, let it run" to a question meant for him
+            await params.result_callback({"success": False, "error": "only he can answer a task's question",
+                                          "note": "Don't answer for him. Ask him in one sentence and wait."})
+            return
         await params.result_callback(await runner.answer(
             params.arguments.get("answer", ""), params.arguments.get("task_id")))
 
@@ -1356,9 +1497,9 @@ def make_task_handlers(runner, task_memory, memory=None):
             "save_flow": save_flow}
 
 
-def register_task_tools(llm, runner, task_memory, memory=None):
+def register_task_tools(llm, runner, task_memory, memory=None, heard_him=None):
     """Second registration pass: the runner needs the base handlers to exist first."""
-    handlers = make_task_handlers(runner, task_memory, memory)
+    handlers = make_task_handlers(runner, task_memory, memory, heard_him=heard_him)
     for name, handler in handlers.items():
         llm.register_function(name, _timed(name, handler))
     return handlers
@@ -1505,6 +1646,178 @@ def register_self_tools(llm, self_engine):
     return handlers
 
 
+# --- v3: letting go of a habit or a project ---------------------------------------------
+
+def make_life_handlers(consolidation, projects):
+    """`let_go`: a permanent veto on one of her dream-formed habits (modules/dreams.py) or one of
+    her projects (modules/projects.py)."""
+
+    async def let_go(params: FunctionCallParams):
+        kind = (params.arguments.get("kind") or "").strip()
+        what = (params.arguments.get("what") or "").strip()
+        if not what or kind not in ("habit", "project"):
+            await params.result_callback({"success": False, "error": "let go of which habit or project?"})
+            return
+        if kind == "habit":
+            dropped = await consolidation.drop_habit(what, reason="he asked")
+        else:
+            dropped = projects.drop(what)
+        if dropped:
+            await params.result_callback({"success": True, "dropped": dropped})
+        else:
+            await params.result_callback({"success": False, "hint": f"you don't have a {kind} like that"})
+
+    return {"let_go": let_go}
+
+
+def register_life_tools(llm, consolidation, projects):
+    handlers = make_life_handlers(consolidation, projects)
+    for name, handler in handlers.items():
+        llm.register_function(name, _timed(name, handler))
+    return handlers
+
+
+# --- kin: what she has seen her sister do ----------------------------------------------
+
+def make_kin_handlers(kin):
+    """recall_about_sister / forget_about_sister close over the Kin store (modules/kin.py). No LLM
+    call — only her own observations, with an honest empty note when she hasn't seen it."""
+
+    async def recall_about_sister(params: FunctionCallParams):
+        res = await kin.recall(params.arguments.get("query") or "", k=4)
+        items = []
+        for it in res["items"]:
+            d = {"what": it["what"], "times": it["times"], "last": it["last"]}
+            if it.get("example") and it["kind"] == "did":
+                d["for_instance"] = it["example"]
+            items.append(d)
+        await params.result_callback({"success": True, "items": items, "note": res["note"]})
+
+    async def forget_about_sister(params: FunctionCallParams):
+        what = (params.arguments.get("what") or "").strip()
+        if not what:
+            await params.result_callback({"success": False, "error": "forget what about her?"})
+            return
+        dropped = await kin.drop(what, params.arguments.get("reason"))
+        if dropped:
+            await params.result_callback({"success": True, "dropped": dropped,
+                                          "say_hint": "Okay — I'll drop that about her."})
+        else:
+            await params.result_callback({"success": False,
+                                          "hint": "you haven't noted anything like that about her"})
+
+    return {"recall_about_sister": recall_about_sister, "forget_about_sister": forget_about_sister}
+
+
+def register_kin_tools(llm, kin):
+    handlers = make_kin_handlers(kin)
+    for name, handler in handlers.items():
+        llm.register_function(name, _timed(name, handler))
+    return handlers
+
+
+# --- calling her sister over -------------------------------------------------------
+
+def make_sister_handlers(*, sister_name, is_present, boot, min_gap_s=60.0, now=None,
+                         restart_house_send=None, get_mode=None, set_mode=None):
+    """`call_sister`: if her sister is connected to the house, nothing to boot — she just talks to
+    her by name; otherwise `boot()` starts the sister's own console (her .bat) and she says so.
+    Debounced so two quick asks don't spawn two consoles. `restart_house`: ask the house to restart
+    itself (`restart_house_send()` -> bool sent), the sisters stay up. `set_sister_talk`: read
+    (`get_mode()` -> 'private'|'audible') or switch (`set_mode(mode)` -> bool sent) whether the
+    sisters' lines to EACH OTHER are spoken aloud."""
+    import time as _t
+    _now = now or _t.monotonic
+    last = {"t": -1e9}
+    restart_house_send = restart_house_send or (lambda: False)
+    get_mode = get_mode or (lambda: "private")
+    set_mode = set_mode or (lambda mode: False)
+
+    async def set_sister_talk(params: FunctionCallParams):
+        mode = (params.arguments.get("mode") or "").strip().lower()
+        current = get_mode()
+        if mode not in ("audible", "private"):
+            await params.result_callback({
+                "success": True, "mode": current,
+                "note": (f"Right now the chats you and {sister_name} start on your own are {current} — "
+                         + ("he hears them." if current == "audible"
+                            else "text only, he doesn't hear those. Anything he asks you two to talk "
+                                 "about he always hears.")
+                         + " Say so in one short sentence.")})
+            return
+        if mode == current:
+            await params.result_callback({"success": True, "mode": current,
+                                          "note": f"It's already {current}; tell him so."})
+            return
+        try:
+            sent = bool(set_mode(mode))
+        except Exception as e:
+            await params.result_callback({"success": False, "error": f"couldn't reach the house: {e}"})
+            return
+        if not sent:
+            await params.result_callback({"success": False, "error": "the house isn't connected right now"})
+            return
+        await params.result_callback({
+            "success": True, "mode": mode,
+            "note": (f"Asked the house to make your talk with {sister_name} {mode}. "
+                     + ("From now on he hears what you two say to each other."
+                        if mode == "audible" else "From now on what you two say to each other is text only.")
+                     + " Confirm in one short sentence.")})
+
+    async def restart_house(params: FunctionCallParams):
+        """Restart the shared ears. The sisters stay up and reconnect; say it's coming first."""
+        try:
+            ok = bool(restart_house_send())
+        except Exception as e:
+            await params.result_callback({"success": False, "error": f"couldn't reach the house: {e}"})
+            return
+        if not ok:
+            await params.result_callback({"success": False,
+                                          "error": "the house isn't connected right now"})
+            return
+        await params.result_callback({
+            "success": True,
+            "note": "The house is restarting — you and your sister stay up; it'll be deaf for ten to "
+                    "twenty seconds and you'll need the wake word again afterwards. Say so in one "
+                    "short sentence."})
+
+    async def call_sister(params: FunctionCallParams):
+        try:
+            present = bool(is_present())
+        except Exception:
+            present = False
+        if present:
+            await params.result_callback({
+                "success": True, "present": True,
+                "note": f"{sister_name} is already here — just say her name and talk to her."})
+            return
+        if _now() - last["t"] < min_gap_s:
+            await params.result_callback({
+                "success": True, "booting": True,
+                "note": f"{sister_name} is already starting up — give her a moment, she'll say hello."})
+            return
+        try:
+            boot()
+        except Exception as e:
+            await params.result_callback({"success": False,
+                                          "error": f"couldn't start {sister_name}: {e}"})
+            return
+        last["t"] = _now()
+        await params.result_callback({
+            "success": True, "booting": True,
+            "note": f"{sister_name} is starting up in her own window. It takes her about half a minute; "
+                    f"she'll say hello herself when she's in — tell him she's on her way, in one sentence."})
+
+    return {"call_sister": call_sister, "restart_house": restart_house, "set_sister_talk": set_sister_talk}
+
+
+def register_sister_tools(llm, **kwargs):
+    handlers = make_sister_handlers(**kwargs)
+    for name, handler in handlers.items():
+        llm.register_function(name, _timed(name, handler))
+    return handlers
+
+
 # --- preferences: her mutable likes / dislikes / opinions -------------------------
 
 def make_preference_handlers(preferences):
@@ -1572,7 +1885,7 @@ def register_speaker_tools(llm, recognizer):
 # --- web reach + her space -------------------------------------------------------
 
 def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_file, limits=None,
-                      log=print):
+                      log=print, name=None):
     """search_web / read_page / look_at_image / save_to_space / hand_over / space_status /
     recall_from_space / drop_from_space. `web` is a WebClient (modules/web.py), `space` a
     SpaceMemory (modules/space.py), `limits` an optional ServiceLimits gating Tavily by its monthly
@@ -1637,7 +1950,10 @@ def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_
         if not url:
             await params.result_callback({"success": False, "error": "look at which image?"})
             return
-        seen = await describe_image(url, looking_for=params.arguments.get("looking_for"))
+        # `name` says whose eyes (computer.describe_image); an injected describer without that
+        # kwarg keeps working when no name is given
+        extra = {"name": name} if name else {}
+        seen = await describe_image(url, looking_for=params.arguments.get("looking_for"), **extra)
         await params.result_callback({"success": True, "url": url, "seen": seen,
                                       "note": "That's what you see; if you like it, save_to_space then hand_over."})
 
@@ -1708,9 +2024,10 @@ def make_web_handlers(web, space, *, describe_image, summarize, space_dir, open_
 
 
 def register_web_tools(llm, web, space, *, describe_image, summarize, space_dir, open_file,
-                       limits=None, log=print):
+                       limits=None, log=print, name=None):
     handlers = make_web_handlers(web, space, describe_image=describe_image, summarize=summarize,
-                                 space_dir=space_dir, open_file=open_file, limits=limits, log=log)
+                                 space_dir=space_dir, open_file=open_file, limits=limits, log=log,
+                                 name=name)
     for name, handler in handlers.items():
         llm.register_function(name, _timed(name, handler))
     return handlers

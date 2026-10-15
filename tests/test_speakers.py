@@ -185,3 +185,34 @@ async def test_embed_pcm_uses_injected_embedder():
     assert _cosine(await rec.embed_pcm(b"\x00\x01"), voice(1)) > 0.99
     rec.enabled = False
     assert await rec.embed_pcm(b"\x00\x01") is None
+
+
+# -- a sister who doesn't know his voice yet (seed_primary=False) ------------------
+
+async def test_no_seed_primary_asks_on_an_empty_roster_then_enrolls():
+    mem = SpeakerMemory(sqlite3.connect(":memory:"), model_id="test-16")
+    rec = SpeakerRecognizer(mem, SpeakerConfig(primary_name="Frank", seed_primary=False),
+                            enabled=True, log=lambda m: None)
+    note = await rec.on_turn(voice(1))
+    assert note == UNKNOWN_NOTE                       # she asks who she's talking to
+    assert rec.pending is not None and rec.current is None and mem.count() == 0
+    assert await rec.on_turn(voice(1, variant=1)) is None      # same voice again → folded, no re-ask
+    res = rec.enroll_current("Bogdan")
+    assert res["success"] and rec.current == "Bogdan" and mem.count() == 1
+    assert await rec.on_turn(voice(1, variant=3)) is None      # now known and unchanged → no note
+
+
+def test_speaker_config_from_env_is_prefix_aware(monkeypatch):
+    monkeypatch.setenv("SAGA_SPEAKER_SEED_PRIMARY", "0")
+    monkeypatch.setenv("SAGA_SPEAKER_PRIMARY_NAME", "Bogdan")
+    monkeypatch.delenv("SAGA_SPEAKER_T_HIGH", raising=False)
+    monkeypatch.setenv("AIVA_SPEAKER_T_HIGH", "0.7")
+    cfg = SpeakerConfig.from_env("SAGA")
+    assert cfg.seed_primary is False and cfg.primary_name == "Bogdan"
+    assert cfg.t_high == 0.7                          # model thresholds fall back to the AIVA_ tuning
+    monkeypatch.setenv("SAGA_SPEAKER_T_HIGH", "0.8")
+    assert SpeakerConfig.from_env("saga").t_high == 0.8         # her own key wins
+    monkeypatch.delenv("AIVA_SPEAKER_SEED_PRIMARY", raising=False)
+    monkeypatch.delenv("AIVA_SPEAKER_PRIMARY_NAME", raising=False)
+    aiva = SpeakerConfig.from_env()                   # the no-arg call is Aiva, as before
+    assert aiva.seed_primary is True and aiva.primary_name == "Frank" and aiva.t_high == 0.7

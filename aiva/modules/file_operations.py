@@ -30,12 +30,28 @@ def resolve_path(file_path):
     return file_path
 
 
-def create_file(file_path, content=""):
-    """Create a new file with specified content."""
+def free_name(file_path):
+    """file_path, or 'name (2).ext', 'name (3).ext'... — the first that doesn't exist yet."""
+    if not os.path.exists(file_path):
+        return file_path
+    stem, ext = os.path.splitext(file_path)
+    n = 2
+    while os.path.exists(f"{stem} ({n}){ext}"):
+        n += 1
+    return f"{stem} ({n}){ext}"
+
+
+def create_file(file_path, content="", overwrite=False):
+    """Create a new file with specified content. An existing file is only replaced when
+    overwrite is set; otherwise the new text goes to 'name (2).ext' — writing a file can then
+    never cost him one (2026-10-14: a task agent refused to write his note at all, because it
+    couldn't be sure the name was free)."""
     file_path = resolve_path(file_path)
     directory = os.path.dirname(file_path)
     if directory and not os.path.exists(directory):
         os.makedirs(directory)
+    if not overwrite:
+        file_path = free_name(file_path)
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(content)
     return file_path

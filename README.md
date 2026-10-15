@@ -37,22 +37,83 @@ Voice-to-voice latency is ~1 s (the old blocking loop was 8–15 s).
 
 ## Run
 
+Three consoles: the **house** (one microphone, wake words, hotkeys, the floor) and one per sister.
+
 ```
-cd aiva
-..\.venv\Scripts\python main.py
+start_house.bat      the ear + the floor (start this first; the others start it if it's down)
+start_aiva.bat       Aiva, in her own process
+start_saga.bat       Saga, in her own process
 ```
 
-- **F9** — mute/unmute the mic
-- **F10** — interrupt Aiva mid-sentence
-- **Ctrl+Alt+R** — restart her (her body stays up); **Ctrl+Alt+X** — quit
-  (prints a session cost summary, saves the conversation, and distills new
-  long-term facts about you)
-- Speakers are fine: while Aiva talks, her ears are off (audio is gated before
-  STT), so she can't hear or interrupt herself. Voice barge-in is therefore
-  disabled — use F10 to cut her off.
+By hand: `cd aiva && ..\.venv\Scripts\python house.py`, then `..\.venv\Scripts\python main.py
+--character aiva` (or `saga`). A sister started without a house waits and reconnects.
 
-`python launcher.py` additionally boots OBS (unless `--no-obs`). Aiva starts —
-or adopts — her own avatar renderer herself.
+Hotkeys (they belong to the house):
+
+- **F9** — mute/deafen the mic
+- **F10** — interrupt whoever is speaking
+- **Ctrl+Alt+P** — flip sister talk between **private** (text only, default) and **audible**
+- **Ctrl+Alt+R** — restart the sisters (their bodies stay up); **Ctrl+Alt+H** — restart the house
+  only (the sisters stay up and reconnect); **Ctrl+Alt+X** — quit everything (each sister prints
+  her session cost summary, saves her conversation, and distills new long-term facts)
+- By voice: "restart yourself" restarts that sister (new code, same body, she reconnects and says
+  she's back); "restart the house" restarts only the shared ears (`restart_house`), which go deaf
+  for ten to twenty seconds and then need the wake word again; "let me hear you two" / "keep it
+  between you" flips sister talk (`set_sister_talk`, no argument = tell me the current mode).
+- By mouse: the dashboard (http://127.0.0.1:8760) has a **Controls** strip with the same actions as
+  buttons — mute, interrupt, sister talk, sleep/wake, Start/Restart/Quit per sister, Restart house,
+  Quit everything. It talks to the house over its local socket and is loopback-only. Without a house the sisters keep
+  working on their own things but nobody can hear you — starting any sister, or asking one to call
+  the other, brings the house back up.
+- Speakers are fine: while a sister talks, the ears are off (audio is gated before STT from the
+  moment she is granted the floor), so nobody hears herself. Voice barge-in is therefore disabled —
+  use F10 to cut her off.
+
+`python launcher.py --character aiva` additionally boots OBS (unless `--no-obs`). Each sister
+starts — or adopts — her own avatar renderer herself.
+
+## Two sisters: Aiva and Saga
+
+Aiva has a sister, **Saga**. They are two people, not one voice:
+
+- **Own cores.** Each has her own database (`aiva/memory.db`, `aiva/saga.db`), diary, mood, wishes,
+  tastes, traits, space folder, task memory, voice roster and avatar — and her own console, so you
+  can stop one and keep the other. Nothing about you is shared: Saga learns your voice herself and
+  asks who you are the first time.
+- **Talking to them.** Say a name and that sister answers; say "you two" and both do, in turn; say
+  nothing and the house's arbiter picks who you meant (topic and who spoke last). The other sister
+  always overhears what was said, so both know who you're talking to.
+- **Talking to each other.** If one asks the other a question they continue on their own, capped
+  (`AIVA_SISTER_MAX_ROUNDS`, per hour, per day). An exchange that grows out of something *you* said
+  ("Aiva, ask your sister…") is spoken aloud — you're in the room and asked for it. Exchanges they
+  start themselves are **private** by default: text only, no ElevenLabs spend, visible on the
+  dashboard's **Conversations** tab. Press Ctrl+Alt+P or ask either of them ("let me hear you two" /
+  `set_sister_talk audible`) to hear those too. When you're away they may start a short private chat
+  of their own a few times a day (`AIVA_SISTER_CHATS_PER_DAY`).
+- **Saga has no written personality.** Her floor is only the shared rules (how to talk, understanding
+  you, tools, safety) plus "you're new, nobody wrote who you are". Her temperament forms from her own
+  diary over days and weeks, her tastes from experience. The dashboard's Saga tab shows "who she is
+  so far".
+- **They know each other from experience.** Each keeps a kin store of what she has actually seen the
+  other do, make, read or say, and answers "what can Saga do?" from it without asking an LLM —
+  honestly saying "I haven't seen her do that" when she hasn't.
+- **Background news waits its turn.** A sister's own news (a reading session she finished, a task
+  that completed, a thought of her own) never lands mid-conversation: the house holds it until
+  nobody — you or a sister — has spoken for `AIVA_ANNOUNCE_QUIET_S` seconds (default 45), and a
+  running sister exchange keeps going in the meantime. Replies to you always come first.
+- **Calling each other.** Only Aiva starts by default. Say "Aiva, call your sister" (or "get Saga")
+  and she boots Saga in her own console window — the same as running `start_saga.bat` — and Saga
+  says hello when she's in, about half a minute later. Works the other way round too. Stopping a
+  sister is still yours: close her window or Ctrl+Alt+X.
+
+Saga's look is a retexture of the same Live2D mesh: put her textures in
+`aiva/assets/avatar/ariu/saga.2048/` (same file names as `ariu.2048/`) and run
+`python -m modules.avatar_renderer --write-model saga` to generate `saga.model3.json`. Her voice is
+an ElevenLabs voice id in `.env` (`SAGA_ELEVENLABS_VOICE_ID`; `python tools\pick_voice.py --verify
+<id>` checks it, `--set <id>` writes it). Her wake word is `aiva/models/hey_saga.onnx`, trained with
+the recipe in `training/` (`hey_saga.yaml`).
+
+All the knobs live in the `SAGA_*` and `AIVA_SISTER_*` / `AIVA_HOUSE_*` blocks of `.env`.
 
 ## Memory
 
@@ -184,14 +245,27 @@ to the renderer for lip-sync.
 
 - Model assets live in `aiva/assets/avatar/ariu/` (licensed content, not committed).
 - The renderer outlives Aiva's self-restarts; a rebooted Aiva adopts it via
-  `aiva/avatar_state.json`. It dies with her on a real quit.
+  `aiva/avatar_state.json`. It dies with her on a real quit. If the renderer she
+  finds speaks an older protocol (an update changed it), she retires it and starts
+  a fresh one — her placement carries over.
 - Demo it standalone (never starts Aiva): `cd aiva && python -m modules.avatar_renderer --demo`
+- **What she's doing shows.** While she reads, she pulls up a book: her hands come
+  up, the book rises into them, her head tips down and her eyes run along the lines;
+  a finished section turns the page, and she looks up from it while she talks. While
+  she's on a task (or a Claude Code job of her own runs), a small work panel floats up
+  beside her head — the task, the step it's on, a progress bar; amber and pulsing
+  while it waits on you, a check or a cross when it ends — and she glances at it.
+  Either way her eyes stay open even while the house sleeps. Preview it without a
+  sister: `cd aiva && python -m modules.avatar_renderer --instance demo --demo-activity`
+  (add `--windowed` for a small movable window).
 - Lip-sync is two-channel: loudness drives how open the mouth is, spectral
   brightness drives its shape (`ParamMouthForm`) — dark vowels (oo/oh) purse it,
   bright ones (ee/eh) widen it, so she appears to mouth phoneme shapes.
 - Env knobs (all optional): `AIVA_AVATAR_MODEL`, `AIVA_LIPSYNC_GAIN` (default 2.5),
   `AIVA_LIPSYNC_FORM` (viseme shape strength, default 1.0; 0 disables),
-  `AIVA_AVATAR_FPS` (32), `AIVA_AVATAR_SWAY` (1).
+  `AIVA_AVATAR_FPS` (32), `AIVA_AVATAR_SWAY` (1), `AIVA_READING_PROP` (the book
+  image), `AIVA_AVATAR_TASK_LABEL` (1; 0 hides the task's words on the work panel,
+  e.g. while streaming).
 
 ## Shell command safety
 
@@ -202,9 +276,17 @@ executed command is printed to the console.
 ## Project layout
 
 ```
-aiva/main.py                 pipeline assembly + hotkeys
-aiva/launcher.py             boots OBS (optional), then Aiva
-aiva/modules/persona.py      Aiva's personality / system prompt
+aiva/house.py                the house: mic, STT, wake words, hotkeys, the floor, house.db
+aiva/main.py                 one sister's process (--character aiva|saga): her LLM, voice, core
+aiva/launcher.py             boots OBS (optional), ensures the house, then one sister
+aiva/modules/house_*.py      protocol, server, client, floor, memory, stage (house side)
+aiva/modules/house_link.py   sister-side processors (HouseLink, PrivacyGate, MindWatcher, ...)
+aiva/modules/sisters.py      pure turn-taking decisions (addressee, sister rounds, floor)
+aiva/modules/character.py    Character.from_env(slug): what makes a sister herself
+aiva/modules/kin.py          what she knows about her sister, from experience
+aiva/modules/ear.py          MicController / ActivityWatcher / UserAudioTap (house)
+aiva/modules/wake.py         openWakeWord listener, N models
+aiva/modules/persona.py      personality floors / system prompt
 aiva/modules/tools.py        native LLM tool schemas + handlers
 aiva/modules/avatar_renderer.py  her body: Live2D renderer process (live2d-py + PyQt5)
 aiva/modules/avatar.py       Aiva-side client (spawn/adopt renderer, lip-sync feed)

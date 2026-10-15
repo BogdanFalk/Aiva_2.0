@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from modules.limits import ServiceLimits
+from modules.limits import SERVICE_LABEL, ServiceLimits
 
 
 class FakeNotifier:
@@ -86,3 +86,19 @@ async def test_paused_reasons_and_usage_report():
     rep = {r["service"]: r for r in L.usage_report()}
     assert rep["tavily"]["paused"] is True and rep["tavily"]["cap"] == 1
     assert rep["tts"]["paused"] is False and rep["tts"]["used"] == 0
+
+
+async def test_per_character_tts_counters_count_silently_and_stay_off_the_cap_report():
+    """tts.<slug> has no cap of its own: it is counted (for the dashboard's per-sister chars), never
+    alerts or pauses, and — like every uncapped service today — is absent from usage_report. The
+    capped, alerting aggregate is still plain 'tts'."""
+    L, n, _ = make({"tavily": 5, "tts": 1000})
+    await L.record("tts.saga", 250)
+    r = await L.record("tts.saga", 250)
+    assert r == {"used": 500, "cap": 0, "paused": False}
+    assert L.usage("tts.saga") == 500 and L.usage("tts.aiva") == 0
+    assert L.allow("tts.saga") is True and L.is_paused("tts.saga") is False and n.msgs == []
+    assert "tts.saga" not in {row["service"] for row in L.usage_report()}
+    assert SERVICE_LABEL["tts.aiva"] == "Voice — Aiva" and SERVICE_LABEL["tts.saga"] == "Voice — Saga"
+    await L.record("tts", 1000)                   # the aggregate still alerts at its cap
+    assert any("cap" in m.lower() for m in n.msgs) and L.is_paused("tts") is False

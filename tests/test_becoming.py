@@ -225,10 +225,13 @@ def test_prompt_blocks_caps_and_drop_order():
                                "voice": [{"kind": "phrase", "note": f"phrase {i}", "example": "eg",
                                           "strength": 0.7, "_vec": vec_of(f"phrase {i}")}]})
     blocks = b.prompt_blocks(library_lines=["Reading X: 1 of 5"])
-    assert len(blocks["traits"]) <= 6 and len(blocks.get("voice", [])) <= 2 and len(blocks["lessons"]) <= 5
-    # tiny budget drops voice first, keeps traits
+    assert len(blocks["traits"]) <= 6 and len(blocks.get("voice", [])) <= 2 and len(blocks["lessons"]) <= 3
+    # a squeezed budget drops the maxims first and keeps the voice she picked up
+    mid = b.prompt_blocks(library_lines=["Reading X"], budget_chars=350)
+    assert "lessons" not in mid and "voice" in mid and "traits" in mid
+    # a tiny budget keeps only who she's become
     tight = b.prompt_blocks(library_lines=["Reading X"], budget_chars=200)
-    assert "traits" in tight and "voice" not in tight
+    assert "traits" in tight and "voice" not in tight and "lessons" not in tight
 
 
 # --- lessons applied hook --------------------------------------------------------------
@@ -273,3 +276,17 @@ async def test_session_end_share_stays_quiet_when_user_away():
                    user_present=lambda within=180: False, refresh_prompt=lambda: None)
     await b.on_session_end(book(), {"struck": "x", "to_section": 2}, notes=[{"section_idx": 0}])
     assert not said and quieted
+
+
+def test_permission_ignores_facts_about_her_sister():
+    """A remembered fact that AIVA may read whenever she likes is about the sister, not standing
+    permission for this character (category 'sister' is filtered)."""
+    b, conn = make()
+    conn.execute("INSERT INTO facts (category, fact, created_ts, last_confirmed_ts) VALUES "
+                 "('sister', 'Aiva may read on her own whenever it is quiet, without asking first.', '', '')")
+    conn.commit()
+    assert b.permission() == "ask"
+    conn.execute("INSERT INTO facts (category, fact, created_ts, last_confirmed_ts) VALUES "
+                 "('instruction', 'You can read whenever you like on your own.', '', '')")
+    conn.commit()
+    assert b.permission() == "always"                 # her own permission still works

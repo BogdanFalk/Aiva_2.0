@@ -8,6 +8,13 @@ Three SQLite tables:
                   generated lazily at the NEXT boot from the saved transcript
                   (so hard kills still get a recap) and injected as episodic
                   memory — things that already happened and are not news
+- store_meta:     which character this db belongs to and which embedding model
+                  its vectors came from (guards against booting on the wrong
+                  db or silently poisoning recall after a provider swap)
+
+One db per character: Aiva's memory.db is untouched; a sister gets her own file
+with the same schema. The prompts are templates rendered with her name once in
+__init__; the unsuffixed constants are Aiva's rendering for anything importing them.
 
 The system prompt is never stored here (the old design re-inserted it on
 every launch and polluted the history).
@@ -20,44 +27,95 @@ import sqlite3
 import time
 from datetime import datetime
 
+from modules.persona import named
 from modules.utilities import llm_kwargs
 
-FACT_EXTRACTION_PROMPT = """You maintain the long-term memory of Aiva, a voice assistant. \
+# {name}: the character; {name_variants}: how STT mishears HER name (a quoted list);
+# {sister_note}: " (her sister is Saga)" or empty.
+FACT_EXTRACTION_PROMPT_T = """You maintain the long-term memory of {name}, a voice assistant. \
 From the conversation transcript, extract durable things worth remembering across sessions:
 - Facts about the user: their name, pets, family, work, projects, recurring habits.
-- STANDING INSTRUCTIONS the user gives about how Aiva should behave or do things — phrases like \
+- STANDING INSTRUCTIONS the user gives about how {name} should behave or do things — phrases like \
 "always...", "from now on...", "whenever you...", "I prefer...", "don't ever...". These are \
-important: capture them as durable instructions even though they are about Aiva's behavior.
+important: capture them as durable instructions even though they are about {name}'s behavior.
 
 The transcript comes from speech recognition and CONTAINS MISHEARINGS. Be skeptical: \
 only extract the user's name if they explicitly introduced themselves ("my name is..."); \
-words resembling "Aiva", "Eva", "Ava" or "Geneva" are almost always the assistant's own \
+words resembling {name_variants} are almost always the assistant's own \
 name misheard, never the user's. When in doubt about a fact, extract nothing — but DO err \
 toward capturing explicit standing instructions.
 
-Do NOT extract: one-off requests ("open notepad now"), small talk, trivia about Aiva, \
+Bracketed lines of the form [<Sister> said to him: "..."] or [<Sister> said to you: "..."] were \
+spoken by {name}'s sister{sister_note}, another AI living on this PC — never by the user. Never \
+attribute her words to the user. Durable things about HER (what she can do, has done or made, what \
+she likes) go in category "sister"; skip her small talk.
+
+Do NOT extract: one-off requests ("open notepad now"), small talk, trivia about {name}, \
 items already in the known list, or REWORDINGS of known items — a fact is a duplicate if it \
 means the same thing even in different words, so extract nothing for it (unless the \
 conversation contradicts a known item — then restate the corrected version).
 
-Reply with JSON: {"facts": [{"category": "instruction|preference|person|work|project|other", "fact": "..."}]}
+Reply with JSON: {"facts": [{"category": "instruction|preference|person|work|project|sister|other", "fact": "..."}]}
 Each fact must be one short self-contained sentence, phrased so it makes sense with no context \
 (e.g. "Always bring terminals to the front after opening them."). Reply {"facts": []} if nothing qualifies."""
 
 
-RECAP_PROMPT = """You write short first-person session notes for Aiva, a voice assistant, \
+RECAP_PROMPT_T = """You write short first-person session notes for {name}, a voice assistant, \
 so that after a restart she knows what already happened. From the transcript, write 1-4 short \
-past-tense sentences ("I ...") covering only NOTABLE events: things Aiva did or told the user \
+past-tense sentences ("I ...") covering only NOTABLE events: things {name} did or told the user \
 (adopted or named something, finished or promised a task, changed a setting), decisions made \
 together, and anything left unfinished. Skip greetings, small talk and routine commands \
-(opening terminals, moving windows) unless they were the point of the session. The transcript \
+(opening terminals, moving windows) unless they were the point of the session. Bracketed lines \
+like [<Sister> said to him: "..."] are {name}'s sister speaking, not the user. The transcript \
 comes from speech recognition and may contain mishearings. Reply with just the notes as plain \
 text, no preamble — or the single word SKIP if nothing notable happened."""
 
 
+# today's hand-picked list for Aiva when no variants are given
+AIVA_MISHEARD = '"Aiva", "Eva", "Ava" or "Geneva"'
+
+FACT_EXTRACTION_PROMPT = named(FACT_EXTRACTION_PROMPT_T, "Aiva", name_variants=AIVA_MISHEARD, sister_note="")
+RECAP_PROMPT = named(RECAP_PROMPT_T, "Aiva")
+
+
+def misheard_list(name, variants=()):
+    """'"Saga", "Sagah", "Sarga" or "Sega"' — how STT mishears her name, for the fact prompt.
+    Single-word variants only (multi-word ones like "hey va" aren't names), title-cased, capped."""
+    seen, out = {name.lower()}, [f'"{name}"']
+    for v in variants:
+        v = (v or "").strip().lower()
+        if not v or " " in v or v in seen:
+            continue
+        seen.add(v)
+        out.append(f'"{v.title()}"')
+        if len(out) >= 8:
+            break
+    if len(out) == 1:
+        return out[0]
+    return ", ".join(out[:-1]) + " or " + out[-1]
+
+
 class Memory:
-    def __init__(self, db_file="memory.db"):
-        self.db_file = os.path.abspath(db_file)
+    def __init__(self, db_file="memory.db", *, backup_stem=None, name="Aiva", name_variants=(),
+                 sisters=()):
+        self.name = name
+        self.sisters = tuple(sisters)
+        self.name_variants = tuple(name_variants)
+        variants_text = (misheard_list(name, self.name_variants) if self.name_variants
+                         else (AIVA_MISHEARD if name == "Aiva" else f'"{name}"'))
+        sister_note = f" (her sister is {' and '.join(self.sisters)})" if self.sisters else ""
+        self.fact_prompt = named(FACT_EXTRACTION_PROMPT_T, name, name_variants=variants_text,
+                                 sister_note=sister_note)
+        self.recap_prompt = named(RECAP_PROMPT_T, name)
+
+        self.in_memory = db_file == ":memory:"
+        self.db_file = db_file if self.in_memory else os.path.abspath(db_file)
+        if backup_stem:
+            self.backup_stem = backup_stem
+        elif self.in_memory:
+            self.backup_stem = "memory"
+        else:
+            self.backup_stem = os.path.splitext(os.path.basename(self.db_file))[0] or "memory"
         self.conn = sqlite3.connect(self.db_file)
         # WAL so the live dashboard (a separate read-only process) never blocks her writes,
         # nor she it; synchronous=NORMAL is the safe, faster pairing under WAL.
@@ -85,31 +143,40 @@ class Memory:
                 recap TEXT NOT NULL,
                 created_ts DATETIME NOT NULL
             )""")
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_ts TEXT NOT NULL
+            )""")
         self.conn.commit()
         self._saved_count = 0
         # her whole self now lives in this file (memory, becoming, mood, diary, desires) —
         # keep spaced, rotating snapshots so a bad write or migration can't erase who she is
-        self._backup_on_boot()
+        if not self.in_memory:
+            self._backup_on_boot()
 
     def _backup_on_boot(self, keep=10, min_gap_h=6):
         """VACUUM INTO a timestamped copy under aiva/backups/. Skips if a recent backup already
         covers this boot (so frequent restart-42s don't churn), keeps the newest `keep`. Backup
-        must never take her down — every failure is swallowed."""
+        must never take her down — every failure is swallowed. Snapshots are named by
+        `backup_stem` so two characters' backups never prune each other."""
         try:
             if not os.path.exists(self.db_file) or os.path.getsize(self.db_file) < 4096:
                 return  # nothing worth keeping yet
             bdir = os.path.join(os.path.dirname(self.db_file), "backups")
             os.makedirs(bdir, exist_ok=True)
-            existing = sorted(glob.glob(os.path.join(bdir, "memory-*.db")))
+            pattern = os.path.join(bdir, f"{self.backup_stem}-*.db")
+            existing = sorted(glob.glob(pattern))
             if existing:
                 newest = max(os.path.getmtime(p) for p in existing)
                 if (time.time() - newest) < min_gap_h * 3600:
                     return  # a recent snapshot already covers this
-            target = os.path.join(bdir, f"memory-{datetime.now():%Y%m%d-%H%M%S}.db")
+            target = os.path.join(bdir, f"{self.backup_stem}-{datetime.now():%Y%m%d-%H%M%S}.db")
             if os.path.exists(target):
                 return
             self.conn.execute("VACUUM INTO ?", (target,))
-            for old in sorted(glob.glob(os.path.join(bdir, "memory-*.db")))[:-keep]:
+            for old in sorted(glob.glob(pattern))[:-keep]:
                 try:
                     os.remove(old)
                 except OSError:
@@ -119,12 +186,83 @@ class Memory:
         except (sqlite3.Error, OSError) as e:
             print(f"Memory: backup skipped ({e})")
 
+    # --- store meta: whose db is this, which embeddings are in it -------------------
+
+    def meta_get(self, key, default=None):
+        row = self.conn.execute("SELECT value FROM store_meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def meta_set(self, key, value):
+        self.conn.execute(
+            "INSERT INTO store_meta (key, value, updated_ts) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_ts = excluded.updated_ts",
+            (key, str(value), datetime.now().isoformat()))
+        self.conn.commit()
+
+    def check_identity(self, slug):
+        """Stamp a fresh db with its character; refuse to run a character on another one's db."""
+        current = self.meta_get("character")
+        if current is None:
+            self.meta_set("character", slug)
+            return slug
+        if current != slug:
+            raise RuntimeError(
+                f"Memory: {self.db_file} belongs to '{current}', not '{slug}' — refusing to boot "
+                f"{slug} on another character's db (point her at her own db file)")
+        return current
+
+    def _embedding_tables(self):
+        """Every table with a nullable `embedding` column — discovered live from sqlite_master, so
+        stores created later on this same connection are covered too. NOT NULL embedding columns
+        (speaker voiceprints, which carry their own model_id) are left alone."""
+        names = [r[0] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()]
+        out = []
+        for t in names:
+            for _cid, col, _type, notnull, _dflt, _pk in self.conn.execute(
+                    f'PRAGMA table_info("{t}")').fetchall():
+                if col == "embedding" and not notnull:
+                    out.append(t)
+                    break
+        return out
+
+    def check_embeddings(self, model, dim):
+        """Stamp the embedding model/dim this db's vectors came from. On a mismatch (a provider or
+        model swap) NULL every stored embedding — every store falls back to lexical matching and
+        re-embeds as it goes — and re-stamp. Returns the tables cleared ([] when nothing changed)."""
+        dim_s = "" if dim is None else str(int(dim))
+        cur_model, cur_dim = self.meta_get("embed_model"), self.meta_get("embed_dim")
+        if cur_model is None and cur_dim is None:
+            self.meta_set("embed_model", model)
+            self.meta_set("embed_dim", dim_s)
+            return []
+        if cur_model == model and (cur_dim or "") == dim_s:
+            return []
+        tables = self._embedding_tables()
+        print(f"Memory: EMBEDDING MODEL CHANGED ({cur_model}/{cur_dim or '?'} -> {model}/{dim_s or '?'}) "
+              f"— clearing stored vectors in {len(tables)} tables ({', '.join(tables)}); recall falls "
+              f"back to lexical matching until they are re-embedded")
+        for t in tables:
+            self.conn.execute(f'UPDATE "{t}" SET embedding = NULL')
+        self.meta_set("embed_model", model)
+        self.meta_set("embed_dim", dim_s)
+        return tables
+
+    def is_fresh(self):
+        """True until she has ever talked or learned anything (no messages, no facts) — her first
+        meeting with whoever boots her."""
+        has_msg = self.conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
+        has_fact = self.conn.execute("SELECT 1 FROM facts LIMIT 1").fetchone()
+        return has_msg is None and has_fact is None
+
     # --- facts ---------------------------------------------------------------
 
     def load_facts(self, limit=200):
-        """All known facts, oldest first (capped — hobby scale)."""
+        """All known facts about the user, oldest first (capped — hobby scale). What she knows
+        about her SISTER (category 'sister') is rendered by the kin block, not here."""
         rows = self.conn.execute(
-            "SELECT fact FROM facts ORDER BY created_ts LIMIT ?", (limit,)
+            "SELECT fact FROM facts WHERE COALESCE(category, '') != 'sister' "
+            "ORDER BY created_ts LIMIT ?", (limit,)
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -160,6 +298,21 @@ class Memory:
         self.upsert_facts([{"category": category, "fact": fact}])
         return 0 if existed else 1  # 1 only when genuinely new
 
+    # what she may retire on her own evidence: things she noted about projects and the PC — never
+    # his instructions, preferences or what she knows about people (those only change by his word)
+    RETIRABLE = ("project", "work", "other", "learned")
+
+    def retire_fact(self, fact):
+        """Delete ONE fact, matched exactly, that she has proved wrong (task second thoughts:
+        "the witness lives in the Miso renderer" vs a report showing there is no such thing).
+        Returns its category when retired, else None. The boot backups keep the old row."""
+        row = self.conn.execute("SELECT category FROM facts WHERE fact = ?", ((fact or "").strip(),)).fetchone()
+        if row is None or (row[0] or "other") not in self.RETIRABLE:
+            return None
+        self.conn.execute("DELETE FROM facts WHERE fact = ?", (fact.strip(),))
+        self.conn.commit()
+        return row[0] or "other"
+
     async def extract_facts(self, openai_client, model, messages):
         """One cheap LLM call: transcript -> new durable facts -> upsert."""
         transcript = "\n".join(
@@ -175,7 +328,7 @@ class Memory:
             model=model,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": FACT_EXTRACTION_PROMPT},
+                {"role": "system", "content": self.fact_prompt},
                 {"role": "user",
                  "content": f"Known facts:\n{known_block}\n\nConversation:\n{transcript[-8000:]}"},
             ],
@@ -212,7 +365,7 @@ class Memory:
             response = await openai_client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": RECAP_PROMPT},
+                    {"role": "system", "content": self.recap_prompt},
                     {"role": "user", "content": transcript[-8000:]},
                 ],
                 **llm_kwargs(model, max_tokens=200, temperature=0.0),

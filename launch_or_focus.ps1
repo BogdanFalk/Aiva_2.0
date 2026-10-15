@@ -1,11 +1,22 @@
-$batPath = "C:\Users\Extre\Desktop\Work\UnseenMedia\Aiva_2.0\start_aiva.bat"
-# Matches the console title set by start_aiva.bat ("title AivaConsole").
-# Deliberately NOT "Aiva": on Win11 PowerShell runs inside Windows Terminal,
-# whose window takes the SHORTCUT'S name as its title — a shortcut named
-# "Aiva" would make this script find and focus its own host window instead
-# of launching. Never name the shortcut "AivaConsole".
-$windowTitleMatch = "AivaConsole"
-$log = "$env:TEMP\aiva_launcher.log"
+# Launch-or-focus one sister's console: -Character aiva (default) | saga. Each sister's .bat brings
+# the house up with her when it isn't running, so there is no separate house shortcut.
+#   powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File launch_or_focus.ps1 -Character saga
+param([string]$Character = "aiva")
+
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$targets = @{
+    aiva = @{ bat = "start_aiva.bat"; title = "AivaConsole" }
+    saga = @{ bat = "start_saga.bat"; title = "SagaConsole" }
+}
+$key = $Character.ToLower()
+if (-not $targets.ContainsKey($key)) { $key = "aiva" }
+$batPath = Join-Path $root $targets[$key].bat
+# Matches the console title set by the .bat ("title AivaConsole" / "SagaConsole").
+# Deliberately NOT the bare name: on Win11 PowerShell runs inside Windows Terminal, whose window
+# takes the SHORTCUT'S name as its title — a shortcut named "Aiva" would make this script find and
+# focus its own host window instead of launching. Never name a shortcut "AivaConsole"/"SagaConsole".
+$windowTitleMatch = $targets[$key].title
+$log = "$env:TEMP\${key}_launcher.log"
 "[$(Get-Date -Format 'HH:mm:ss')] launcher started (PID $PID)" | Out-File $log -Encoding utf8
 
 Add-Type @"

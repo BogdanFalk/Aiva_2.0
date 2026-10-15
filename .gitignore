@@ -180,13 +180,19 @@ vosk-model-en-us-0.42-gigaspeech
 *.wav
 pyvts_token.txt
 training/
-tools/
+tools/*.exe
 overlay_state.json
 avatar_state.json
 cat_state.json
 inner_state.json
 aiva/assets/
 .restart_marker
+
+# per-sister runtime state (Saga's body/mood files) + the shared house process
+aiva/*_avatar_state.json
+aiva/*_inner_state.json
+aiva/house_state.json
+aiva/house.db*
 
 # task-runner semi-live check scratch db
 tests/e2e_memory.db
@@ -200,3 +206,6 @@ tests/e2e_reading.db
 
 # Speaker-recognition model (28MB, user-downloaded; wake-word hey_aiva.onnx stays tracked)
 aiva/models/campplus*.onnx
+
+# her coding-job records (Claude Code results + raw JSON)
+aiva/logs/coding/

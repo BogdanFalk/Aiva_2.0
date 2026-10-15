@@ -58,3 +58,23 @@ def test_for_tool_leads_with_match_and_lists_all():
     assert out["matched"]["name"] == "find_and_keep"
     assert len(out["capabilities"]) == len(cap.CAPABILITIES)
     assert cap.for_tool(None)["matched"] is None
+
+
+def test_exclude_removes_a_power_from_every_consumer():
+    ex = ("tend_cat",)                                         # a sister without the cat
+    names = [c.name for c in cap.active(ex)]
+    assert "tend_cat" not in names and len(names) == len(cap.CAPABILITIES) - 1
+    assert cap.match("feed the cat").name == "tend_cat"
+    assert cap.match("feed the cat", exclude=ex) is None       # nothing else claims it
+    assert len(cap.prompt_lines(exclude=ex)) == len(cap.CAPABILITIES) - 1
+    assert not any("cat" in ln for ln in cap.prompt_lines(exclude=ex))
+    out = cap.for_tool("check on the cat", exclude=ex)
+    assert out["matched"] is None and len(out["capabilities"]) == len(cap.CAPABILITIES) - 1
+    assert cap.prompt_lines() == cap.prompt_lines(exclude=())  # default unchanged
+
+
+def test_know_sister_is_auto_and_only_recalls():
+    m = cap.match("I wonder if my sister has ever done that")
+    assert m is not None and m.name == "know_sister" and m.tier == "auto"
+    assert set(m.tools) == {"recall_about_sister"} and set(m.tools) <= cap.SAFE_TOOLS
+    assert cap.tier("know_sister") == "auto"

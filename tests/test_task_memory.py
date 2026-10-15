@@ -287,3 +287,91 @@ def test_reconcile_stale(mem):
     assert mem.get_task("t-1")["status"] == "interrupted"
     assert mem.get_task("t-1")["result_summary"] == "lost at shutdown"
     assert mem.reconcile_stale() == []
+
+
+def test_json_mode_prompts_mention_json():
+    # OpenAI 400s a response_format=json_object call whose messages never say "json" — every
+    # Claude Code grade silently came back "partial" because of it (2026-09-19)
+    from modules import task_memory as tmod
+    for prompt in (tmod.GRADE_PROMPT, tmod.FEEDBACK_EXTRACTION_PROMPT):
+        assert "json" in prompt.lower()
+
+
+# --- reading an agent's report (2026-10-13) -------------------------------------------------
+
+def test_agent_question_is_only_the_closing_line():
+    assert tm.agent_question("Found it.\n\n**Which one did you mean?**\n") == "Which one did you mean?"
+    assert tm.agent_question("Why does it fail? Because X.\nFixed it.") is None
+    assert tm.agent_question("") is None
+
+
+def test_clip_middle_keeps_the_finding_and_the_question():
+    text = "There is no Miso renderer. " + "x" * 5000 + " Which one did you mean?"
+    out = tm.clip_middle(text, 600)
+    assert out.startswith("There is no Miso renderer.") and out.endswith("Which one did you mean?")
+    assert len(out) < 700 and tm.clip_middle("short", 600) == "short"
+
+
+def test_found_in_is_verbatim_but_forgiving_about_markup():
+    report = "Miso is the name of Aiva's **desktop pixel cat**.\nNo commit mentions it."
+    assert tm.found_in("Miso is the name of Aiva's desktop pixel cat", report)
+    assert tm.found_in("no COMMIT  mentions it", report)
+    assert not tm.found_in("Miso is a renderer", report)
+    assert not tm.found_in("cat", report)                        # too short to prove anything
+    assert not tm.found_in(None, report)
+
+
+def test_parse_porcelain():
+    out = " M aiva/main.py\n?? aiva/house.py\nR  old.py -> new.py\n?? \"sp ace.py\"\n"
+    assert tm.parse_porcelain(out) == {"aiva/main.py", "aiva/house.py", "new.py", "sp ace.py"}
+
+
+async def test_grade_judges_the_agents_own_changes_not_his_uncommitted_work(mem):
+    # his 39 modified files used to be the agent's "large unrelated diff"; now only its delta counts
+    asked = await mem.grade_agent_work(None, "m", "g", {
+        "job_status": "done", "mode": "execute", "diff_checked": True, "diff_stat": " 39 files changed",
+        "agent_changed": [], "result_text": "There's no Miso renderer.\n\nWhich one did you mean?"})
+    assert asked["grade"] == "partial" and asked["blocked"] == "question"   # right to stop: not "bad"
+    assert asked["question"] == "Which one did you mean?"
+    idle = await mem.grade_agent_work(None, "m", "g", {"job_status": "done", "mode": "execute",
+                                                        "diff_checked": True, "agent_changed": [],
+                                                        "result_text": "Done."})
+    assert idle["grade"] == "bad" and idle["blocked"] is None
+    look = await mem.grade_agent_work(None, "m", "g", {"job_status": "done", "mode": "inspect",
+                                                        "diff_checked": True, "agent_changed": [],
+                                                        "result_text": "Here's the map. Want me to go ahead?"})
+    assert look["grade"] == "good" and look["blocked"] is None   # a polite closer on a look-only step
+    did = await mem.grade_agent_work(None, "m", "g", {"job_status": "done", "mode": "execute",
+                                                       "diff_checked": True, "agent_changed": ["a.py"],
+                                                       "result_text": "Added it. Want tests too?"})
+    assert did["grade"] == "good" and did["blocked"] is None
+
+
+def test_self_lessons_come_after_his_corrections(mem):
+    his = finished(mem, "restart obs")
+    mem.add_feedback(his, "don't restart OBS while streaming", True)
+    mine = finished(mem, "rebuild the miso renderer")
+    mem.update_task(mine, self_lesson="Check a component exists before asking an agent to rebuild it.")
+    lines = mem.load_lessons()
+    assert "don't restart OBS" in lines[0]
+    assert "(you found this yourself): Check a component exists" in lines[1]
+
+
+def test_self_lesson_column_is_added_to_an_old_db():
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, created_ts TEXT NOT NULL, updated_ts TEXT NOT NULL, "
+                 "finished_ts TEXT, goal_text TEXT NOT NULL, goal_normalized TEXT NOT NULL, "
+                 "details TEXT NOT NULL DEFAULT '', family TEXT, approach TEXT, "
+                 "status TEXT NOT NULL DEFAULT 'planning', outcome TEXT, plan_json TEXT NOT NULL DEFAULT '[]', "
+                 "log_json TEXT NOT NULL DEFAULT '[]', pending_json TEXT, result_summary TEXT, duration_s REAL, "
+                 "delegated_to TEXT NOT NULL DEFAULT 'none', agent_grade TEXT, agent_grade_reason TEXT, "
+                 "user_feedback TEXT, corrected INTEGER NOT NULL DEFAULT 0, flow_id INTEGER, embedding BLOB, "
+                 "llm_calls INTEGER NOT NULL DEFAULT 0, tool_calls INTEGER NOT NULL DEFAULT 0, "
+                 "cost_usd REAL NOT NULL DEFAULT 0)")
+    conn.execute("INSERT INTO tasks (id, created_ts, updated_ts, goal_text, goal_normalized) "
+                 "VALUES ('t-old', '2026-10-01', '2026-10-01', 'old task', 'old task')")
+    mem = TaskMemory(conn)
+    assert mem.get_task("t-old")["self_lesson"] is None
+    mem.update_task("t-old", self_lesson="learned")
+    assert mem.get_task("t-old")["self_lesson"] == "learned"

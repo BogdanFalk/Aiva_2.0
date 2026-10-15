@@ -6,4 +6,4 @@ Semantic versioning: MAJOR.MINOR.PATCH.
 - MAJOR: reserved for 1.0 (the current selfhood/speaker/affect wave validated in real use) and beyond.
 """
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
