@@ -9,6 +9,14 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **The house hears with Deepgram Flux, which also decides when you've finished talking.**
+  `AIVA_STT=flux` (the new default; `nova` keeps the old nova-3 + Silero VAD + smart-turn path) —
+  Flux's end-of-turn (`AIVA_FLUX_EOT_THRESHOLD`, default 0.7; `AIVA_FLUX_EOT_TIMEOUT_MS`, default
+  5000) drives the stage aggregator's turn, with no local VAD or turn model. Plain end-of-turn only,
+  no speculative replies. Because Flux has no free keepalive, the house closes its socket after
+  `AIVA_FLUX_IDLE_CLOSE_S` (3 s) without audio while asleep and reopens it when the wake word
+  fires (`modules/house_stt.py`). An empty final transcript no longer counts as "no name" during a
+  wake check.
 - **Her body shows what she's doing: a book while she reads, a work panel while she works.** The
   reading book-prop never really worked: it sat at a fixed spot on the monitor, much bigger than her,
   on Aiva's side of the screen even for Saga, and in a separate window that could fall behind her.

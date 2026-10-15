@@ -4,8 +4,8 @@
 
 Owns: the microphone (LocalAudioTransport input only), MicController (self-hearing gate, F9 deafen,
 ambient sleep), Deepgram STT, the two-stage wake word (openWakeWord models for every sister → a
-verified transcript must contain a name), the ONE turn detector (Silero VAD + smart-turn in the
-stage aggregator), the Floor (who speaks, who overhears, private sister talk, caps), the socket
+verified transcript must contain a name), the ONE turn detector in the stage aggregator (AIVA_STT:
+`flux` = Deepgram Flux's own end-of-turn, no local VAD; `nova` = nova-3 + Silero VAD + smart-turn), the Floor (who speaks, who overhears, private sister talk, caps), the socket
 server the sisters connect to, global hotkeys, the conversation log in aiva/house.db, and the
 read-only dashboard. It computes the speaker voiceprint and vocal affect ONCE per user turn and
 forwards them so each sister matches against her own roster.
@@ -61,22 +61,12 @@ def _install_log_throttle():
 
 _install_log_throttle()
 
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineParams
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import (
-    LLMUserAggregator,
-    LLMUserAggregatorParams,
-)
-from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregator
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
-from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
-    TurnAnalyzerUserTurnStopStrategy,
-)
-from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 from modules import character, house_proto as proto, metrics as _metrics
@@ -86,6 +76,7 @@ from modules.house_floor import Floor
 from modules.house_memory import HouseMemory
 from modules.house_server import HouseServer
 from modules.house_stage import FloorUserMuteStrategy, StageRouter
+from modules.house_stt import STTConfig, build_stt, stage_params
 from modules.housedb import house_db_path, migrate_limits_from, open_house_db
 from modules.limits import ServiceLimits
 from modules.metrics import Metrics
@@ -253,10 +244,12 @@ async def main():
         if ns.name not in stt_keyterms:
             stt_keyterms.append(ns.name)
     stt_keyterms += [k.strip() for k in os.getenv("AIVA_STT_KEYTERMS", "").split(",") if k.strip()]
-    stt = DeepgramSTTService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        settings=DeepgramSTTService.Settings(model="nova-3", language="en-US", smart_format=True,
-                                             profanity_filter=False, keyterm=stt_keyterms))
+    stt_cfg = STTConfig.from_env()
+    if stt_cfg.note:
+        print(f"WARNING: {stt_cfg.note}")
+    print(f"STT: {stt_cfg.describe()}")
+    log_event(f"stt: {stt_cfg.describe()}")
+    stt = build_stt(stt_cfg, api_key=os.getenv("DEEPGRAM_API_KEY"), keyterms=stt_keyterms, log=log_event)
 
     # --- the floor ---------------------------------------------------------------------------------
     floor = Floor(memory, private=os.getenv("AIVA_SISTER_TALK", "private").strip().lower() != "audible",
@@ -327,15 +320,21 @@ async def main():
     def _name_check(text):
         return bool(which_names(text, namesets))
 
+    if stt_cfg.flux:
+        # Flux sends no interim transcripts (ActivityWatcher pokes the idle timer on those with
+        # nova) — its in-turn events keep the house awake while he talks instead
+        @stt.event_handler("on_start_of_turn")
+        async def _flux_turn_start(_svc, _transcript):
+            mic.poke()
+
+        @stt.event_handler("on_update")
+        async def _flux_update(_svc, _transcript):
+            mic.poke()
+
     stage_ctx = LLMContext(messages=[{"role": "system", "content": "stage"}])
     user_aggregator = LLMUserAggregator(
         stage_ctx,
-        params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
-            user_mute_strategies=[FloorUserMuteStrategy(lambda: floor.gate_active)],
-            user_turn_strategies=UserTurnStrategies(
-                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())]),
-        ),
+        params=stage_params(stt_cfg, [FloorUserMuteStrategy(lambda: floor.gate_active)]),
     )
     router = StageRouter(stage_ctx, on_user_turn=_on_user_turn, on_user_speaking=floor.note_user_speaking,
                          log=log_event)

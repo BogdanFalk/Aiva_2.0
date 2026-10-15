@@ -305,6 +305,10 @@ class ActivityWatcher(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame) and not (frame.text or "").strip():
+            # Flux closes a turn of pure noise with an EMPTY final transcript: that is not words,
+            # so it must neither reject a wake being verified nor start the latency clock
+            return
         if self._mic.verifying:
             if isinstance(frame, TranscriptionFrame):
                 if self._name_check(frame.text):
