@@ -86,7 +86,8 @@ from modules.limits import ServiceLimits
 from modules.metrics import Metrics
 from modules.notify import Notifier, NotifyConfig
 from modules.paralinguistics import AffectConfig, VocalAffect
-from modules.sisters import ExchangeConfig, namesets_from_env, which_names
+from modules.sisters import (ARBITER_DECISION_INSTRUCTIONS, ExchangeConfig, decision_reply,
+                             namesets_from_env, which_names)
 from modules.speakers import SpeakerConfig, SpeakerMemory, SpeakerRecognizer
 from modules.tasks import openai_llm_call
 from modules.wake import WakeWordListener, model_name
@@ -233,8 +234,31 @@ async def main():
         task_model = os.getenv("AIVA_TASK_MODEL", os.getenv("AIVA_LLM_MODEL", "gpt-5.6-luna"))
         _arbiter_call = openai_llm_call(oai, task_model, label="arbiter")
 
-        async def arbiter(messages):
+        async def llm_arbiter(messages):
             return await _arbiter_call(messages, json_mode=True, max_tokens=60, temperature=0.0)
+
+        arbiter = llm_arbiter
+        if (os.getenv("AIVA_ARBITER") or "decisions").strip().lower() == "decisions":
+            # OpenAI Decisions (gpt-6-luna): one typed choice over the same context the LLM arbiter
+            # reads, with a probability per sister; any failure falls back to the LLM call
+            from pipecat.classifiers.base_classifier import ChoiceQuestion
+            from pipecat.classifiers.openai.decisions.classifier import OpenAIDecisionsClassifier
+            # 2.5 s: the floor gives the whole arbiter 4 s, which must leave room for the fallback
+            _decider = OpenAIDecisionsClassifier(api_key=os.getenv("OPENAI_API_KEY"), timeout=2.5)
+            _question = {"to": ChoiceQuestion(instructions=ARBITER_DECISION_INSTRUCTIONS,
+                                              options={s: None for s in character.KNOWN})}
+
+            async def arbiter(messages):
+                t0 = time.perf_counter()
+                try:
+                    res = (await _decider.choice(messages[-1]["content"], _question))["to"]
+                except Exception as e:
+                    log_event(f"arbiter (decisions) failed, asking the model instead: {e!r}")
+                    return await llm_arbiter(messages)
+                _metrics.record("llm", "arbiter_decisions", (time.perf_counter() - t0) * 1000.0)
+                log_event("arbiter (decisions): " + ", ".join(
+                    f"{k}={v:.2f}" for k, v in sorted(res.probabilities.items())))
+                return decision_reply(res.choice, res.probabilities)
 
     # --- the ear ----------------------------------------------------------------------------------
     mic_index = device_index("AIVA_INPUT_DEVICE_INDEX", "AIVA_INPUT_DEVICE_NAME", False)

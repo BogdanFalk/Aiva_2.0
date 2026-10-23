@@ -157,6 +157,7 @@ SETTINGS = (
     S("AIVA_IDLE_TIMEOUT", "Wake & sleep", "float", 20.0, "Seconds of silence before the house goes back to sleep in ambient mode.", "house", min=5.0, max=3600.0),
 
     # --- Floor & sisters -------------------------------------------------------------------------
+    S("AIVA_ARBITER", "Floor & sisters", "choice", "decisions", "How the house guesses which sister you meant when you say no name: decisions is OpenAI's fast typed-answer API (falls back to the model on failure); llm asks the task model.", "house", choices=("decisions", "llm")),
     S("AIVA_SISTER_TALK", "Floor & sisters", "choice", "private", "Whether the sisters' lines to each other are spoken aloud or text-only.", "all", choices=("private", "audible")),
     S("AIVA_HOTKEY_SISTER_TALK", "Floor & sisters", "str", "ctrl+alt+p", "Global hotkey that flips sister talk between private and audible.", "house"),
     S("AIVA_SISTER_MAX_ROUNDS", "Floor & sisters", "int", 3, "Sister replies in one exchange before it has to stop.", "house", min=0, max=20),

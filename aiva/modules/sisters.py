@@ -595,6 +595,22 @@ ARBITER_PROMPT = (
     '{"to": "<one of the slugs listed>", "why": "a few words"}'
 )
 
+# the same routing rules, for OpenAI Decisions (house.py, AIVA_ARBITER=decisions): it gets the
+# arbiter_messages() user content as its state and answers with a probability per sister
+ARBITER_DECISION_INSTRUCTIONS = (
+    "One spoken line from him reached two sisters who live on the same PC. He did not say a name. "
+    "Which sister did he most likely mean: the one he was already talking to if the line continues "
+    "that thread, the one whose last words it answers, or the one whose abilities fit what he wants? "
+    "On a toss-up, the sister who spoke last. The line comes from speech recognition and may be "
+    "garbled.")
+
+
+def decision_reply(choice, probabilities=None) -> str:
+    """A Decisions answer in the arbiter's own reply shape, so `parse_arbiter_reply` reads it."""
+    p = (probabilities or {}).get(choice)
+    why = f"decisions p={p:.2f}" if isinstance(p, (int, float)) else "decisions"
+    return json.dumps({"to": str(choice), "why": why})
+
 
 def _tail_line(row) -> str:
     if isinstance(row, str):

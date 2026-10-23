@@ -288,6 +288,15 @@ def test_parse_arbiter_reply_accepts_reply_objects():
     assert parse_arbiter_reply(R()).addressee == "saga"
 
 
+def test_a_decisions_answer_reads_like_an_arbiter_reply():
+    from modules.sisters import ARBITER_DECISION_INSTRUCTIONS, decision_reply
+    d = parse_arbiter_reply(decision_reply("saga", {"aiva": 0.12, "saga": 0.88}))
+    assert d.addressee == "saga" and d.reason == "arbiter:decisions p=0.88"
+    assert parse_arbiter_reply(decision_reply("aiva")).reason == "arbiter:decisions"
+    assert parse_arbiter_reply(decision_reply("nobody", {"nobody": 1.0})) is None   # floor falls back
+    assert "JSON" not in ARBITER_DECISION_INSTRUCTIONS                              # a typed answer
+
+
 def test_private_exchange_may_continue_while_the_house_sleeps():
     from modules.sisters import AddressState, ExchangeConfig, ExchangeState, Turn, exchange_should_continue
     cfg = ExchangeConfig(quiet_hours=(0, 0))

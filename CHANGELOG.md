@@ -9,6 +9,14 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **The house guesses who you meant with OpenAI Decisions.** When you say no name and both sisters
+  are there, the arbiter now asks the Decisions API (gpt-6-luna, out of beta 2026-10-22) one typed
+  question, "which sister did he mean?", over the same context the model arbiter read
+  (`ARBITER_DECISION_INSTRUCTIONS`), and gets a probability per sister; the answer goes through
+  `decision_reply` into the reply shape the floor already parses. About half a second in a live
+  check, priced at input tokens only. Every decision is logged with its probabilities
+  (`arbiter (decisions): aiva=0.12, saga=0.88`), the raw material for tuning; any failure falls back
+  to the model call. `AIVA_ARBITER=decisions|llm`.
 - **Her voice can laugh, sigh and whisper (Eleven v4 Turbo).** A sister whose ElevenLabs model is
   eleven_v4* or eleven_v3 now speaks through `ElevenLabsDialogueTTSService` (Text-to-Dialogue,
   checked live with both voices on 2026-10-24) and gets a VOICE CUES prompt block: `[laughs]`,
