@@ -783,7 +783,7 @@ def dispatch(window, msg):
 
     # what her body is doing (avatar_activity): fire-and-forget, a reply only if asked for.
     # `activity` carries the whole state — reading {title} | null, working {label, detail, step,
-    # total, state} | null; `cue` is a one-shot beat (page | done | failed).
+    # total, state} | null; `cue` is a one-shot beat (page | done | failed | nod).
     if cmd == "activity":
         state = {k: msg.get(k) for k in ("reading", "working") if k in msg}
         if state:
@@ -791,7 +791,7 @@ def dispatch(window, msg):
         return {"id": msg_id, "ok": bool(state)} if msg_id is not None else None
     if cmd == "cue":
         kind = msg.get("kind")
-        ok = kind in ("page", "done", "failed")
+        ok = kind in ("page", "done", "failed", "nod")
         if ok:
             window.cmd_q.put(("cue", kind))
         return {"id": msg_id, "ok": ok} if msg_id is not None else None
@@ -1323,6 +1323,8 @@ def build_window_class():
             and eyes. Runs after Update() and before Draw() like every other param here."""
             rig = self.activity.rig
             if rig is None:
+                for pid, value in pose.params.items():     # a nod needs no rig
+                    self.model.SetParameterValue(pid, value)
                 return
             if pose.hold > 0:
                 self.model.SetParameterValue(

@@ -9,6 +9,18 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **She says "mhm" while you talk.** With Flux, the house watches his partial transcript and, at a
+  clause-complete pause while he is still talking, sends ONE sister a new `backchannel` message
+  (`modules/backchannel.py`): the sister his words name, else the sticky addressee, else the last
+  one who spoke to him. She plays a short clip ("mhm", "yeah", "right"…) in her own voice,
+  synthesised once through her ElevenLabs voice into `aiva/voice_cache/<slug>/`, and her avatar
+  nods (renderer protocol 8, `cue nod`). It is not a floor grant: no LLM, nothing in her context,
+  no `speaking`/`said` back. Skipped while asleep, muted, during an unverified wake, while a sister
+  holds the floor, after a finished question or a dangling word ("and the, um…"), within the
+  cooldown, or when Flux is about to end his turn. The clip isn't gated (that would cut his words);
+  its echo is removed from his final transcript instead (`strip_echo`). `AIVA_BACKCHANNEL` (needs
+  `AIVA_STT=flux`), `AIVA_BACKCHANNEL_COOLDOWN_S` / `_PROBABILITY` / `_MIN_SPEECH_S` / `_PAUSE_S` /
+  `_VOLUME`. Tests: `tests/test_backchannel.py`.
 - **She hears how you sound, not just how loud.** Per user turn the house sends the turn's audio
   (last 15 s, as WAV) to an OpenAI audio model (`AIVA_EMOTION_MODEL`, default `gpt-audio-mini`) in
   the background and gets back a few emotions from a fixed vocabulary (fatigue, amusement,

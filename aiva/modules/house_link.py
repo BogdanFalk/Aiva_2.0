@@ -22,6 +22,11 @@ microphone, driven by turns the house grants her over the socket.
 - `UsageTracker` sums LLM tokens and TTS characters from MetricsFrames and hands TTS characters to
   a callback (ServiceLimits.record) so ElevenLabs spend is finally counted per character.
 - `LipSyncTap` is unchanged from the single-process days.
+- `BackchannelPlayer` (right after her TTS, before LipSyncTap) plays a cached "mhm" clip the house
+  asked for (`proto.Backchannel`) as TTSStarted(append_to_context=False) / TTSAudioRaw / TTSStopped:
+  the transport paces it, LipSyncTap moves her mouth, the assistant aggregator opens no turn. Its
+  Bot*SpeakingFrames are swallowed by `HouseLink` (`expect_backchannel`), so the house never sees a
+  `speaking on/off` for it — a backchannel is not a turn.
 
 Everything reporting to the house is fire-and-forget through callables injected by main.py; a
 missing house never stalls the pipeline.
@@ -49,6 +54,8 @@ from pipecat.frames.frames import (
     TextFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
 )
 from pipecat.metrics.metrics import LLMUsageMetricsData, TTSUsageMetricsData
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -80,6 +87,17 @@ class HouseLink(FrameProcessor):
         # transport reports audio end last), so speaking reports fall back to the last granted id
         self.last_turn_id = None
         self._speaking_turn_id = None
+        self._bc_expect_until = 0.0         # a backchannel clip was just pushed: its speaking is ours
+        self._bc_speaking = False           # inside a backchannel's speaking stretch (unreported)
+
+    def expect_backchannel(self, secs=3.0):
+        """The next BotStarted/StoppedSpeaking pair is a backchannel clip, not her turn — don't
+        report it to the house."""
+        self._bc_expect_until = time.monotonic() + secs
+
+    @property
+    def backchanneling(self) -> bool:
+        return self._bc_speaking or time.monotonic() < self._bc_expect_until
 
     # --- driven by the house -----------------------------------------------------------------
 
@@ -134,6 +152,11 @@ class HouseLink(FrameProcessor):
         from pipecat.frames.frames import StartFrame
         if isinstance(frame, StartFrame):
             self._started = True
+        elif isinstance(frame, BotStartedSpeakingFrame) and time.monotonic() < self._bc_expect_until:
+            self._bc_expect_until = 0.0
+            self._bc_speaking = True
+        elif isinstance(frame, BotStoppedSpeakingFrame) and self._bc_speaking:
+            self._bc_speaking = False
         elif isinstance(frame, BotStartedSpeakingFrame):
             turn_id = self.current_turn.get("id") if self.current_turn else self.last_turn_id
             self._speaking_turn_id = turn_id
@@ -379,4 +402,39 @@ class LipSyncTap(FrameProcessor):
             self._avatar.send_speech("stop")
         elif isinstance(frame, InterruptionFrame):
             self._avatar.send_speech("interrupt")
+        await self.push_frame(frame, direction)
+
+
+class BackchannelPlayer(FrameProcessor):
+    """Plays a short cached clip into her output (see the module doc). Sits right after her TTS so
+    it never touches the TTS service's state; everything else passes through untouched."""
+
+    def __init__(self, link: "HouseLink", log=print):
+        super().__init__()
+        self._link = link
+        self._log = log
+        self._started = False
+
+    @property
+    def ready(self) -> bool:
+        return self._started
+
+    async def play(self, pcm: bytes, sample_rate: int) -> bool:
+        """Push one clip downstream. False (nothing played) before the pipeline starts, while she
+        holds a turn, or for an empty clip."""
+        if not self._started or not pcm or self._link.current_turn is not None:
+            return False
+        self._link.expect_backchannel()
+        # append_to_context=False: the assistant aggregator must not open an assistant turn for it
+        await self.push_frame(TTSStartedFrame(append_to_context=False), FrameDirection.DOWNSTREAM)
+        await self.push_frame(TTSAudioRawFrame(audio=pcm, sample_rate=int(sample_rate), num_channels=1),
+                              FrameDirection.DOWNSTREAM)
+        await self.push_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
+        return True
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        from pipecat.frames.frames import StartFrame
+        if isinstance(frame, StartFrame):
+            self._started = True
         await self.push_frame(frame, direction)

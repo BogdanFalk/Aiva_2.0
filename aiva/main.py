@@ -5,8 +5,9 @@
 She has no microphone. The HOUSE (house.py) owns the one ear, Deepgram, the wake words and the
 floor; it grants her turns over a loopback socket and she plays her own voice:
 
-  HouseLink → OpenAI LLM (native tools, streamed) → PrivacyGate → ElevenLabs TTS → LipSyncTap
-  → MindWatcher → UsageTracker → speaker (audio out) → assistant aggregator
+  HouseLink → OpenAI LLM (native tools, streamed) → PrivacyGate → ElevenLabs TTS
+  → BackchannelPlayer → LipSyncTap → MindWatcher → UsageTracker → speaker (audio out)
+  → assistant aggregator
 
 Everything that is HERS lives in her own db (memory.db / saga.db), her own state files, her own
 space folder and her own avatar renderer process, so she can be started and stopped on her own.
@@ -72,13 +73,14 @@ from modules import capabilities, character, computer, file_operations, house_pr
 from modules import metrics as _metrics
 from modules.avatar import AvatarClient
 from modules.avatar_ipc import read_state as _read_avatar_state
+from modules.backchannel import PHRASES as BACKCHANNEL_PHRASES, BackchannelConfig, BackchannelVoice, ClipCache
 from modules.becoming import Becoming, SELF_FORMING_BASELINE_DESC
 from modules.cat import CAT_NAME_RECOVERY_NOTE, CAT_NAMING_NOTE, DesktopCat
 from modules.ear import MicController, device_index, list_audio_devices  # noqa: F401 (tests import MicController)
 from modules.emotion_hearing import EmotionConfig, describe as describe_emotion, emotion_note
 from modules.eventlog import EventLog
 from modules.house_client import HouseClient
-from modules.house_link import HouseLink, LipSyncTap, MindWatcher, PrivacyGate, UsageTracker
+from modules.house_link import BackchannelPlayer, HouseLink, LipSyncTap, MindWatcher, PrivacyGate, UsageTracker
 from modules.housedb import house_db_path, open_house_db
 from modules.inner import ExperienceBus, InnerBrain, InnerConfig, InnerState, SelfEngine
 from modules.limits import ServiceLimits
@@ -860,9 +862,30 @@ async def main():
 
     usage = UsageTracker(on_tts=_record_tts)
 
+    # backchannels: a cached "mhm" in her own voice + a nod when the house hears him pause
+    bc_cfg = BackchannelConfig.from_env()
+    bc_player = BackchannelPlayer(link, log=log_event) if (bc_cfg.enabled and tts is not None) else None
+    bc_cache = None
+    if bc_player is not None:
+        bc_cache = ClipCache(ch.slug, ch.voice_id, ch.tts_model, os.getenv("ELEVENLABS_API_KEY"), log=log_event)
+
+        async def _cache_backchannels():
+            """Synthesise the missing clips once, in the background — never blocks her boot."""
+            try:
+                made = await asyncio.to_thread(bc_cache.ensure)
+                if made:
+                    await _record_tts(sum(len(BACKCHANNEL_PHRASES[c]) for c in made))
+            except Exception as e:
+                log_event(f"backchannel clip cache failed: {e!r}")
+
+        asyncio.create_task(_cache_backchannels())
+    bc_voice = BackchannelVoice(
+        bc_cfg, cache=bc_cache, player=bc_player, avatar=avatar, log=log_event,
+        busy=lambda: link.current_turn is not None or speaking_state["on"] or link.backchanneling)
+
     stages = [link, llm, privacy]
     if tts is not None:
-        stages += [tts, LipSyncTap(avatar)]
+        stages += [tts] + ([bc_player] if bc_player is not None else []) + [LipSyncTap(avatar)]
     stages += [watcher, usage, transport.output(), assistant_aggregator]
     pipeline = Pipeline(stages)
 
@@ -1111,6 +1134,10 @@ async def main():
             note = emotion_note(affect.get("emotion"), emotion_cfg.note_confidence, late=True)
             late_emotion["note"], late_emotion["at"] = note, time.monotonic()
             log_event(f"late affect for turn {msg.turn}: {describe_emotion(affect.get('emotion')) or '-'}")
+        elif isinstance(msg, proto.Backchannel):
+            # not a turn: no LLM, no context, no speaking/said back — a sound and a nod
+            did = await bc_voice.handle(msg.clip, voice=msg.voice)
+            log_event(f"backchannel {msg.clip}: {did}")
         elif isinstance(msg, proto.Interrupt):
             log_event("interrupted by the house")
             await link.interrupt()

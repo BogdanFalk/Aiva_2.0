@@ -11,6 +11,8 @@ read-only dashboard. It computes the speaker voiceprint and vocal affect ONCE pe
 forwards them so each sister matches against her own roster. It also starts the emotion-hearing
 side-call (`modules/emotion_hearing.py`, an OpenAI audio model) per turn in the background: a
 reading that is in before the turn goes out rides on it, a later one is sent as `proto.Affect`.
+With Flux it also hears his mid-turn pauses and sends ONE sister a `proto.Backchannel` (a soft
+"mhm" + nod, `modules/backchannel.py`) — never a floor grant, never her LLM.
 
 It has no LLM of its own except the arbiter and emotion side-calls, and never speaks. Sisters come and go; the house stays up. Exit code 42 = restart (start_house.bat).
 
@@ -70,7 +72,7 @@ from pipecat.processors.aggregators.llm_response_universal import LLMUserAggrega
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 from pipecat.workers.runner import WorkerRunner
 
-from modules import character, house_proto as proto, metrics as _metrics
+from modules import backchannel, character, house_proto as proto, metrics as _metrics
 from modules.emotion_hearing import EmotionConfig, EmotionHearing, describe as describe_emotion, merge_affect
 from modules.ear import ActivityWatcher, MicController, UserAudioTap, device_index, list_audio_devices, native_rate
 from modules.eventlog import EventLog
@@ -326,6 +328,13 @@ async def main():
                 pass
 
     async def _on_user_turn(text):
+        if bc is not None:
+            clean = bc.strip_final(text, time.monotonic())
+            if clean != text:
+                log_event(f"backchannel: her echo removed from his line: {text!r} -> {clean!r}")
+                text = clean
+                if not text.strip():
+                    return
         hint = mic.wake_hint
         mic.wake_hint = None
         vec, affect, emo = pending["vec"], pending["affect"], pending["emo"]
@@ -368,6 +377,18 @@ async def main():
         @stt.event_handler("on_update")
         async def _flux_update(_svc, _transcript):
             mic.poke()
+
+    # backchannels: Flux's in-turn TurnInfo stream is the pause signal (no second VAD)
+    bc_cfg = backchannel.BackchannelConfig.from_env()
+    bc = None
+    if bc_cfg.enabled and stt_cfg.flux:
+        bc = backchannel.Backchanneler(bc_cfg, eot_ceiling=max(0.3, stt_cfg.eot_threshold - 0.1), log=log_event)
+        stt.on_turn_info = lambda event, transcript, eot: bc.observe(event, transcript, eot, time.monotonic())
+        print(f"Backchannels ON (cooldown {bc_cfg.cooldown_s:g}s, p={bc_cfg.probability:g}, "
+              f"after {bc_cfg.min_speech_s:g}s of him, pause {bc_cfg.pause_s:g}s)")
+    else:
+        print("Backchannels OFF" + ("" if bc_cfg.enabled else " (AIVA_BACKCHANNEL=0)")
+              + ("" if stt_cfg.flux else " (needs AIVA_STT=flux)"))
 
     stage_ctx = LLMContext(messages=[{"role": "system", "content": "stage"}])
     user_aggregator = LLMUserAggregator(
@@ -590,6 +611,52 @@ async def main():
 
     state_task = asyncio.create_task(state_watch())
 
+    def _bc_target():
+        addr = floor.address_state
+        age = (time.time() - addr.last_addressee_at) if addr.last_addressee_at else None
+        return backchannel.target(which_names(bc.partial, namesets), addr.last_addressee, age,
+                                  addr.last_speaker, floor.present, floor.cfg.sticky_s)
+
+    def _bc_blocked():
+        if not mic.visibly_awake:
+            return "asleep" if not mic.awake else "wake not verified"
+        if mic.muted:
+            return "mic muted"
+        if floor.busy or floor.gate_active or floor.holder:
+            return "floor busy"
+        if _bc_target() is None:
+            return "no single listener"
+        return None
+
+    async def backchannel_watch():
+        """Judge each of his pauses once (Backchanneler.tick); fire to ONE sister."""
+        while True:
+            await asyncio.sleep(0.1)
+            try:
+                res = bc.tick(time.monotonic(), _bc_blocked)
+                if res is None:
+                    continue
+                clip, reason, info = res
+                tail = " ".join(backchannel.words(bc.partial)[-6:])
+                stats = f"pause={info['pause_s']}s speech={info['speech_s']}s eot={info['eot']} words={info['words']}"
+                if clip is None:
+                    if reason not in ("no pause yet", "too early in his turn"):
+                        log_event(f"backchannel: skip ({reason}) {stats} …{tail!r}")
+                    continue
+                slug = _bc_target()
+                voice = not floor.is_muted(slug)
+                if slug and server.send_to(slug, proto.Backchannel(clip=clip, voice=voice)):
+                    log_event(f"backchannel: {slug} {clip}{'' if voice else ' (nod only)'} {stats} …{tail!r}")
+                else:
+                    bc.undo_fire()
+                    log_event(f"backchannel: {slug or 'nobody'} unreachable — not sent")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_event(f"backchannel watch error: {e!r}")
+
+    bc_task = asyncio.create_task(backchannel_watch()) if bc is not None else None
+
     async def housekeeping():
         while True:
             await asyncio.sleep(3600)
@@ -607,7 +674,7 @@ async def main():
     try:
         await runner.run()
     finally:
-        for t in (watcher, idle_task, state_task, keep_task):
+        for t in (watcher, idle_task, state_task, keep_task, bc_task):
             if t:
                 t.cancel()
         if wake_listener:

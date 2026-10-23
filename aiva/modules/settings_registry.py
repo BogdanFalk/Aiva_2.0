@@ -128,6 +128,12 @@ SETTINGS = (
     S("AIVA_EMOTION_TIMEOUT_S", "Voice & audio", "float", 10.0, "Give up on an emotion reading after this many seconds.", "house", min=1.0, max=120.0),
     S("AIVA_EMOTION_NOTE_CONFIDENCE", "Voice & audio", "float", 0.7, "How sure the emotion model must be before she gets a note about how you sound.", "sisters", min=0.0, max=1.0),
     S("AIVA_EMOTION_NOTE_TTL_S", "Voice & audio", "float", 120.0, "A reading that arrives after her reply is noted on your next turn only if it's this fresh, in seconds.", "sisters", min=0.0, max=3600.0),
+    S("AIVA_BACKCHANNEL", "Voice & audio", "bool", True, "Let the sister you're talking to say a soft mhm, yeah or right in her own voice, with a small nod, at your pauses while you're still talking (needs AIVA_STT=flux).", "all"),
+    S("AIVA_BACKCHANNEL_COOLDOWN_S", "Voice & audio", "float", 6.0, "At least this many seconds between two backchannels.", "house", min=0.0, max=600.0),
+    S("AIVA_BACKCHANNEL_PROBABILITY", "Voice & audio", "float", 0.5, "Chance of a backchannel at a pause that qualifies (she skips some, like people do).", "house", min=0.0, max=1.0),
+    S("AIVA_BACKCHANNEL_MIN_SPEECH_S", "Voice & audio", "float", 3.0, "No backchannel until you've been talking this many seconds in a turn.", "house", min=0.0, max=60.0),
+    S("AIVA_BACKCHANNEL_PAUSE_S", "Voice & audio", "float", 0.6, "How long your words must stop coming in before it counts as a pause, in seconds.", "house", min=0.2, max=5.0),
+    S("AIVA_BACKCHANNEL_VOLUME", "Voice & audio", "float", 0.6, "How loud her backchannel sounds are compared with her normal voice.", "sisters", min=0.0, max=1.5),
 
     # --- Avatar & body ---------------------------------------------------------------------------
     S("AIVA_AVATAR_MODEL", "Avatar & body", "str", None, "Aiva's Live2D model file.", "aiva", restart=("aiva",) + _BODY, default_note="assets/avatar/ariu/ariu.model3.json"),

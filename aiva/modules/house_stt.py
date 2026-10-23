@@ -5,7 +5,8 @@
                    threshold), so the stage aggregator runs NO local VAD and NO smart-turn model:
                    `ExternalUserTurnStrategies` resolve Flux's proposed start/stop into the turn.
                    One final `TranscriptionFrame` per turn, at EndOfTurn (no interims — the
-                   in-turn `Update` events are only used to keep the idle timer awake). Plain
+                   in-turn `Update` events keep the idle timer awake and, via `on_turn_info`,
+                   feed the backchannel pause tracker in `modules/backchannel.py`). Plain
                    end-of-turn only; eager end-of-turn (speculative replies) stays OFF.
   nova           — the previous path: Deepgram nova-3 (`/v1/listen`) streaming interims + finals,
                    Silero VAD + LocalSmartTurnAnalyzerV3 in the stage aggregator.
@@ -111,6 +112,18 @@ def _flux_class():
             self._conn_lock = asyncio.Lock()
             self._reopen_after = 0.0
             self._idle_closed = False
+            # (event, transcript, end_of_turn_confidence) for every TurnInfo — the backchannel
+            # tracker's pause signal. Sync, cheap, never allowed to break the receive loop.
+            self.on_turn_info = None
+
+        async def _handle_turn_info(self, data):
+            await super()._handle_turn_info(data)
+            hook = self.on_turn_info
+            if hook is not None:
+                try:
+                    hook(data.get("event"), data.get("transcript") or "", data.get("end_of_turn_confidence"))
+                except Exception as e:
+                    self._house_log(f"stt: turn-info hook failed: {e!r}")
 
         def _classify_error(self, exception):
             # Upstream calls an unconfirmed connection INVALID_REQUEST (permanent → the ear goes

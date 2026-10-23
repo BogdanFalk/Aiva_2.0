@@ -304,7 +304,8 @@ class AvatarClient:
 
     def send_cue(self, kind):
         """A one-shot beat for her body: 'page' (a section read — she turns the page),
-        'done' / 'failed' (a task ended — her panel shows a check or a cross). Fire-and-forget."""
+        'done' / 'failed' (a task ended — her panel shows a check or a cross), 'nod' (a
+        backchannel while he talks; renderer protocol >= 8). Fire-and-forget."""
         if not self._writer:
             return
         try:

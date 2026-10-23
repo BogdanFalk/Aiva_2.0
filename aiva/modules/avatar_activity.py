@@ -13,7 +13,9 @@ chest. With the controller part hidden the hands are empty and the book is drawn
 `shoubing` CROSSFADES the two arm sets (it doesn't swing an arm), so the pull-up is staged: the
 arms crossfade fast, the book rises into them from below and fades in, then her head tips down
 and her eyes start running along lines. Putting it away runs the other way, hands last. While she
-talks she looks up from the book; a finished section turns the page (`cue("page")`).
+talks she looks up from the book; a finished section turns the page (`cue("page")`). A
+backchannel ("mhm" while he talks) is a small nod (`cue("nod")`): her head dips `NOD_DEG` and comes
+back over `NOD_SECS`, on top of whatever else she's doing, with or without a rig.
 
 Offsets were measured on offscreen renders of ariu.moc3 (2026-10-13): the controller sits at
 (-0.007, 0.463), 0.225 wide, just under her chin, so the book is centred a little lower to keep
@@ -57,6 +59,8 @@ PANEL_IN_SECS = 0.45
 PANEL_OUT_SECS = 0.35
 RESULT_SECS = 2.4       # a finished task's ✓ / ✗ stays up this long
 PAGE_SECS = 0.5
+NOD_SECS = 0.65         # a backchannel nod: down and back up
+NOD_DEG = 9.0           # how far her head dips (ParamAngleY, degrees)
 LINE_SECS = 2.2         # one line of reading: a slow sweep, then a quick return
 LINES_PER_PAGE = 6
 CODE_LINE_SECS = 0.5    # the panel types one line this often
@@ -190,6 +194,7 @@ class ActivityDirector:
         self._progress = 0.0
         self._gaze = 0.0             # smoothed eyes-to-panel, -1..1 (sign = side)
         self._turn = 0.0             # smoothed head turn, degrees
+        self._nod_t0 = -1e9          # last backchannel nod
 
     # -- inputs (renderer's GL thread, from the IPC queue) --
     def set_state(self, **kw):
@@ -205,7 +210,11 @@ class ActivityDirector:
                 self._last_working = self.working
 
     def cue(self, kind, now):
-        """One-shot beats: 'page' (a section finished) or 'done'/'failed' (a task ended)."""
+        """One-shot beats: 'page' (a section finished), 'done'/'failed' (a task ended), 'nod'
+        (a backchannel while he talks)."""
+        if kind == "nod":
+            self._nod_t0 = now
+            return True
         if kind == "page":
             if self.reading:
                 self._page_t0 = now
@@ -243,7 +252,10 @@ class ActivityDirector:
         self._u = clamp01(self._u + (dt / 0.25 if now < self._talk_until else -dt / 0.6))
         u = smoothstep(self._u)
 
+        nod = self.nod_offset(now)
         if rig is None:
+            if nod:
+                pose.params["ParamAngleY"] = nod
             return pose
 
         gaze_x = gaze_y = 0.0
@@ -303,7 +315,16 @@ class ActivityDirector:
             if head_down > 0:
                 p["ParamAngleY"] = -12.0 * head_down - (6.0 if sleeping else 0.0) * head_down
             pose.head_turn = self._turn
+        if nod:
+            pose.params["ParamAngleY"] = pose.params.get("ParamAngleY", 0.0) + nod
         return pose
+
+    def nod_offset(self, now) -> float:
+        """Degrees added to ParamAngleY by a backchannel nod (0 when none): a smooth dip."""
+        t = (now - self._nod_t0) / NOD_SECS
+        if not 0.0 <= t < 1.0:
+            return 0.0
+        return -NOD_DEG * math.sin(math.pi * t) ** 2
 
     def _scan(self, now):
         """Eyes running along lines of text: a slow left-to-right sweep, a quick return, one line

@@ -27,7 +27,8 @@ from ctypes import wintypes
 # shrunk to stay to her upper left near a screen edge.
 # 7 (2026-10-14): her refinements: a 12.5% bigger sky (taller where a screen edge holds it narrow),
 # a livelier drift, stars a touch less uniform, softer outermost lines.
-PROTOCOL_VERSION = 7
+# 8 (2026-10-16): `cue nod` — a small nod with a backchannel (mhm while he talks).
+PROTOCOL_VERSION = 8
 
 _AIVA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

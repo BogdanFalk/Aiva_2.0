@@ -216,6 +216,17 @@ class Affect(Msg):
 
 
 @dataclass(kw_only=True)
+class Backchannel(Msg):
+    """A soft "mhm" at a pause while he is still talking (`modules/backchannel.py`). Sent to ONE
+    sister; NOT a floor grant — it never runs her LLM, adds nothing to her context and gets no
+    `speaking`/`said` back. `clip` is a `backchannel.PHRASES` id; `voice` False → nod only (her
+    voice is muted in the house)."""
+    T: ClassVar[str] = "backchannel"
+    clip: str
+    voice: bool = True
+
+
+@dataclass(kw_only=True)
 class Interrupt(Msg):
     T: ClassVar[str] = "interrupt"
     turn: int
@@ -251,7 +262,7 @@ class Shutdown(Msg):
 
 CHARACTER_TO_HOUSE = (Hello, Response, Tool, Speaking, Said, Event, WantFloor, Mode, Sleep, Wake, Restart, Control,
                       Say, Pong, Bye)
-HOUSE_TO_CHARACTER = (Welcome, Reject, TurnMsg, Overheard, Affect, Interrupt, Mode, State, Absent, Ping, Shutdown)
+HOUSE_TO_CHARACTER = (Welcome, Reject, TurnMsg, Overheard, Affect, Backchannel, Interrupt, Mode, State, Absent, Ping, Shutdown)
 MESSAGE_TYPES = {cls.T: cls for cls in CHARACTER_TO_HOUSE + HOUSE_TO_CHARACTER}
 
 
