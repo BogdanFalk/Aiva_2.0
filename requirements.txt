@@ -1,5 +1,5 @@
 # Streaming voice pipeline (STT/LLM/TTS services, VAD, smart-turn, local audio)
-pipecat-ai[deepgram,elevenlabs,openai,silero,local,local-smart-turn]==1.12.0
+pipecat-ai[deepgram,elevenlabs,openai,silero,local,local-smart-turn]==1.13.0
 PyAudio==0.2.14
 
 # Aiva modules

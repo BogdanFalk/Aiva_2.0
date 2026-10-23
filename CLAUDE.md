@@ -2,7 +2,7 @@
 
 ## What this is
 
-Aiva is a voice AI companion for Windows: a fully streaming voice pipeline (pipecat 1.12.0) with her own Live2D desktop avatar (self-rendered — no VTube Studio), native LLM tool calling, long-term memory, an ambient wake-word mode, and a desktop pixel cat. Everything she says is spoken aloud via TTS — tool results, prompts, and persona text must be short spoken prose (no markdown, emojis, or lists).
+Aiva is a voice AI companion for Windows: a fully streaming voice pipeline (pipecat 1.13.0) with her own Live2D desktop avatar (self-rendered — no VTube Studio), native LLM tool calling, long-term memory, an ambient wake-word mode, and a desktop pixel cat. Everything she says is spoken aloud via TTS — tool results, prompts, and persona text must be short spoken prose (no markdown, emojis, or lists).
 
 Since 2026-09-11 she has a sister, **Saga**, and they live in a **house**: three processes. `aiva/house.py` (always on) owns the one microphone, Deepgram, the wake words, the global hotkeys, the **floor** (who speaks, who overhears, private sister talk) and the conversation log (`aiva/house.db`); each sister is her own process (`main.py --character aiva|saga`) with her own db, state files, space, avatar renderer and voice, connected to the house over loopback TCP (`modules/house_proto.py`). A sister never runs her LLM without a floor grant.
 
@@ -73,6 +73,6 @@ sister:  HouseLink → OpenAI LLM (native tools) → PrivacyGate → ElevenLabs 
 - **The Bash tool un-escapes `\\n` in heredocs** on this machine — write patch scripts to files (Write tool) instead of inline `python - <<EOF` when the code contains backslash escapes.
 - **`run_in_parallel` on the LLM service must stay True** (its default) — sequential mode defeats pipecat's call-grouping and makes her speak once per tool call instead of once per turn.
 - **Elevation**: OBS carries a RUNASADMIN compat flag on this machine; it is launched with `__COMPAT_LAYER=RunAsInvoker` (see `launcher.py`) or launch fails with WinError 740.
-- **pipecat is pinned at 1.12.0** (main is still on 1.5.0); most online docs/examples cover the older 0.0.x API and don't match (imports, aggregators, worker/runner model differ). Trust the patterns in `main.py` over external examples.
+- **pipecat is pinned at 1.13.0** (main is still on 1.5.0); most online docs/examples cover the older 0.0.x API and don't match (imports, aggregators, worker/runner model differ). Trust the patterns in `main.py` over external examples.
 - **File operations are fenced to the user profile** (`file_operations.resolve_path` rejects anything outside the home directory) — preserve that guardrail.
 - Console prints can contain CJK (avatar hotkey names); stdout is reconfigured to UTF-8 with `errors="replace"` so a print can never crash a handler.
