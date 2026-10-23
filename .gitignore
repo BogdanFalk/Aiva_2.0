@@ -212,3 +212,6 @@ aiva/logs/coding/
 
 # backchannel clips synthesised in her own voice (modules/backchannel.py)
 aiva/voice_cache/
+
+# the dashboard settings writer keeps the previous .env here (it holds the keys)
+.env.bak

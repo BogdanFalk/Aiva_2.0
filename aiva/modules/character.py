@@ -4,7 +4,7 @@ her persona floor, and every path/voice/config that must differ between two core
 Stdlib-only (persona is stdlib-only too), so the dashboard and tests import it without pipecat.
 `Character.from_env("aiva")` reproduces today's unprefixed env keys and defaults EXACTLY (Aiva's
 files never move); `from_env("saga")` reads `SAGA_*`, falling back to shared keys only for the TTS
-model and the library. main.py loads .env — this module just reads os.environ.
+model, the LLM model and the library. main.py loads .env — this module just reads os.environ.
 """
 
 import os
@@ -42,6 +42,7 @@ _MOOD_DEFAULTS = {"base_valence": 0.15, "base_arousal": 0.50, "base_social": 0.1
                   "salience_floor": 0.15, "gain": 0.60, "material_eps": 0.05}
 _NEUTRAL_MOOD_BASE = {"base_valence": 0.0, "base_arousal": 0.5, "base_social": 0.0}
 _TTS_MODEL_DEFAULT = "eleven_flash_v2_5"
+_LLM_MODEL_DEFAULT = "gpt-5.6-luna"      # was gpt-4.1-mini, which OpenAI shuts down 2027-01-14
 
 
 def display_name(slug):
@@ -106,6 +107,7 @@ class Character:
     avatar_model: str
     voice_id: str | None         # ElevenLabs voice; None → she can only talk text-only
     tts_model: str
+    llm_model: str               # the model she thinks and talks with (Saga may differ: SAGA_LLM_MODEL)
     space_dir: str
     library_dir: str             # shared between sisters (rows/cursors live per db)
     capability_exclude: tuple    # capabilities.CAPABILITIES names she doesn't have
@@ -147,6 +149,7 @@ class Character:
                 or _here("assets", "avatar", "ariu", "ariu.model3.json"),
                 voice_id=os.getenv("ELEVENLABS_VOICE_ID") or None,
                 tts_model=os.getenv("ELEVENLABS_MODEL") or _TTS_MODEL_DEFAULT,
+                llm_model=os.getenv("AIVA_LLM_MODEL") or _LLM_MODEL_DEFAULT,
                 space_dir=os.getenv("AIVA_SPACE_DIR") or _here("space"),
                 library_dir=library,
                 capability_exclude=(),
@@ -176,6 +179,7 @@ class Character:
                 voice_id=os.getenv("SAGA_ELEVENLABS_VOICE_ID") or None,
                 tts_model=os.getenv("SAGA_ELEVENLABS_MODEL") or os.getenv("ELEVENLABS_MODEL")
                 or _TTS_MODEL_DEFAULT,
+                llm_model=os.getenv("SAGA_LLM_MODEL") or os.getenv("AIVA_LLM_MODEL") or _LLM_MODEL_DEFAULT,
                 space_dir=os.getenv("SAGA_SPACE_DIR") or _here("space_saga"),
                 library_dir=library,
                 capability_exclude=("tend_cat",),

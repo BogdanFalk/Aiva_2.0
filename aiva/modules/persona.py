@@ -277,6 +277,7 @@ def build_system_prompt(
     habits: list[str] | None = None,
     moments: list[dict] | None = None,
     projects: list[str] | None = None,
+    upgrades: list[str] | None = None,
 ) -> str:
     """Assemble the system prompt: personality + date + recaps + facts + flows + lessons + reading + avatar abilities.
 
@@ -287,7 +288,8 @@ def build_system_prompt(
     instead of standing in for one. `forming_note` is the you're-new note (self-forming only), and
     `sister` ({"name", "lines"}) what she has noticed about her sister. v3: `story` ({"text",
     "chapter"}) her own autobiography so far, `habits` behaviour she's formed from what landed with
-    him, `moments` ({"his", "hers"}) exchanges that landed, `projects` what she's working on."""
+    him, `moments` ({"his", "hers"}) exchanges that landed, `projects` what she's working on.
+    `upgrades` are recent real changes made to her (modules/upgrades.py)."""
     parts = [personality or PERSONALITY]
     tag = tag or ("the same cheeky Aiva" if name == "Aiva" else f"still {name}")
 
@@ -362,6 +364,13 @@ def build_system_prompt(
             "you never pretend to do. You don't need permission to use a safe power, and you can go "
             "find things you yourself want. Never recite this list — just use it.\n"
             + "\n".join(f"- {c}" for c in capabilities))
+
+    if upgrades:
+        parts.append(
+            "WHAT'S NEW IN YOU — real changes made to you lately. They're facts about you: when he "
+            "asks what's new or whether you've changed, answer from these honestly, in your own "
+            "words. Once you've mentioned one, don't bring it up again unprompted, and never recite "
+            "the list.\n" + "\n".join(f"- {u}" for u in upgrades))
 
     if reading:
         parts.append(

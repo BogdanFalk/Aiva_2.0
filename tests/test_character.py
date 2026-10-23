@@ -117,6 +117,17 @@ def test_saga_reads_saga_keys_and_falls_back_only_for_shared_ones(clean_env):
     assert Character.from_env("saga").tts_model == "eleven_flash_v2_5"   # her own key wins
 
 
+def test_llm_model_is_shared_unless_saga_has_her_own(clean_env):
+    assert Character.from_env("aiva").llm_model == "gpt-5.6-luna"        # gpt-4.1-mini retires
+    assert Character.from_env("saga").llm_model == "gpt-5.6-luna"
+    clean_env.setenv("AIVA_LLM_MODEL", "gpt-6-luna")
+    assert Character.from_env("aiva").llm_model == "gpt-6-luna"
+    assert Character.from_env("saga").llm_model == "gpt-6-luna"          # shared by default
+    clean_env.setenv("SAGA_LLM_MODEL", "gpt-5.6-luna")
+    assert Character.from_env("saga").llm_model == "gpt-5.6-luna"        # her own key wins
+    assert Character.from_env("aiva").llm_model == "gpt-6-luna"          # and never touches Aiva
+
+
 def test_unknown_slug_and_display_names():
     assert KNOWN == ("aiva", "saga")
     assert display_name("aiva") == "Aiva" and display_name("SAGA") == "Saga" and display_name("x") == "X"

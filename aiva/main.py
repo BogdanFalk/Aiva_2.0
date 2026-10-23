@@ -99,7 +99,7 @@ from modules.tools import (TOOL_SCHEMAS, execute_shell, register_becoming_tools,
                            register_preference_tools, register_reading_tools,
                            register_self_tools, register_speaker_tools, register_task_tools,
                            register_tools, register_web_tools)
-from modules.utilities import LLM_RATES as _LLM_RATES
+from modules.utilities import LLM_RATES as _LLM_RATES, gpt5_shape
 from modules.web import WebClient, WebConfig
 
 from modules.house_memory import HouseMemory
@@ -108,6 +108,7 @@ from modules.tools import bind_tool_hook, register_kin_tools, register_sister_to
 from modules.tools import register_life_tools
 from modules.dreams import Consolidation
 from modules import projects as projects_mod
+from modules import upgrades as upgrades_mod
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -331,7 +332,7 @@ async def main():
     log_event = EventLog(ch.slug)
     _require_env("OPENAI_API_KEY", "ELEVENLABS_API_KEY")
 
-    llm_model = os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini")
+    llm_model = ch.llm_model            # AIVA_LLM_MODEL, or SAGA_LLM_MODEL for Saga when set
     ambient = os.getenv("AIVA_WAKE_WORD", "0") == "1"
     from version import __version__ as _version
     print(f"{ch.name} v{_version}")
@@ -355,13 +356,14 @@ async def main():
         api_key=os.getenv("OPENAI_API_KEY"),
         # NOTE: keep run_in_parallel at its default (True). Sequential mode registers calls lazily,
         # which defeats pipecat's call-grouping and makes her speak once per tool instead of once
-        # per turn. gpt-5.x: max_completion_tokens instead of max_tokens, and function tools on
-        # Chat Completions REQUIRE reasoning_effort 'none'. gpt-4.x keeps the classic shape.
+        # per turn. gpt-5.x and gpt-6-luna (`gpt5_shape`): max_completion_tokens instead of
+        # max_tokens, and function tools on Chat Completions REQUIRE reasoning_effort 'none'.
+        # gpt-4.x keeps the classic shape.
         settings=OpenAILLMService.Settings(
             model=llm_model,
             temperature=0.7,
             **({"max_completion_tokens": 500, "extra": {"reasoning_effort": "none"}}
-               if llm_model.startswith("gpt-5") else {"max_tokens": 500}),
+               if gpt5_shape(llm_model) else {"max_tokens": 500}),
         ),
     )
 
@@ -753,6 +755,20 @@ async def main():
     else:
         intro = "Introduce yourself very briefly and greet the user." + yields
 
+    # what changed in her since she last ran (modules/upgrades.py): told once, riding on the intro;
+    # recorded as told when the intro note is consumed after her first greeting
+    ups = {"on": upgrades_mod.applicable(ch.slug, os.environ, ch),
+           "told": upgrades_mod.load_told(memory.meta_get(upgrades_mod.TOLD_KEY))}
+    ups["new"] = upgrades_mod.pending(ups["on"], ups["told"])
+    if ups["new"] and fresh:
+        # a brand-new sister: nothing changed in her, she simply starts with all of it
+        ups["told"] = upgrades_mod.mark_told(ups["told"], ups["new"], datetime.now().date())
+        memory.meta_set(upgrades_mod.TOLD_KEY, upgrades_mod.dump_told(ups["told"]))
+        ups["new"] = []
+    elif ups["new"]:
+        intro = intro + " " + upgrades_mod.boot_note(ups["new"])
+        log_event("upgrades to tell: " + ", ".join(u.id for u in ups["new"]))
+
     try:
         added = await asyncio.wait_for(reading.scan_once(), 10)
         if added.get("added"):
@@ -789,7 +805,9 @@ async def main():
             forming_note=bool(blocks.get("forming")) if ch.self_forming else False,
             sister=sister, free_range=task_runner.free_range,
             story=cd["story"], habits=cd["habits"], moments=cd["moments"],
-            projects=project_book.prompt_lines() if _projects_on else None)
+            projects=project_book.prompt_lines() if _projects_on else None,
+            upgrades=upgrades_mod.prompt_lines(
+                upgrades_mod.recent(ups["on"], ups["told"], datetime.now().date())))
 
     messages = [
         {"role": "system", "content": render_system_prompt()},
@@ -961,6 +979,11 @@ async def main():
         if removed:
             context.set_messages(kept)
             log_event("intro note consumed after first greeting")
+            if ups["new"]:
+                ups["told"] = upgrades_mod.mark_told(ups["told"], ups["new"], datetime.now().date())
+                memory.meta_set(upgrades_mod.TOLD_KEY, upgrades_mod.dump_told(ups["told"]))
+                log_event("upgrades told: " + ", ".join(u.id for u in ups["new"]))
+                ups["new"] = []
         _intro_pending["v"] = False
 
     def _user_present(within_s=180):

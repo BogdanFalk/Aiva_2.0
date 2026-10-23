@@ -92,7 +92,7 @@ SETTINGS = (
     S("DEFAULT_CITY", "API keys & services", "str", "London", "City the weather tool uses when you don't name one."),
 
     # --- Models ----------------------------------------------------------------------------------
-    S("AIVA_LLM_MODEL", "Models", "str", "gpt-4.1-mini", "The voice model both sisters think and talk with.", "all"),
+    S("AIVA_LLM_MODEL", "Models", "str", "gpt-5.6-luna", "The voice model Aiva thinks and talks with, and Saga too unless SAGA_LLM_MODEL gives her her own.", "all"),
     S("AIVA_TASK_MODEL", "Models", "str", None, "Model for background tasks and the house arbiter, on its own token bucket.", "all", default_from="AIVA_LLM_MODEL"),
     S("AIVA_VISION_MODEL", "Models", "str", None, "Model that looks at screenshots and images.", default_from="AIVA_LLM_MODEL"),
     S("AIVA_STUDY_MODEL", "Models", "str", None, "Model that close-reads each section of a book.", default_from="AIVA_TASK_MODEL"),
@@ -282,6 +282,7 @@ SETTINGS = (
     S("SAGA_OUTPUT_DEVICE_NAME", "Saga", "str", None, "Saga's speaker by name substring.", "saga", default_from="AIVA_OUTPUT_DEVICE_NAME"),
     S("SAGA_DB", "Saga", "str", None, "Saga's own database file.", "saga", restart=("saga", "dashboard"), default_note="aiva/saga.db"),
     S("SAGA_INNER_STATE", "Saga", "str", None, "File Saga's mood dials are saved to.", "saga", restart=("saga", "dashboard"), default_note="aiva/saga_inner_state.json"),
+    S("SAGA_LLM_MODEL", "Saga", "str", None, "The voice model Saga thinks and talks with, when it should differ from Aiva's.", "saga", default_from="AIVA_LLM_MODEL"),
     S("SAGA_SPACE_DIR", "Saga", "str", None, "Folder Saga keeps her finds in.", "saga", default_note="aiva/space_saga"),
     S("SAGA_AVATAR_MODEL", "Saga", "str", None, "Saga's Live2D model file.", "saga", restart=("saga", "body"), default_note="assets/avatar/ariu/saga.model3.json"),
     S("SAGA_AVATAR_MONITOR", "Saga", "int", None, "Monitor Saga's body stands on.", "saga", restart=("saga", "body"), min=0, default_note="Aiva's monitor"),

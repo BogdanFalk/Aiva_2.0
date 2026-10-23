@@ -9,6 +9,23 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **She knows when she's been upgraded.** `modules/upgrades.py` holds one hand-written entry per
+  change to her, in spoken second person, with which sisters it's for and when it's really on (a
+  feature switched off or a model not set in `.env` is never told). On her first boot with
+  something new, a short note rides on her intro and she mentions it once, in her own words; it's
+  recorded in her own db (`store_meta` `upgrades_told`) after that first greeting. For 14 days a
+  WHAT'S NEW IN YOU block keeps it in her prompt, so "what's new with you?" gets a true answer.
+  A brand-new sister isn't told anything: she simply starts with all of it. The first entries:
+  GPT-6 Luna (only for the sister running it; Saga is told that Aiva moved and she stayed),
+  backchannels, emotion hearing, the Flux ear, and this itself. Tests: `tests/test_upgrades.py`.
+- **Each sister can think with her own model, and GPT-6 Luna works.** `Character.llm_model` is
+  `AIVA_LLM_MODEL`, which Saga shares unless the new `SAGA_LLM_MODEL` is set. `gpt-6-luna` ($0.10
+  / $0.50 per 1M, about half of gpt-5.6-luna) gets the gpt-5 request shape (`utilities.gpt5_shape`:
+  `max_completion_tokens`, `reasoning_effort: "none"`); before this, a gpt-6 name was sent
+  `max_tokens` and every turn was a 400 (checked with a live call). gpt-6.1-sol is deliberately not
+  matched (it rejects effort `none`). Its price is in `LLM_RATES`. This branch's `.env` runs Aiva on
+  gpt-6-luna and keeps Saga on gpt-5.6-luna, so the two can be compared. The code's fallback
+  models move from gpt-4.1-mini, which OpenAI shuts down on 2027-01-14, to gpt-5.6-luna.
 - **She says "mhm" while you talk.** With Flux, the house watches his partial transcript and, at a
   clause-complete pause while he is still talking, sends ONE sister a new `backchannel` message
   (`modules/backchannel.py`): the sister his words name, else the sticky addressee, else the last

@@ -106,7 +106,7 @@ def capture_screen(monitor_index=None, max_edge=None):
 
 
 def _vision_model():
-    return os.getenv("AIVA_VISION_MODEL") or os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini")
+    return os.getenv("AIVA_VISION_MODEL") or os.getenv("AIVA_LLM_MODEL", "gpt-5.6-luna")
 
 
 def _data_url_from_file(path):

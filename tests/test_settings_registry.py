@@ -318,15 +318,16 @@ def test_round_trip_through_dotenv(tmp_path):
 
 def test_current_values_sources_defaults_and_masking(tmp_path):
     p = tmp_path / ".env"
-    p.write_text("OPENAI_API_KEY=sk-secret-abcd1234\nDEEPGRAM_API_KEY=\nAIVA_LLM_MODEL=gpt-5.6-luna\n"
+    p.write_text("OPENAI_API_KEY=sk-secret-abcd1234\nDEEPGRAM_API_KEY=\nAIVA_LLM_MODEL=gpt-6-luna\n"
                  "AIVA_WAKE_THRESHOLD=0.5\nAIVA_SISTER_MAX_ROUNDS=lots\n", encoding="utf-8")
     v = reg.current_values(str(p))
     assert v["OPENAI_API_KEY"]["value"] == "••••1234" and v["OPENAI_API_KEY"]["is_set"] is True
     assert "sk-secret" not in repr(v)
     assert v["DEEPGRAM_API_KEY"]["value"] is None and v["DEEPGRAM_API_KEY"]["is_set"] is False
-    assert v["AIVA_LLM_MODEL"] == {**v["AIVA_LLM_MODEL"], "value": "gpt-5.6-luna", "source": ".env", "modified": True}
-    assert v["AIVA_TASK_MODEL"]["source"] == "default" and v["AIVA_TASK_MODEL"]["value"] == "gpt-5.6-luna"
-    assert v["AIVA_WEB_MODEL"]["value"] == "gpt-5.6-luna"             # default_from chains through the task model
+    assert v["AIVA_LLM_MODEL"] == {**v["AIVA_LLM_MODEL"], "value": "gpt-6-luna", "source": ".env", "modified": True}
+    assert v["AIVA_TASK_MODEL"]["source"] == "default" and v["AIVA_TASK_MODEL"]["value"] == "gpt-6-luna"
+    assert v["AIVA_WEB_MODEL"]["value"] == "gpt-6-luna"               # default_from chains through the task model
+    assert v["SAGA_LLM_MODEL"]["source"] == "default" and v["SAGA_LLM_MODEL"]["value"] == "gpt-6-luna"
     assert v["AIVA_WEB_MODEL"]["default_text"] == "same as AIVA_TASK_MODEL"
     assert v["AIVA_WAKE_THRESHOLD"]["modified"] is False               # set, but to the default
     assert v["AIVA_SISTER_MAX_ROUNDS"]["invalid"] is True and v["AIVA_SISTER_MAX_ROUNDS"]["value"] == "lots"

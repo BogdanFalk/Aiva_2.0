@@ -230,7 +230,7 @@ async def main():
     if os.getenv("OPENAI_API_KEY"):
         oai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"),
                           max_retries=int(os.getenv("AIVA_LLM_MAX_RETRIES", "5")))
-        task_model = os.getenv("AIVA_TASK_MODEL", os.getenv("AIVA_LLM_MODEL", "gpt-4.1-mini"))
+        task_model = os.getenv("AIVA_TASK_MODEL", os.getenv("AIVA_LLM_MODEL", "gpt-5.6-luna"))
         _arbiter_call = openai_llm_call(oai, task_model, label="arbiter")
 
         async def arbiter(messages):

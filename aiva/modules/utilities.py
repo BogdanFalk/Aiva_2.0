@@ -103,6 +103,7 @@ LLM_RATES = {
     "gpt-5.4": (2.50, 15.00),
     "gpt-5.4-mini": (0.75, 4.50),
     "gpt-5.4-nano": (0.20, 1.25),
+    "gpt-6-luna": (0.10, 0.50),
     "text-embedding-3-small": (0.02, 0.0),
     # audio-input models (emotion hearing): TEXT token rates. ESTIMATES from OpenAI's public
     # pricing as last known (2026-10) — check platform.openai.com/docs/pricing and correct.
@@ -119,14 +120,24 @@ AUDIO_IN_RATES = {
 }
 
 
+def gpt5_shape(model):
+    """True for models on the gpt-5.x request shape: `max_completion_tokens` instead of
+    `max_tokens`, and function tools on Chat Completions only at reasoning_effort 'none'.
+    gpt-6-luna is on it too (verified with a live call 2026-10-23: tools + temperature work at
+    effort 'none'; `max_tokens` is a 400). gpt-6.1-sol is deliberately NOT matched: it rejects
+    effort 'none' (pipecat 1.13 release notes)."""
+    return (model or "").startswith(("gpt-5", "gpt-6-luna"))
+
+
 def llm_kwargs(model, max_tokens=None, temperature=None):
     """Chat Completions parameters that differ between the gpt-4.x and gpt-5.x
-    lines. gpt-5.x rejects `max_tokens` (wants `max_completion_tokens`) and, on
-    Chat Completions, only accepts function tools with reasoning_effort 'none'
-    — which is also the sub-second, no-thinking mode a voice assistant wants.
-    `temperature` is accepted alongside effort none (verified 2026-08-26)."""
+    lines (see `gpt5_shape`). gpt-5.x rejects `max_tokens` (wants
+    `max_completion_tokens`) and, on Chat Completions, only accepts function
+    tools with reasoning_effort 'none' — which is also the sub-second,
+    no-thinking mode a voice assistant wants. `temperature` is accepted
+    alongside effort none (verified 2026-08-26)."""
     kw = {}
-    if (model or "").startswith("gpt-5"):
+    if gpt5_shape(model):
         if max_tokens is not None:
             kw["max_completion_tokens"] = max_tokens
         kw["reasoning_effort"] = "none"
