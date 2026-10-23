@@ -33,7 +33,7 @@ from modules.sisters import (BOTH, DEFAULT_NAMESETS, HIM, AddressState, Decision
                              arbiter_messages, arrival_cue, both_second_cue, chat_cue, errand_cue,
                              errand_to, exchange_should_continue, floor_decision, is_question, name_order,
                              overheard_reply_line, overheard_user_line, parse_arbiter_reply, prune_stale,
-                             report_cue, sister_cue, vocative, wants_report, which_names)
+                             report_cue, sister_cue, spoken_to, wants_report, which_names)
 
 # a line he meant for a sister who wasn't running is picked up when she arrives — if she arrives
 # within this long (booting takes ~10-30 s; a minute later it's a different conversation)
@@ -281,10 +281,10 @@ class Floor:
     def _sister_audible(self, turn) -> bool:
         return (not self.private) or self._rooted_in_user(turn)
 
-    def _vocative(self, slug, text):
-        """The sister a reply OPENS by addressing — 'Hey, Saga, …' / 'Saga, what do you…' — or None
-        (`sisters.vocative`; only the first content word counts)."""
-        return vocative(text, [ns for ns in self._namesets() if ns.slug != slug])
+    def _spoken_to(self, slug, text):
+        """Her sister's slug when a reply OPENS by calling her ('Hey, Saga, …'), BOTH when it turns
+        to her after answering him ('Pizza. Saga, you in?'), else None (`sisters.spoken_to`)."""
+        return spoken_to(text, [ns for ns in self._namesets() if ns.slug != slug])
 
     # --- the user spoke ------------------------------------------------------------------------
 
@@ -565,12 +565,13 @@ class Floor:
         turn = self._turns.get(turn_id)
         speaker_name = self._name(slug)
         addressee = addressee or (turn.addressee if turn else HIM)
-        if addressee == HIM and text:
-            # "Hey, Saga. Fancy joining us?" is to her sister even on a turn he started — label the
-            # transcript and the overheard line by whom she actually spoke to
-            voc = self._vocative(slug, text)
-            if voc and voc in self._slugs():
-                addressee = voc
+        if addressee == HIM and text and not (turn and turn.kind == "report"):
+            # "Hey, Saga. Fancy joining us?" is to her sister even on a turn he started, and "Pizza.
+            # Saga, you in?" is to both of them — label the transcript and the overheard line by whom
+            # she actually spoke to. A report is his, whatever it says (exchange_should_continue).
+            to = self._spoken_to(slug, text)
+            if to == BOTH or to in self._slugs():
+                addressee = to
         audible = (not private) if private is not None else (turn.audible if turn else True)
         # her news was in her context when she spoke: an announce of hers queued BEFORE this turn
         # was granted is delivered. One queued mid-turn (a task question raised by the tool call
@@ -587,7 +588,8 @@ class Floor:
             for other in self._present():
                 if other == slug:
                     continue
-                to = "you" if addressee == other else ("him" if addressee == HIM else self._name(addressee))
+                to = ("you" if addressee == other else "him" if addressee == HIM
+                      else "you and him" if addressee == BOTH else self._name(addressee))
                 self._send(other, proto.Overheard(turn=turn_id, line=overheard_reply_line(speaker_name, to, text)), now)
         self._addr.last_speaker = slug
         self._addr.last_speaker_at = now

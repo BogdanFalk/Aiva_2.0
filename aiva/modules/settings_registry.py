@@ -186,6 +186,7 @@ SETTINGS = (
     S("AIVA_TASK_MAX_RETHINKS", "Tasks", "int", 1, "Times a task may stop, work out from a coding agent's report what went wrong, and re-plan (or ask you).", min=0, max=5),
     S("AIVA_TASK_FREE_RANGE", "Tasks", "bool", False, "Let coding tasks run without plan and hand-off approvals; shell commands still ask first."),
     S("AIVA_CLAUDE_PERMISSION_MODE", "Tasks", "choice", "auto", "How a Claude Code job that changes code gets its commands approved: auto = Claude Code's safety check approves routine commands with no prompts; acceptEdits = only file edits, every command denied.", choices=("auto", "acceptEdits")),
+    S("AIVA_CLAUDE_EFFORT", "Tasks", "choice", "auto", "How hard a Claude Code job thinks: auto = she sizes each job (low to confirm one thing, medium for a review or small edit, high for a real change, xhigh to build something new) and goes one level up after a job comes back short; a level forces it for every job; inherit = your own Claude Code setting.", choices=("auto", "low", "medium", "high", "xhigh", "max", "inherit")),
     S("AIVA_TASK_RUN_TESTS", "Tasks", "bool", True, "After a coding job, run the project's own pytest suite herself (its .venv only) and grade the job on the result."),
     S("AIVA_TASK_TEST_TIMEOUT_S", "Tasks", "float", 300.0, "Seconds she lets a project's test suite run when checking a coding job.", min=10.0, max=3600.0),
 
@@ -225,6 +226,7 @@ SETTINGS = (
 
     # --- Initiative & autonomy -------------------------------------------------------------------
     S("AIVA_SELF_ACT", "Initiative & autonomy", "bool", True, "Let her pursue a safe wish on her own, like finding and keeping an image."),
+    S("AIVA_CAT_CARE", "Initiative & autonomy", "bool", True, "Let her keep an eye on the desktop cat and feed, play with or pet it on her own when it needs it.", "aiva"),
     C("inner.INITIATIVE.max_per_day", "Initiative & autonomy", 4, "Times a day she may speak up on her own.", "aiva/modules/inner.py INITIATIVE"),
     C("inner.INITIATIVE.max_acts_per_day", "Initiative & autonomy", 3, "Times a day she may act on a wish herself.", "aiva/modules/inner.py INITIATIVE"),
     C("inner.INITIATIVE.min_gap_s", "Initiative & autonomy", 25 * 60, "Fewest seconds between two initiatives.", "aiva/modules/inner.py INITIATIVE"),

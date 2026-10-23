@@ -174,6 +174,30 @@ async def test_tick_asks_about_a_desire():
     assert what == "ask" and "Fianu" in said[0]
 
 
+async def test_a_raised_wish_rests_a_day_then_three_before_she_raises_it_again():
+    # 2026-10-17: the same wish at 11:49, 12:46, 13:01 and 13:17
+    clock = Clock()
+    eng = make_engine(clock)
+    said = []
+    eng.attach_voice(announce=lambda note: said.append(note),
+                     idle_for=lambda: 20 * 60, user_present=lambda within=180: True)
+    await eng.add_desire("run one focused check on Saga's constellation", "do", strength=0.9)
+    assert await eng.initiative_tick() == "ask" and "Saga" in said[-1]
+    clock.advance(1)                                  # well past the gap, but it's resting
+    assert await eng.initiative_tick() != "ask"
+    await eng.add_desire("ask him how the Fianu work is going", "ask", strength=0.5)
+    clock.advance(1)                                  # a weaker wish isn't resting, so it gets its turn
+    assert await eng.initiative_tick() == "ask" and "Fianu" in said[-1]
+    clock.advance(23)                                 # a day on: the first one may come up once more
+    assert await eng.initiative_tick() == "ask" and "Saga" in said[-1]
+    for _ in range(2):                                # then it rests three days
+        clock.advance(24)
+        what = await eng.initiative_tick()
+        assert not (what == "ask" and "Saga" in said[-1])
+    clock.advance(25)
+    assert await eng.initiative_tick() == "ask" and "Saga" in said[-1]
+
+
 async def test_set_initiative_never_silences_tick():
     eng = make_engine(Clock())
     said = []

@@ -278,11 +278,15 @@ def asks_something(text) -> bool:
     return any(m in t for m in _INDIRECT_ASKS)
 
 
+# 2026-10-21: "Yep, Saga, you're looking at it" went down as said to him — "yep" wasn't here
 _OPENERS = {"hey", "hi", "hello", "ok", "okay", "well", "so", "oh", "yeah", "yes", "no", "right", "hmm",
-            "look", "alright", "and", "but", "listen", "honestly"}
-_GREETINGS = {"hey", "hi", "hello", "listen", "look"}
+            "look", "alright", "and", "but", "listen", "honestly", "yep", "yup", "yah", "nope", "nah",
+            "sure", "ah", "aw", "aww", "ooh", "wow", "whoa", "mm", "mhm", "huh", "um", "uh", "ha", "haha",
+            "aha", "cool", "nice", "great", "perfect", "exactly", "true", "fair", "totally", "anyway", "also", "actually", "now", "psst", "see"}
+_GREETINGS = {"hey", "hi", "hello", "listen", "look", "psst"}
 _PUNCT = ".,!?;:—–-\"'“”‘’()"
 _SENTENCES = re.compile(r"(?<=[.!?])\s+")
+_DASHES = re.compile(r"\s*([—–])\s*")       # "hey—Saga, look" is three words, not one
 
 
 def _sentence_vocative(sentence, namesets) -> Optional[str]:
@@ -290,7 +294,7 @@ def _sentence_vocative(sentence, namesets) -> Optional[str]:
     a call — a comma or dash after it, a greeting before it, or the sentence a question. 'Saga is
     starting up' and 'Saga's already here' are ABOUT her (2026-10-14: the latter opened a sister
     round)."""
-    toks = (sentence or "").split()
+    toks = _DASHES.sub(r"\1 ", sentence or "").split()
     i, greeted = 0, False
     while i < len(toks) and (not toks[i].strip(_PUNCT) or toks[i].strip(_PUNCT).lower() in _OPENERS):
         greeted = greeted or toks[i].strip(_PUNCT).lower() in _GREETINGS
@@ -326,6 +330,17 @@ def called_in(text, namesets) -> Optional[str]:
         if who:
             return who
     return None
+
+
+def spoken_to(text, namesets) -> Optional[str]:
+    """Whom a sister's reply on HIS turn was really spoken to: her sister's slug when it opens by
+    calling her ('Yep, Saga, …'), BOTH when it answers him first and then turns to her ('Pizza.
+    Saga, you in?'), else None — it was to him. 2026-10-21: both lines of a sister exchange showed
+    "→ you" on the dashboard."""
+    voc = vocative(text, namesets)
+    if voc:
+        return voc
+    return BOTH if called_in(text, namesets) else None
 
 
 # --- errands: he asks one sister to put something to the other -------------------------------

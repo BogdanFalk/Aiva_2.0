@@ -8,7 +8,7 @@ dashboard never blocks the house's writes. Written by the house process only.
 Tables:
 - house_transcript(id, ts, turn_id, speaker user|<slug>, addressee him|<slug>|both, text,
   audible INT, kind, interrupted INT) — one row per user line (kind = how it was routed) and one
-  per `said`.
+  per `said`. On a user line `both` is both sisters; on a sister's line it is him and her sister.
 - house_events(id, ts, slug, kind, summary, capability, relayed_to) — what a sister did/made/said,
   relayed to the others; each sister keeps her own cursor into it.
 - house_kv(key PRIMARY KEY, value, updated_ts) — sister_talk mode, turn sequence, day counters.

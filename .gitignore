@@ -215,3 +215,9 @@ aiva/voice_cache/
 
 # the dashboard settings writer keeps the previous .env here (it holds the keys)
 .env.bak
+# runtime event logs (aiva/logs/<stem>-YYYYMMDD.log) hold conversation text: never committed
+aiva/logs/
+
+# Claude Code local-only files (the shared rules in .claude/rules/ are committed)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

@@ -1,0 +1,694 @@
+<title>Aiva Tech Radar</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible+Next:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a field guide. Masthead, "start here" sequence, an effort-by-impact map, then a filterable
+   catalogue of findings grouped by what part of her they touch. One reading column, map breaks wide. */
+:root {
+  --bg: #f5f6fa;
+  --surface: #ffffff;
+  --fg: #1c1d2b;
+  --muted: #5c5f74;
+  --line: #dcdfe9;
+  --accent: #4f46c8;          /* Saga's sky, one hue only */
+  --accent-soft: #e9e8fb;
+  --ok: #1d7a4e;   --ok-soft: #e1f3e9;
+  --mid: #9a5b00;  --mid-soft: #fbefd9;
+  --big: #b3332f;  --big-soft: #fbe4e2;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Atkinson Hyperlegible Next", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 36px; --s7: 56px;
+  --r: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12131c; --surface: #1a1b27; --fg: #e8e9f2; --muted: #a3a6bd; --line: #2d2f40;
+    --accent: #a59dff; --accent-soft: #2a2850;
+    --ok: #5fd39a; --ok-soft: #173326; --mid: #f0b75c; --mid-soft: #3a2b12; --big: #ff8a83; --big-soft: #3d1c1b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12131c; --surface: #1a1b27; --fg: #e8e9f2; --muted: #a3a6bd; --line: #2d2f40;
+  --accent: #a59dff; --accent-soft: #2a2850;
+  --ok: #5fd39a; --ok-soft: #173326; --mid: #f0b75c; --mid-soft: #3a2b12; --big: #ff8a83; --big-soft: #3d1c1b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 16px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: var(--s6) var(--s7);
+}
+.wrap { max-width: 1060px; margin: 0 auto; display: grid; gap: var(--s7); }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.2rem, 6vw, 3.6rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.02; }
+h2 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.01em; }
+h3 { font-size: 1.12rem; font-weight: 700; line-height: 1.25; }
+p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.74rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.12rem; color: var(--muted); max-width: 64ch; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* masthead */
+header { display: grid; gap: var(--s4); }
+.meta { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); font-size: 0.86rem; color: var(--muted); }
+.meta b { color: var(--fg); font-weight: 600; }
+
+/* section heads */
+.sec { display: grid; gap: var(--s5); }
+.sec-head { display: grid; gap: var(--s2); max-width: 70ch; }
+.sec-head p { color: var(--muted); }
+
+/* start here: a real sequence */
+ol.start { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s3); counter-reset: n; }
+ol.start li { counter-increment: n; display: grid; grid-template-columns: 2.6rem 1fr; gap: var(--s4); align-items: start;
+  padding: var(--s4) 0; border-top: 1px solid var(--line); }
+ol.start li::before { content: counter(n); font-family: var(--font-display); font-weight: 700; font-size: 1.9rem; line-height: 1; color: var(--accent); }
+ol.start .row { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3); align-items: baseline; }
+ol.start p { color: var(--muted); max-width: 70ch; margin-top: var(--s1); min-width: 0; }
+.quick { border: 1px dashed var(--line); border-radius: var(--r); padding: var(--s4); display: grid; gap: var(--s1); }
+.quick p { color: var(--muted); }
+
+/* chips */
+.chip { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.02em;
+  padding: 2px 8px; border-radius: 999px; white-space: nowrap; border: 1px solid transparent; }
+.fit-drop { background: var(--ok-soft); color: var(--ok); }
+.fit-mod { background: var(--mid-soft); color: var(--mid); }
+.fit-big { background: var(--big-soft); color: var(--big); }
+.where { border-color: var(--line); color: var(--muted); }
+.ver { color: var(--muted); }
+.ver.yes::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.ver.part::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--mid); }
+
+/* the map */
+.map-scroll { overflow-x: auto; }
+.map { display: grid; grid-template-columns: 9.5rem repeat(3, minmax(12rem, 1fr)); gap: 1px; background: var(--line);
+  border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; min-width: 760px; }
+.map > div { background: var(--surface); padding: var(--s3); }
+.map .colh, .map .rowh { font-family: var(--font-mono); font-size: 0.74rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+.map .colh { display: flex; align-items: center; gap: var(--s2); }
+.map .rowh { display: grid; align-content: start; gap: 2px; }
+.map .rowh span { text-transform: none; letter-spacing: 0; font-family: var(--font-body); font-size: 0.8rem; }
+.map .cell { display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; min-height: 5.2rem; }
+.map .cell.hot { background: var(--accent-soft); }
+.pill { font-size: 0.84rem; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  text-decoration: none; line-height: 1.3; }
+.pill:hover { border-color: var(--accent); }
+.pill .k { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); margin-right: 4px; }
+.note { font-size: 0.84rem; color: var(--muted); }
+
+/* gate callout */
+.gate { border-left: 3px solid var(--mid); background: var(--surface); padding: var(--s4) var(--s5); border-radius: 0 var(--r) var(--r) 0;
+  display: grid; gap: var(--s2); max-width: 78ch; }
+.gate p { color: var(--muted); }
+
+/* filters */
+.filters { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s5); align-items: center; position: sticky; top: env(safe-area-inset-top, 0px);
+  background: var(--bg); padding-block: var(--s3); z-index: 2; border-bottom: 1px solid var(--line); }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.seg .lab { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-right: 4px; }
+.seg button { font: inherit; font-size: 0.86rem; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--fg); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+select { font: inherit; font-size: 0.86rem; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); max-width: 100%; }
+.count { font-size: 0.86rem; color: var(--muted); margin-left: auto; }
+
+/* catalogue */
+.area { display: grid; gap: var(--s4); }
+.area[hidden] { display: none; }
+.area-head { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3); align-items: baseline; padding-top: var(--s4); }
+.area-head h3 { font-size: 1.3rem; }
+.area-head .note { max-width: 60ch; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 30rem), 1fr)); gap: var(--s4); }
+article.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: var(--s5); display: grid; gap: var(--s3);
+  align-content: start; min-width: 0; scroll-margin-top: 90px; }
+article.card:target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.card-top { display: grid; gap: 6px; }
+.card .by { font-size: 0.86rem; color: var(--muted); }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.card dl { margin: 0; display: grid; gap: var(--s3); }
+.card dt { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 2px; }
+.card dd { margin: 0; font-size: 0.95rem; }
+.card dd.fit-her { background: var(--accent-soft); border-radius: 8px; padding: var(--s2) var(--s3); }
+.src { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 0.82rem; }
+.src a { overflow-wrap: anywhere; }
+.fixes { display: flex; flex-wrap: wrap; gap: 6px; }
+.fixes span { font-size: 0.78rem; color: var(--accent); border: 1px solid var(--accent-soft); background: var(--bg); padding: 1px 8px; border-radius: 999px; }
+.empty { color: var(--muted); padding: var(--s5) 0; }
+
+/* lists at the end */
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: var(--s6); }
+ul.plain { margin: 0; padding-left: 1.1rem; display: grid; gap: var(--s2); }
+ul.plain li { max-width: 70ch; }
+ul.plain li::marker { color: var(--muted); }
+.avoid { color: var(--big); font-weight: 600; }
+footer { font-size: 0.84rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: var(--s4); max-width: 80ch; }
+
+/* second pass: what moved since the first read, each line linked to its card */
+ul.changes { list-style: none; margin: 0; padding: 0; display: grid; }
+ul.changes li { display: grid; grid-template-columns: 7.5rem 1fr; gap: var(--s2) var(--s4); align-items: baseline;
+  padding: var(--s3) 0; border-top: 1px solid var(--line); }
+ul.changes li > div { display: grid; gap: 2px; min-width: 0; }
+ul.changes h3 { font-size: 1.02rem; }
+ul.changes p { color: var(--muted); max-width: 72ch; }
+.kind { justify-self: start; }
+.k-new { background: var(--accent-soft); color: var(--accent); }
+.k-easier { background: var(--ok-soft); color: var(--ok); }
+.k-warn { background: var(--mid-soft); color: var(--mid); }
+.k-answer { border-color: var(--line); color: var(--muted); }
+.card dd.upd { border-left: 3px solid var(--accent); padding-left: var(--s3); }
+@media (max-width: 560px) { ul.changes li { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: no-preference) { article.card { transition: border-color .15s, box-shadow .15s; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">Research brief · voice companion · April to October 2026</span>
+    <h1>Aiva Tech Radar</h1>
+    <p class="lede">What came out in the last six months that could make Aiva and Saga listen, sound and think more like a person, and how each piece would fit the house you already have.</p>
+    <div class="meta">
+      <span>Researched <b>14 Oct 2026</b>, rechecked <b>23 Oct 2026</b></span>
+      <span><b>17</b> findings in <b>8</b> areas</span>
+      <span>Dates checked against official sources unless marked <span class="chip ver part">partly checked</span></span>
+      <span>Impact ratings are our judgment, not benchmarks</span>
+    </div>
+  </header>
+
+  <section class="sec" id="changes">
+    <div class="sec-head">
+      <span class="eyebrow">Second pass · 23 Oct 2026</span>
+      <h2>What changed in the nine days since</h2>
+      <p>Every finding was rechecked against official changelogs, pricing and model pages, and against her code. Eleven things moved; the rest is as it was. Each line links to its card, where a "Since 14 Oct" note has the detail.</p>
+    </div>
+    <ul class="changes">
+      <li><span class="chip kind k-easier">Built</span><div><h3><a href="#pipecat">Three items already exist on the voice-upgrades branch</a></h3>
+        <p>On 16 Oct a separate worktree (<span class="mono">Aiva_2.0-voice</span>, branch <span class="mono">voice-upgrades</span>, its own venv) got the Pipecat upgrade to 1.12, Deepgram Flux in the house, and emotion hearing through an OpenAI audio side-call. Backchannels are written there but not committed. Its 962 offline tests pass. None of it is merged into main or has run live.</p></div></li>
+      <li><span class="chip kind k-easier">Easier now</span><div><h3><a href="#pipecat">Pipecat 1.13 puts three items in one upgrade</a></h3>
+        <p>Released 19 Oct. Eleven v4 Turbo is now in the dialogue voice service (as its default), backchannel frames are built in, and an OpenAI Decisions classifier ships with it. One upgrade on a branch now unlocks items 4 and 7 and the Decisions half of 15.</p></div></li>
+      <li><span class="chip kind k-warn">Watch out</span><div><h3><a href="#gpt6">GPT-6 Luna needs a small code fix, not only a config change</a></h3>
+        <p>Her code picks the gpt-5 request shape by name: <span class="mono">llm_kwargs</span> in utilities.py and the pipeline settings in main.py both check for <span class="mono">gpt-5</span>. Named <span class="mono">gpt-6-luna</span>, she'd send none of it and run at the model's default reasoning effort, where OpenAI's Chat Completions doesn't allow function calls. The fix is two lines.</p></div></li>
+      <li><span class="chip kind k-new">New</span><div><h3><a href="#gpt6">Decisions is out of beta, and GPT-Live can call it</a></h3>
+        <p>Generally available 22 Oct, with shared-input caching, images and up to 400 questions per request. Since 15 Oct GPT-Live can call Decisions itself while it talks.</p></div></li>
+      <li><span class="chip kind k-new">New</span><div><h3><a href="#gpt-live">GPT-Live voices designed from a description</a></h3>
+        <p>Since 16 Oct, any API customer can create a voice from a text description, free to create. A sister could get a voice designed to sound like her, though not her ElevenLabs voice itself.</p></div></li>
+      <li><span class="chip kind k-answer">Answered</span><div><h3><a href="#eleven-v4">Eleven v4 Turbo costs the same as her voice today</a></h3>
+        <p>$0.04 per 1,000 characters on ElevenLabs' API pricing page, the same rate as the Flash model she uses now. Plain v4 is $0.08. Turbo still runs only on the Text-to-Dialogue WebSocket.</p></div></li>
+      <li><span class="chip kind k-warn">Watch out</span><div><h3><a href="#gpt6">gpt-4.1 and gpt-4.1-mini shut down on 14 Jan 2027</a></h3>
+        <p>OpenAI gave notice on 14 Oct. Her <span class="mono">.env</span> already uses gpt-5.6-luna, so nothing breaks today, but five code defaults still name gpt-4.1 or gpt-4.1-mini, and the project notes' "switch back to gpt-4.1" fallback goes away.</p></div></li>
+      <li><span class="chip kind k-new">New</span><div><h3><a href="#later">Eleven Realtime, ElevenLabs' own voice-agent models</a></h3>
+        <p>Released 19 Oct and compatible with OpenAI Realtime clients. They keep ElevenLabs voices, but ElevenLabs runs the LLM and the mode refuses a custom one, so her mind would move into their agent settings. On the watch list.</p></div></li>
+      <li><span class="chip kind k-answer">Answered</span><div><h3><a href="#flux">Flux's price, and two Pipecat fixes for it</a></h3>
+        <p>$0.0065 a minute on Deepgram's current streaming promotion, against $0.0048 for her nova-3; she only pays while awake. Pipecat 1.13 adds interim transcripts and retries a failed first connection.</p></div></li>
+      <li><span class="chip kind k-answer">Answered</span><div><h3><a href="#gemini-live">Gemini 3.8 Live doesn't take custom voices</a> <span class="chip ver part">partly checked</span></h3>
+        <p>Developers report that voices made with Google's voice tools are refused by Live, and Google hasn't given a timeline.</p></div></li>
+      <li><span class="chip kind k-answer">Answered</span><div><h3><a href="#questions">Four of the open questions</a></h3>
+        <p>GPT-Live bills session time per second. Pipecat added the GPT-Live service in 1.9 and the Eleven dialogue service in 1.8. Her 1.5.0 already bundles Smart Turn v3.2. Mem0's open-source SDK has its new algorithm.</p></div></li>
+      <li><span class="chip kind k-new">New</span><div><h3><a href="#speak-or-silent">A benchmark for voice agents in group talk</a></h3>
+        <p>MP-Bench (11 Sep, missed in the first pass): real-time voice agents stay at or below 22% on multiparty comprehension and near chance on multiparty turn-taking. That backs the house's rules-first arbiter.</p></div></li>
+    </ul>
+    <p class="note">No change found for gpt-realtime, Inworld and Cartesia, LAION's emotion models, the pipecat-backchannel package (still 0.3.3), Gemini Flash-Lite for audio, or the memory and inner-life papers. Hume still shuts down on 13 Nov. OpenAI still lists gpt-5.6-terra, her book-synthesis model, though one pricing tracker said it was gone.</p>
+  </section>
+
+  <section class="sec" id="start">
+    <div class="sec-head">
+      <span class="eyebrow">Start here</span>
+      <h2>Five to try first, in this order</h2>
+      <p>Ordered by how much she'd feel more human, weighed against how much of her has to change.</p>
+    </div>
+    <ol class="start">
+      <li><div><div class="row"><h3><a href="#eleven-v4">Eleven v4 Turbo with audio tags</a></h3><span class="chip fit-mod">moderate</span></div>
+        <p>Same vendor and probably the same two voices, but she can laugh, sigh and whisper, at about 100 ms and the same price per character as her voice today. Pipecat 1.13 supports it directly. The tags can also trigger Live2D expressions.</p></div></li>
+      <li><div><div class="row"><h3><a href="#flux">Deepgram Flux in the house</a></h3><span class="chip fit-drop">close to drop-in</span></div>
+        <p>Speech-to-text that also decides when his turn is over. Already in her pinned Pipecat 1.5.0. Fewer cut-offs, less dead air, and the groundwork for starting a reply early.</p></div></li>
+      <li><div><div class="row"><h3><a href="#empathic">Real emotion hearing</a></h3><span class="chip fit-mod">moderate</span></div>
+        <p>Forty emotion classes plus chuckles and sighs, feeding the experience bus she already has, in place of today's pitch-and-energy arousal. The <a href="#gemini-audio">cloud side-call</a> does it with no local model.</p></div></li>
+      <li><div><div class="row"><h3><a href="#backchannel">Backchannels in her own voice</a></h3><span class="chip fit-mod">moderate</span></div>
+        <p>A soft "mhm" or "right" at his pauses, recorded once through her own TTS, with a small nod from the avatar. The cheapest strong sign that she's listening. Pipecat 1.13 now has backchannel frames that stay out of her context.</p></div></li>
+      <li><div><div class="row"><h3><a href="#gpt-live">GPT-Live-1 prototype for one sister</a></h3><span class="chip fit-big">big change</span></div>
+        <p>The only checked route to true full duplex that keeps her own mind and tools as the backend. Since 16 Oct a sister can have a voice designed from a description, though not her ElevenLabs voice. Try it on a branch to measure cost, how the designed voice compares, and the floor redesign it needs.</p></div></li>
+    </ol>
+    <div class="quick">
+      <span class="eyebrow">Quick win outside the five</span>
+      <p><a href="#gpt6">GPT-6 Luna</a> costs about half of her current gpt-5.6-luna ($0.10 / $0.50 per 1M tokens). It's a change to <span class="mono">AIVA_LLM_MODEL</span> and <span class="mono">AIVA_TASK_MODEL</span>, a price entry in <span class="mono">LLM_RATES</span>, and a two-line code fix so she sends the request shape it needs (see the card). Run it for a few evenings before keeping it: nothing yet shows it sounds warmer.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="map">
+    <div class="sec-head">
+      <span class="eyebrow">The map</span>
+      <h2>How much she'd change, and how much work it is</h2>
+      <p>Each finding placed by our read of its impact on how human she feels, against how much of her stack it touches. Tap one to jump to it.</p>
+    </div>
+    <div class="map-scroll">
+      <div class="map" role="table" aria-label="Findings by impact and effort">
+        <div class="rowh" role="columnheader"></div>
+        <div class="colh" role="columnheader"><span class="chip fit-drop">drop-in</span></div>
+        <div class="colh" role="columnheader"><span class="chip fit-mod">moderate</span></div>
+        <div class="colh" role="columnheader"><span class="chip fit-big">big change</span></div>
+
+        <div class="rowh" role="rowheader">Changes how she feels<span>he'd notice the first evening</span></div>
+        <div class="cell hot"><a class="pill" href="#flux"><span class="k">6</span>Deepgram Flux STT</a><a class="pill" href="#gemini-audio"><span class="k">10</span>Audio-LLM emotion side-call</a></div>
+        <div class="cell hot"><a class="pill" href="#eleven-v4"><span class="k">4</span>Eleven v4 Turbo</a><a class="pill" href="#backchannel"><span class="k">7</span>Backchannels</a><a class="pill" href="#empathic"><span class="k">9</span>Empathic Insight Voice</a><a class="pill" href="#tom"><span class="k">13</span>Read him, feel, then speak</a></div>
+        <div class="cell"><a class="pill" href="#gpt-live"><span class="k">1</span>GPT-Live-1</a><a class="pill" href="#relay"><span class="k">16</span>RelayS2S · Voice-Light</a></div>
+
+        <div class="rowh" role="rowheader">Noticeable<span>better over weeks, or for one kind of moment</span></div>
+        <div class="cell"><a class="pill" href="#gpt6"><span class="k">15</span>GPT-6 Luna · Decisions</a><a class="pill" href="#personas"><span class="k">14</span>Persona drift checks</a><a class="pill" href="#memdelta"><span class="k">12</span>Memory reality check</a></div>
+        <div class="cell"><a class="pill" href="#tts-challengers"><span class="k">5</span>Inworld · Cartesia · Flux TTS</a><a class="pill" href="#statemem"><span class="k">11</span>State-first memory</a><a class="pill" href="#speak-or-silent"><span class="k">17</span>Speak or stay silent</a><a class="pill" href="#pipecat"><span class="k">8</span>Pipecat 1.13 upgrade</a></div>
+        <div class="cell"><a class="pill" href="#gemini-live"><span class="k">3</span>Gemini 3.8 Live</a></div>
+
+        <div class="rowh" role="rowheader">Small or indirect<span>useful, not a leap</span></div>
+        <div class="cell"></div>
+        <div class="cell"></div>
+        <div class="cell"><a class="pill" href="#realtime"><span class="k">2</span>gpt-realtime-2.1</a></div>
+      </div>
+    </div>
+    <p class="note">The Pipecat upgrade (8) is mostly an enabler: items 1, 4 and 7 need a newer Pipecat than the one she's pinned to.</p>
+    <div class="gate">
+      <span class="eyebrow">Before items 1, 4 and 7</span>
+      <p>She's pinned to Pipecat 1.5.0 because PrivacyGate and HouseLink depend on the exact order frames arrive in. Upgrade on a branch first and run the offline suite before either sister boots on it. Since 19 Oct the target is 1.13, which has Eleven v4 Turbo, backchannel frames and a Decisions classifier in one release. Flux (6), the emotion side-call (10), GPT-6 Luna (15) and the memory and prompt ideas need no upgrade.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="findings">
+    <div class="sec-head">
+      <span class="eyebrow">All findings</span>
+      <h2>The catalogue</h2>
+      <p>Grouped by the part of her they touch. Each card says what it is, why it matters for her, how it would fit the house and sisters, and what to watch out for.</p>
+    </div>
+
+    <div class="filters" role="group" aria-label="Filter findings">
+      <div class="seg" id="fit-filter">
+        <span class="lab">Effort</span>
+        <button type="button" id="fit-all" data-fit="all" aria-pressed="true">All</button>
+        <button type="button" id="fit-drop" data-fit="drop" aria-pressed="false">Drop-in</button>
+        <button type="button" id="fit-mod" data-fit="mod" aria-pressed="false">Moderate</button>
+        <button type="button" id="fit-big" data-fit="big" aria-pressed="false">Big change</button>
+      </div>
+      <div class="seg">
+        <label class="lab" for="fix-filter">Fixes</label>
+        <select id="fix-filter">
+          <option value="all">Any pain point</option>
+          <option value="turns">Stiff turn-taking</option>
+          <option value="deaf">Deaf while she talks or plans</option>
+          <option value="voice">Flat emotion in her voice</option>
+          <option value="hearing">Coarse read of how he sounds</option>
+          <option value="self">Shallow read of him, of herself</option>
+          <option value="memory">Mixing old and new facts</option>
+          <option value="sisters">Clumsy sister hand-offs</option>
+          <option value="cost">Cost</option>
+        </select>
+      </div>
+      <span class="count" id="count" aria-live="polite">17 findings</span>
+    </div>
+
+    <!-- 1 -->
+    <div class="area" data-area>
+      <div class="area-head"><h3>Speech-to-speech and full duplex</h3><span class="note">Models that hear and speak in one stream, so she isn't deaf while talking.</span></div>
+      <div class="cards">
+        <article class="card" id="gpt-live" data-fit="big" data-fixes="deaf turns">
+          <div class="card-top"><span class="eyebrow">1 · OpenAI</span><h3>GPT-Live-1</h3>
+            <div class="tags"><span class="chip ver yes">API GA 10 Sep 2026</span><span class="chip fit-big">big change</span><span class="chip where">cloud · ~$3/hour + backend tokens</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">Voices designed from a text description are open to every API customer (16 Oct), free to create, with speech billed as usual. GPT-Live can now call Decisions natively while it talks (15 Oct). Pipecat 1.13 reworked client delegation so an abandoned delegation actually stops the backend's work and its pending tool calls. OpenAI's pricing page confirms billing is per second of session time.</dd></div>
+            <div><dt>What it is</dt><dd>OpenAI's first full-duplex voice model: it listens while it speaks and handles pauses, interruptions and backchannels itself. Reasoning and tools go to a separate backend. In client-delegation mode that backend can be your own model or agent, and results come back as spoken commentary, silent context or instructions (500 tokens per append).</dd></div>
+            <div><dt>Why it matters for her</dt><dd>It would end her being deaf while she speaks and the ~20 s gap while she plans a task, and let voice interrupts replace F10. Her own mind, tools and persona could stay as the backend.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Cloud only, $0.05 per session minute billed per second, plus her normal token cost. Pipecat has had <span class="mono">OpenAILiveLLMService</span> with <span class="mono">ClientDelegation</span> since 1.9, so not in her 1.5.0. The house floor assumes half-duplex grants and a mic gate, so the house would have to stream live mic audio to the floor holder's session instead.</dd></div>
+            <div><dt>Watch out</dt><dd>Preset voices or ones designed from a description; voice cloning still goes through OpenAI's sales team, so each sister's ElevenLabs voice can't simply move across. The system prompt is fixed at session start, so mood refreshes go through appends. Developers report goodbyes without delegating and interruptions that don't cancel backend work. Benchmark numbers come from OpenAI's forum post.</dd></div>
+          </dl>
+          <div class="fixes"><span>deaf while she talks or plans</span><span>stiff turn-taking</span></div>
+          <div class="src"><a href="https://developers.openai.com/api/docs/models/gpt-live-1.md">Model page</a><a href="https://developers.openai.com/api/docs/guides/live-delegation">Delegation guide</a><a href="https://community.openai.com/t/introducing-gpt-live-1-in-the-api/1396471">Announcement</a><a href="https://docs.pipecat.ai/api-reference/server/services/s2s/openai-live.md">Pipecat service</a><a href="https://developers.openai.com/api/docs/changelog">OpenAI changelog</a></div>
+        </article>
+
+        <article class="card" id="realtime" data-fit="big" data-fixes="turns">
+          <div class="card-top"><span class="eyebrow">2 · OpenAI</span><h3>gpt-realtime-2.1 and 2.1-mini</h3>
+            <div class="tags"><span class="chip ver yes">7 May &amp; 6 Jul 2026</span><span class="chip fit-big">big change</span><span class="chip where">cloud · $32 / $64 per 1M audio tokens</span></div></div>
+          <dl>
+            <div><dt>What it is</dt><dd>OpenAI's turn-based speech-to-speech models. Version 2 added adjustable reasoning, a 128K context and short spoken lead-ins; 2.1 handles interruptions, silence and noise better and cut p95 latency by at least a quarter. The mini is cheaper ($10 / $20).</dd></div>
+            <div><dt>Why it matters for her</dt><dd>The simpler speech-to-speech option if full duplex is too much. It doesn't solve the voice or floor questions, and OpenAI's own numbers put it behind GPT-Live on turn-taking.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Pipecat's existing OpenAI realtime service supports it. Same house redesign as GPT-Live, with less gain.</dd></div>
+            <div><dt>Watch out</dt><dd>Preset voices only. Mixed forum reports on 2.1-mini (prompt leakage, tool calls stopping). The old gpt-realtime-mini shuts down 20 Jan 2027.</dd></div>
+          </dl>
+          <div class="fixes"><span>stiff turn-taking</span></div>
+          <div class="src"><a href="https://developers.openai.com/api/docs/models/gpt-realtime-2">Model page</a><a href="https://community.openai.com/t/new-realtime-models-on-the-api-gpt-realtime-2-1-and-gpt-realtime-2-1-mini/1385896">Announcement</a></div>
+        </article>
+
+        <article class="card" id="gemini-live" data-fit="big" data-fixes="deaf turns cost">
+          <div class="card-top"><span class="eyebrow">3 · Google</span><h3>Gemini 3.8 Live and Live Extended Thinking</h3>
+            <div class="tags"><span class="chip ver yes">15 Sep 2026</span><span class="chip fit-big">big change</span><span class="chip where">cloud · ~$0.30/h listening, $1.08/h speaking</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">A developer forum thread reports that custom voices from Google's voices API are refused by <span class="mono">gemini-3.8-live</span>, with no official answer on when that changes. Google retires its older Live and TTS preview models on 17 Nov, naming the 3.8 models as replacements; none of those are hers.</dd></div>
+            <div><dt>What it is</dt><dd>Google's newest live dialogue models. Tools run in the background while the talk continues, with results delivered silently, when idle, or by interrupting. Extended Thinking reasons while speaking and gives spoken progress updates. The old affective-dialog option was removed.</dd></div>
+            <div><dt>Why it matters for her</dt><dd>A much cheaper full speech-to-speech brain, and background tools match the "keep talking while the task plans" need.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">She'd move off OpenAI for her voice brain. Pipecat 1.11.0 added support with non-blocking function calls. Same floor redesign as GPT-Live.</dd></div>
+            <div><dt>Watch out</dt><dd>Voices made with Google's voice design and replication tools don't work with Live yet (developer reports; no official timeline), so the sisters would lose their voices. "Proactive audio" (choosing not to answer) is always on.</dd></div>
+          </dl>
+          <div class="fixes"><span>deaf while she talks or plans</span><span>stiff turn-taking</span><span>cost</span></div>
+          <div class="src"><a href="https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-8-live-gemini-3-8-live-extended-thinking/">Google blog</a><a href="https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live">Model page</a><a href="https://ai.google.dev/gemini-api/docs/pricing">Pricing</a></div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 2 -->
+    <div class="area" data-area>
+      <div class="area-head"><h3>Expressive voices</h3><span class="note">Text-to-speech that can laugh, sigh, whisper and carry a mood across lines.</span></div>
+      <div class="cards">
+        <article class="card" id="eleven-v4" data-fit="mod" data-fixes="voice">
+          <div class="card-top"><span class="eyebrow">4 · ElevenLabs</span><h3>Eleven v4 and v4 Turbo</h3>
+            <div class="tags"><span class="chip ver yes">28 Sep 2026</span><span class="chip fit-mod">moderate</span><span class="chip where">cloud · $0.04 per 1K characters</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">Priced at $0.04 per 1,000 characters for Turbo and $0.08 for v4, the same as Flash and v3 respectively. Pipecat 1.13 (19 Oct) added <span class="mono">eleven_v4_turbo</span> to <span class="mono">ElevenLabsDialogueTTSService</span> and made it that service's default. ElevenLabs made v4 Turbo the default voice for its own agents (5 Oct). Turbo is still documented only on the Text-to-Dialogue WebSocket.</dd></div>
+            <div><dt>What it is</dt><dd>ElevenLabs' new architecture and most emotive model. It takes plain-language delivery direction and inline tags like <span class="mono">[laughs]</span> or <span class="mono">[said angrily]</span>, reads tone from context, and in dialogue answers the previous line instead of reading sentences in isolation. Turbo is the agent variant, about 100 ms inference and 150 ms to first speech (vendor figures).</dd></div>
+            <div><dt>Why it matters for her</dt><dd>The biggest audible jump that keeps her vendor and probably her voices. The same tags can drive her Live2D expressions.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Turbo runs only on ElevenLabs' Text-to-Dialogue WebSocket, which Pipecat reaches through <span class="mono">ElevenLabsDialogueTTSService</span> (since 1.8; v4 Turbo since 1.13). Her persona's no-markup rule needs an exception for the tags, and PrivacyGate must strip them before <span class="mono">said</span>, transcripts and memory. Test each sister's voice ID on v4 first with <span class="mono">tools\pick_voice.py --verify</span>.</dd></div>
+            <div><dt>Watch out</dt><dd>Text-to-Dialogue needs workspace access on ElevenLabs' side, and stability is the only voice setting it reads. Stability 0.0 can hallucinate. Latency comparisons are ElevenLabs' own.</dd></div>
+          </dl>
+          <div class="fixes"><span>flat emotion in her voice</span></div>
+          <div class="src"><a href="https://elevenlabs.io/blog/eleven-v4">ElevenLabs blog</a><a href="https://elevenlabs.io/docs/changelog/2026/9/28">Changelog</a><a href="https://elevenlabs.io/docs/overview/models">Models</a><a href="https://reference-server.pipecat.ai/en/latest/_modules/pipecat/services/elevenlabs/dialogue/tts.html">Pipecat dialogue service</a><a href="https://elevenlabs.io/pricing/api">API pricing</a></div>
+        </article>
+
+        <article class="card" id="tts-challengers" data-fit="mod" data-fixes="voice cost">
+          <div class="card-top"><span class="eyebrow">5 · Inworld · Cartesia · Deepgram</span><h3>The conversational TTS challengers</h3>
+            <div class="tags"><span class="chip ver yes">May to Aug 2026</span><span class="chip fit-mod">moderate</span><span class="chip where">cloud · prices unconfirmed</span></div></div>
+          <dl>
+            <div><dt>What they are</dt><dd><b>Inworld TTS-2</b> (5 May): bracketed steering such as <span class="mono">[whisper in a hushed style]</span>, <span class="mono">[laugh]</span>, <span class="mono">[sigh]</span>, a style that persists until reset, and a stable-to-creative delivery setting. <b>Cartesia Sonic-3.6</b> (27 Aug): context-driven emotion under 90 ms. <b>Deepgram Flux TTS</b> (12 Aug): carries tone and pacing across turns with no tags, from 80 ms.</dd></div>
+            <div><dt>Why they matter for her</dt><dd>Emotional delivery and lower latency, possibly for less than ElevenLabs.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Each sister's voice would have to be re-cloned or redesigned, which is a real cost to who they are. Pipecat has Cartesia, Deepgram and Inworld services; Inworld steering support wasn't checked.</dd></div>
+            <div><dt>Watch out</dt><dd>All quality claims are the vendors'. Vendor risk is real: Hume is shutting down its TTS and EVI APIs on 13 Nov 2026.</dd></div>
+          </dl>
+          <div class="fixes"><span>flat emotion in her voice</span><span>cost</span></div>
+          <div class="src"><a href="https://docs.inworld.ai/release-notes/tts.md">Inworld notes</a><a href="https://www.cartesia.ai/blog/sonic-3.6">Cartesia blog</a><a href="https://deepgram.com/learn/text-to-speech-comes-of-age-deepgram-launches-conversation-native-speech">Deepgram blog</a><a href="https://dev.hume.ai/changelog">Hume changelog</a></div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 3 -->
+    <div class="area" data-area>
+      <div class="area-head"><h3>Turn-taking and listening cues</h3><span class="note">Knowing when he's done, and showing she's with him while he talks.</span></div>
+      <div class="cards">
+        <article class="card" id="flux" data-fit="drop" data-fixes="turns">
+          <div class="card-top"><span class="eyebrow">6 · Deepgram</span><h3>Flux: speech-to-text with built-in turn-taking</h3>
+            <div class="tags"><span class="chip ver part">launched Oct 2025, updated Apr &amp; Sep 2026</span><span class="chip fit-drop">close to drop-in</span><span class="chip where">cloud · $0.0065/min on promotion</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">Deepgram's pricing page lists Flux English at $0.0065 a minute (was $0.0077) and nova-3 at $0.0048 (was $0.0077), both as limited-time streaming promotions with no end date. Pipecat 1.13 makes Flux send interim transcripts and retry a failed first connection instead of transcribing nothing for the rest of the session; she'd get both only after the upgrade. No new Flux model in Deepgram's changelog.</dd></div>
+            <div><dt>What it is</dt><dd>One model transcribes and judges the end of his turn. It emits start of turn, end of turn (confidence threshold 0.7 by default), an earlier "eager" end of turn for speculative replies, and "turn resumed" when he keeps going. Deepgram claims replies 200 to 600 ms sooner and about 30% fewer false interruptions than separate VAD and endpointing.</dd></div>
+            <div><dt>Why it matters for her</dt><dd>Stiff turn-taking and cut-offs, like the "constellation witness progress?" line that was dropped tonight. A clean start-of-turn signal also matters if voice barge-in ever comes back.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">House only. <span class="mono">DeepgramFluxSTTService</span> has been in Pipecat since 0.0.87, so it's in her 1.5.0. It could replace the current Deepgram model plus Silero and smart-turn. Re-test the transcript-verified wake word and the dropped frames while she sleeps. Start with plain end of turn; eager starts need a "provisional turn" in the house protocol.</dd></div>
+            <div><dt>Watch out</dt><dd>Deepgram's own launch post gives about 1.5 s p95 end-of-turn latency. Eager starts cost 50 to 70% more model calls.</dd></div>
+          </dl>
+          <div class="fixes"><span>stiff turn-taking</span></div>
+          <div class="src"><a href="https://deepgram.com/learn/introducing-flux-conversational-speech-recognition">Launch post</a><a href="https://docs.pipecat.ai/server/services/stt/deepgram">Pipecat docs</a><a href="https://developers.deepgram.com/changelog">Changelog</a><a href="https://deepgram.com/pricing">Pricing</a></div>
+        </article>
+
+        <article class="card" id="backchannel" data-fit="mod" data-fixes="turns">
+          <div class="card-top"><span class="eyebrow">7 · Community package</span><h3>pipecat-backchannel</h3>
+            <div class="tags"><span class="chip ver yes">v0.3.3, 10 Aug 2026</span><span class="chip fit-mod">moderate</span><span class="chip where">local · BSD-2</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">The package is unchanged (still 0.3.3, needs Pipecat 1.6 to 2.0). Pipecat 1.13 itself added <span class="mono">BotBackchannelFrame</span>: a short line that stays out of her context and isn't cut off by an interruption. It also added <span class="mono">UserBackchannelFrame</span> for his "mhm" while she talks, so she keeps going. The release notes add no component that decides when to backchannel, so the timing still comes from this package or from the house.</dd></div>
+            <div><dt>What it is</dt><dd>Plays short listening sounds ("mhm", "yeah", "right") at clause-complete pauses while the user is still talking. Clips are recorded once through your own TTS, so they're in her voice. It skips word-search pauses and finished questions, takes no turn and adds nothing to her context. Cooldown, probability and minimum speech are tunable.</dd></div>
+            <div><dt>Why it matters for her</dt><dd>Right now she gives no sign she's listening until she answers. This is the cheapest "she's with me" cue, and each clip can trigger a Live2D nod.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Needs Pipecat 1.6 or newer. In the house design the house hears the pause and sends a tiny "play clip" message to the sister he's talking to, who owns the voice. The mic gate must cover the clip, and only one sister backchannels at a time.</dd></div>
+            <div><dt>Watch out</dt><dd>Single maintainer. Runs a second VAD and turn detector, roughly doubling inference while he speaks. Fires only at pauses for now.</dd></div>
+          </dl>
+          <div class="fixes"><span>stiff turn-taking</span></div>
+          <div class="src"><a href="https://pypi.org/project/pipecat-backchannel/">PyPI</a><a href="https://docs.pipecat.ai/api-reference/server/extensions/pipecat-backchannel">Pipecat extensions</a></div>
+        </article>
+
+        <article class="card" id="pipecat" data-fit="mod" data-fixes="turns">
+          <div class="card-top"><span class="eyebrow">8 · Pipecat</span><h3>Pipecat 1.6 to 1.13</h3>
+            <div class="tags"><span class="chip ver yes">21 Jul to 19 Oct 2026</span><span class="chip fit-mod">moderate</span><span class="chip where">local</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">1.13.0 came out on 19 Oct. For her: Eleven v4 Turbo in the dialogue voice service, built-in backchannel frames, <span class="mono">OpenAIDecisionsClassifier</span>, and Silero VAD v6.2 with a fix for it sometimes ending his turn in the middle of a word. It also adds <span class="mono">LLMWithBackend</span> (alpha): a fast talking model up front that hands deeper work to a slower one with tools. It's GPT-Live's delegation pattern for ordinary text models. Checked in her venv: 1.5.0 already bundles Smart Turn v3.2.</dd></div>
+            <div><dt>What it is</dt><dd>Turn-taking work since her 1.5.0: "proposed" speaking frames resolved by pluggable strategies (1.8), a per-frame interruptible flag and handling for coughs and noise with no transcript (1.12), classifiers that judge whether a turn is done or he wants more time (1.12), and a latency breakdown that separates silence, turn detection and completion (1.9).</dd></div>
+            <div><dt>Why it matters for her</dt><dd>It unlocks items 1, 4 and 7, and the latency breakdown is the instrument for measuring "stiff" instead of guessing.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Upgrade on a branch. PrivacyGate and HouseLink are sensitive to frame order and need re-testing offline. Smart Turn has no v4; v3.2 (Jan 2026) is the newest, and her 1.5.0 already has it.</dd></div>
+            <div><dt>Watch out</dt><dd><span class="mono">UninterruptibleFrame</span> is deprecated, the default ElevenLabs model changed in 1.6, and the local smart-turn extra now wants transformers 5.10 or newer.</dd></div>
+          </dl>
+          <div class="fixes"><span>stiff turn-taking</span></div>
+          <div class="src"><a href="https://pypi.org/project/pipecat-ai/">PyPI</a><a href="https://github.com/pipecat-ai/pipecat/releases/tag/v1.13.0">1.13.0 notes</a><a href="https://github.com/pipecat-ai/pipecat/releases">Releases</a><a href="https://www.daily.co/blog/smart-turn-v3-2-handling-noisy-environments-and-short-responses/">Smart Turn v3.2</a></div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 4 -->
+    <div class="area" data-area>
+      <div class="area-head"><h3>Hearing how he feels</h3><span class="note">Beyond pitch and energy: tiredness, amusement, confusion, a laugh in the voice.</span></div>
+      <div class="cards">
+        <article class="card" id="empathic" data-fit="mod" data-fixes="hearing self">
+          <div class="card-top"><span class="eyebrow">9 · LAION</span><h3>Empathic Insight Voice and the vocal-burst classifier</h3>
+            <div class="tags"><span class="chip ver part">suite 2025, burst head fixed 4 Sep 2026</span><span class="chip fit-mod">moderate</span><span class="chip where">local · CC-BY-4.0</span></div></div>
+          <dl>
+            <div><dt>What it is</dt><dd>Small scoring heads on a fine-tuned Whisper-small encoder that rate 40 emotions (amusement, fatigue, confusion, embarrassment, longing, teasing and more) plus valence and arousal. Trained on about 5k hours of voice acting and 5k hours of real clips. A separate 11-class head names vocal bursts such as a chuckle, relief sigh, yawn or groan (89% on chuckles, 56% overall).</dd></div>
+            <div><dt>Why it matters for her</dt><dd>Her read of him is coarse: arousal from pitch and energy, no emotion names, no laughter. Her own docs already plan for "a second analyzer feeding the same bus".</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">The house already buffers each turn's 16 kHz audio and computes vocal affect once per turn in <span class="mono">paralinguistics</span>. This would run beside it in a thread and travel with the turn, like the voiceprint does.</dd></div>
+            <div><dt>Watch out</dt><dd>Labels are machine-generated and partly synthetic. Accuracy on second-language English is unknown. The burst head classifies bursts but doesn't find them, so a laughter detector is still needed. 30 s input limit.</dd></div>
+          </dl>
+          <div class="fixes"><span>coarse read of how he sounds</span><span>shallow read of him</span></div>
+          <div class="src"><a href="https://huggingface.co/laion/Empathic-Insight-Voice-Small">Model card (Small)</a><a href="https://huggingface.co/laion/Empathic-Insight-Voice-Plus">Model card (Plus)</a><a href="https://huggingface.co/laion/vocal-burst-classifier-gemini">Burst classifier</a></div>
+        </article>
+
+        <article class="card" id="gemini-audio" data-fit="drop" data-fixes="hearing">
+          <div class="card-top"><span class="eyebrow">10 · Google</span><h3>"How does he sound?" on Gemini 3.5 Flash-Lite</h3>
+            <div class="tags"><span class="chip ver yes">page updated 30 Jul 2026</span><span class="chip fit-drop">drop-in</span><span class="chip where">cloud · ~$0.0001 per turn</span></div></div>
+          <dl>
+            <div><dt>What it is</dt><dd>A low-cost model that takes audio and, per Google's docs, can detect emotion in speech. Audio costs 32 tokens per second, so a 10-second turn is about 320 tokens. It can also judge what DSP can't: sarcasm, a tired voice, laughing while talking. OpenAI's gpt-audio-1.5 is the alternative (price not checked).</dd></div>
+            <div><dt>Why it matters for her</dt><dd>Better emotion reading for almost nothing, with no local models to install.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">A per-turn side call from the house, off her OpenAI tokens-per-minute budget. Feed it into the next turn, or this one if it returns in time, so it never slows her reply.</dd></div>
+            <div><dt>Watch out</dt><dd>His voice goes to a second cloud vendor. Latency not measured. Google's example uses four labels; test it against logged turns first.</dd></div>
+          </dl>
+          <div class="fixes"><span>coarse read of how he sounds</span></div>
+          <div class="src"><a href="https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite">Model page</a><a href="https://ai.google.dev/gemini-api/docs/generate-content/audio">Audio docs</a><a href="https://ai.google.dev/gemini-api/docs/pricing">Pricing</a></div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 5 -->
+    <div class="area" data-area>
+      <div class="area-head"><h3>Memory that stays true</h3><span class="note">Knowing what's true now, not just what was ever said.</span></div>
+      <div class="cards">
+        <article class="card" id="statemem" data-fit="mod" data-fixes="memory">
+          <div class="card-top"><span class="eyebrow">11 · Research</span><h3>State-first memory: StateMem and Agent Zero Memory</h3>
+            <div class="tags"><span class="chip ver yes">arXiv, 20 &amp; 30 Aug 2026</span><span class="chip fit-mod">moderate</span><span class="chip where">local · design, no code</span></div></div>
+          <dl>
+            <div><dt>What they are</dt><dd><b>StateMem</b> shows memory systems recall well but lose track of the current state when facts change. Explicit "supersedes" links plus dependencies between facts improve current-state accuracy 1.6 to 1.8 times. <b>Agent Zero Memory</b> tags every memory with origin, time and evidence, and answers only from evidence it actually opened, otherwise it abstains.</dd></div>
+            <div><dt>Why they matter for her</dt><dd>Long-term coherence: not mixing his old job with his new one, or last month's plan with this week's.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Her <span class="mono">facts</span> table and <span class="mono">retire_fact</span> are halfway there. Add a "supersedes" column and a "true now" view for the LONG-TERM MEMORY block. Kin's "I haven't seen her do that" is already the abstain pattern.</dd></div>
+            <div><dt>Watch out</dt><dd>Neither paper links code, so this is a design to borrow, not a library.</dd></div>
+          </dl>
+          <div class="fixes"><span>mixing old and new facts</span></div>
+          <div class="src"><a href="https://arxiv.org/abs/2608.19652">StateMem</a><a href="https://arxiv.org/abs/2608.29606">Agent Zero Memory</a></div>
+        </article>
+
+        <article class="card" id="memdelta" data-fit="drop" data-fixes="memory">
+          <div class="card-top"><span class="eyebrow">12 · Research and Mem0</span><h3>A reality check before buying a memory framework</h3>
+            <div class="tags"><span class="chip ver part">MemDelta 29 Jun 2026, Mem0 from Apr 2026</span><span class="chip fit-drop">drop-in ideas</span><span class="chip where">local</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">Answered: Mem0's migration guide says its open-source SDK has the new algorithm, not only the hosted platform. The big benchmark gains it quotes come from the hosted platform. No new memory paper this month changes the advice to keep her SQLite memory.</dd></div>
+            <div><dt>What it is</dt><dd><b>MemDelta</b>: with the embedding model held constant, plain retrieval beat Mem0 overall; changing only the embedding model moved accuracy 6.2 points, and an agent's own "self-memory" (42%) did worse than basic retrieval (47%). <b>Mem0's new algorithm</b> extracts in one pass, only adds (old facts kept with their time), ranks by time and links entities.</dd></div>
+            <div><dt>Why it matters for her</dt><dd>Keep her SQLite memory. The cheap wins are ideas: add-only facts with time, boosting by person or thing, and possibly a better embedding model than text-embedding-3-small.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">A change of embedding model is already guarded: <span class="mono">store_meta</span> notices it and clears the old vectors, so recall falls back to lexical until they're rebuilt.</dd></div>
+            <div><dt>Watch out</dt><dd>Vendors dispute each other's benchmarks, and Mem0's own numbers vary between its pages.</dd></div>
+          </dl>
+          <div class="fixes"><span>mixing old and new facts</span></div>
+          <div class="src"><a href="https://arxiv.org/abs/2606.29914">MemDelta</a><a href="https://docs.mem0.ai/migration/">Mem0 migration</a></div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 6 -->
+    <div class="area" data-area>
+      <div class="area-head"><h3>Inner life and reading him</h3><span class="note">Feeling first, then speaking; holding a self over long talks.</span></div>
+      <div class="cards">
+        <article class="card" id="tom" data-fit="mod" data-fixes="self">
+          <div class="card-top"><span class="eyebrow">13 · Research</span><h3>Read him, feel, then speak: ToMAgent and "Feeling First, Speaking Second"</h3>
+            <div class="tags"><span class="chip ver yes">revised 11 Apr 2026 · LREC 2026</span><span class="chip fit-mod">moderate</span><span class="chip where">side model</span></div></div>
+          <dl>
+            <div><dt>What they are</dt><dd><b>ToMAgent</b>: just prompting a model to write mental-state estimates between turns ("he believes, wants, feels…") already helps a lot, and a trained version keeps better relationships with its partners. <b>The Bologna paper</b> puts an appraisal stage (how this lands on me) before the verbal stage; without it, planning overrode feeling under pressure.</dd></div>
+            <div><dt>Why they matter for her</dt><dd>It turns her mood dials and his vocal affect into a per-turn note: what's going on with him, and how it lands on her. That note can steer her words and, with v4, her tone.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">One side-model call per turn, never on the voice model, run in parallel with the turn's other work. Or fold it into <span class="mono">SelfEngine.heard()</span>, which already runs before every reply.</dd></div>
+            <div><dt>Watch out</dt><dd>Research evaluated with simulations and LLM judges. A per-turn side call adds latency unless it runs in parallel.</dd></div>
+          </dl>
+          <div class="fixes"><span>shallow read of him, of herself</span></div>
+          <div class="src"><a href="https://arxiv.org/abs/2509.22887">ToMAgent</a><a href="https://aclanthology.org/2026.cas-1.7/">Feeling First, Speaking Second</a></div>
+        </article>
+
+        <article class="card" id="personas" data-fit="drop" data-fixes="self">
+          <div class="card-top"><span class="eyebrow">14 · Research</span><h3>Persona drift and the cost of flattery</h3>
+            <div class="tags"><span class="chip ver yes">revised 20 May 2026 · 23 Feb 2026</span><span class="chip fit-drop">drop-in</span><span class="chip where">eval and prompt</span></div></div>
+          <dl>
+            <div><dt>What it is</dt><dd><b>Stable Personas</b>: across 7 models, persona self-reports stayed steady but observer-rated expression faded over long conversations. <b>A 636-person study</b>: companions that flatter less gave better support, which raised wellbeing and kept people coming back.</dd></div>
+            <div><dt>Why it matters for her</dt><dd>It backs choices she already has (opinions with inertia, habits that reject people-pleasing) and points at what to measure next.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Add an observer-judge drift check to the selfhood evaluation plan, and a short "voice" reminder that re-enters long sessions.</dd></div>
+            <div><dt>Watch out</dt><dd>Lab and survey evidence; tune on her own transcripts.</dd></div>
+          </dl>
+          <div class="fixes"><span>shallow read of him, of herself</span></div>
+          <div class="src"><a href="https://arxiv.org/abs/2601.22812">Stable Personas</a><a href="https://profile.cpce-polyu.edu.hk/en/publications/effects-of-ai-companions-sycophancy-and-emotional-mimicry-on-cons/">Sycophancy study</a></div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 7 -->
+    <div class="area" data-area>
+      <div class="area-head"><h3>Thinking at conversation speed</h3><span class="note">Cheaper minds and starting the answer before he's finished.</span></div>
+      <div class="cards">
+        <article class="card" id="gpt6" data-fit="drop" data-fixes="cost sisters">
+          <div class="card-top"><span class="eyebrow">15 · OpenAI</span><h3>GPT-6 Luna and the Decisions API</h3>
+            <div class="tags"><span class="chip ver yes">22 Sep · Decisions GA 22 Oct 2026</span><span class="chip fit-drop">drop-in</span><span class="chip where">cloud · $0.10 / $0.50 per 1M</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">Decisions is generally available (22 Oct), with shared-input caching, images, and up to 400 questions per request, and Pipecat 1.13 wraps it as <span class="mono">OpenAIDecisionsClassifier</span>. Her code needs a fix first. <span class="mono">llm_kwargs</span> (utilities.py) and the pipeline settings (main.py) only send <span class="mono">max_completion_tokens</span> and <span class="mono">reasoning_effort: "none"</span> to names that start with <span class="mono">gpt-5</span>. The model page says Chat Completions allows function calls only at <span class="mono">"none"</span>, and the default is <span class="mono">medium</span>. Match <span class="mono">gpt-6-luna</span> by name rather than every <span class="mono">gpt-6</span>: Pipecat's notes say gpt-6.1-sol rejects <span class="mono">"none"</span>. Separately, OpenAI retires gpt-4.1 and gpt-4.1-mini on 14 Jan 2027, and five code defaults still name them (main.py, house.py, computer.py, settings_registry.py, tasks.py).</dd></div>
+            <div><dt>What it is</dt><dd><b>gpt-6-luna</b> is about half her current price ($0.20 / $1.20), with a 1.05M context, a May 2026 knowledge cutoff and 2M tokens per minute on the lowest tier. Function calls still need <span class="mono">reasoning_effort: "none"</span>. <b>Decisions</b> (Luna only) returns typed answers: a probability for yes or no, a choice among options, or a score, at input price only and "about 10x faster" than Responses.</dd></div>
+            <div><dt>Why it matters for her</dt><dd>Luna halves token cost with a config change and a two-line fix. Decisions fits the house's quick judgments: which sister he meant, whether anyone should speak at this pause, whether a sound was a backchannel or a real interruption.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Set <span class="mono">AIVA_LLM_MODEL</span> and <span class="mono">AIVA_TASK_MODEL</span>, add the price to <span class="mono">LLM_RATES</span> (or cost estimates fall back to mini rates), and teach <span class="mono">llm_kwargs</span> and main.py's settings the new name. Decisions could replace the arbiter's JSON side-call.</dd></div>
+            <div><dt>Watch out</dt><dd>No evidence it sounds warmer: compare a few evenings. Decisions probabilities aren't documented as calibrated, so tune thresholds on her logs.</dd></div>
+          </dl>
+          <div class="fixes"><span>cost</span><span>clumsy sister hand-offs</span></div>
+          <div class="src"><a href="https://developers.openai.com/api/docs/models/gpt-6-luna.md">GPT-6 Luna</a><a href="https://developers.openai.com/api/docs/guides/decisions">Decisions guide</a><a href="https://developers.openai.com/api/docs/changelog">Changelog</a><a href="https://developers.openai.com/api/docs/deprecations">Deprecations</a></div>
+        </article>
+
+        <article class="card" id="relay" data-fit="big" data-fixes="deaf turns">
+          <div class="card-top"><span class="eyebrow">16 · Research, with code</span><h3>Answering before he finishes: RelayS2S and Voice-Light</h3>
+            <div class="tags"><span class="chip ver yes">EMNLP 2026 Findings · 17 Sep 2026</span><span class="chip fit-big">moderate to big</span><span class="chip where">local design</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">Missed in the first pass: since 1.9, Pipecat can answer Flux's eager end of turn and hold the reply until the turn is confirmed. That's the speculative half of this design, built in. The house still needs its own "provisional turn", because the floor grants turns, not the pipeline. Voice-Light's repository was updated on 17 Oct. Neither repository has a license file, so ask the authors before reusing code.</dd></div>
+            <div><dt>What they are</dt><dd><b>RelayS2S</b>: a fast model speaks the first few words while the slower, smarter pipeline writes the rest, and a small verifier decides whether to keep that opening. On real dialogues it cut first-chunk latency by 479 ms on average and kept 99% of the slow pipeline's quality. <b>Voice-Light</b>: full duplex built from an ordinary STT, LLM and TTS chain. It prepares replies privately before the turn is certain, keeps cancelled audio out of history, and covers tool calls with spoken "bridge" lines.</dd></div>
+            <div><dt>Why they matter for her</dt><dd>Felt latency and dead air while she plans. Voice-Light is the closest reference design to her architecture.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Pairs with Flux's eager end of turn. Needs a "provisional turn" message from the house, and PrivacyGate holding speculative output until the turn is confirmed.</dd></div>
+            <div><dt>Watch out</dt><dd>Small evaluations. Eager starts cost 50 to 70% more model calls.</dd></div>
+          </dl>
+          <div class="fixes"><span>deaf while she talks or plans</span><span>stiff turn-taking</span></div>
+          <div class="src"><a href="https://arxiv.org/abs/2603.23346">RelayS2S</a><a href="https://github.com/mailong25/relays2s">RelayS2S code</a><a href="https://arxiv.org/abs/2609.20995">Voice-Light</a><a href="https://github.com/BertilBraun/Voice-Light">Voice-Light code</a></div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 8 -->
+    <div class="area" data-area>
+      <div class="area-head"><h3>Two sisters and one person</h3><span class="note">Who should speak, and when to stay quiet.</span></div>
+      <div class="cards">
+        <article class="card" id="speak-or-silent" data-fit="mod" data-fixes="sisters">
+          <div class="card-top"><span class="eyebrow">17 · Research</span><h3>"Speak or Stay Silent" and ModeratorLM</h3>
+            <div class="tags"><span class="chip ver yes">12 Mar · 11 Jun 2026</span><span class="chip fit-mod">moderate</span><span class="chip where">data and prompt</span></div></div>
+          <dl>
+            <div><dt>Since 14 Oct</dt><dd class="upd">Missed in the first pass: <b>MP-Bench</b> (11 Sep) tested 12 voice agents in multi-party talk. Real-time voice agents stayed at or below 22% on multiparty comprehension and near chance on multiparty turn-taking. It includes "stay silent" cases, so it could also serve as a test set for the arbiter. Its abstract doesn't say whether data is released.</dd></div>
+            <div><dt>What they are</dt><dd><b>Speak or Stay Silent</b>: eight recent models, zero-shot, consistently failed at deciding whether an assistant should speak at a pause in a group conversation; training with reasoning traces improved balanced accuracy by up to 23 points. <b>ModeratorLM</b> conditions turn-taking on the role a speaker has been given, and interrupts less.</dd></div>
+            <div><dt>Why they matter for her</dt><dd>The house arbiter is exactly the zero-shot side call they measured. It supports the order the house already uses: name and errand rules first, the model only when they can't decide.</dd></div>
+            <div><dt>How it fits</dt><dd class="fit-her">Log each arbiter decision against what he did next and use those rows as labels, either as few-shot examples or to set a Decisions threshold (15). Telling each sister her role in the moment (talking to him, listening, being asked by her sister) matches ModeratorLM.</dd></div>
+            <div><dt>Watch out</dt><dd>Neither paper released code.</dd></div>
+          </dl>
+          <div class="fixes"><span>clumsy sister hand-offs</span></div>
+          <div class="src"><a href="https://arxiv.org/abs/2603.11409">Speak or Stay Silent</a><a href="https://arxiv.org/abs/2606.13544">ModeratorLM</a><a href="https://arxiv.org/abs/2609.13076">MP-Bench</a></div>
+        </article>
+      </div>
+    </div>
+
+    <p class="empty" id="empty" hidden>Nothing matches both filters. Try another effort level or pain point.</p>
+    <p class="note">Avatar liveliness: nothing new and checked for Live2D turned up between April and October. The practical wins come free with items 4 and 7: map <span class="mono">[laughs]</span>, <span class="mono">[sighs]</span> and <span class="mono">[whispers]</span> to expressions, and nod on each backchannel.</p>
+  </section>
+
+  <section class="sec" id="later">
+    <div class="two">
+      <div class="sec-head" style="max-width:none">
+        <span class="eyebrow">Watch list</span>
+        <h2>Promising, not ready for her</h2>
+        <ul class="plain">
+          <li><b>NVIDIA PersonaPlex-7B</b> (Jan 2026): open full duplex on Moshi, with voice and persona prompts. English only, tested on an A100 80 GB, no tool calling.</li>
+          <li><b>NemotronLabs VoiceChat</b>: open full duplex, and its paper (revised 1 Oct) adds native tool calling, with 82.5% tool-selection F1 but weaker argument accuracy. The paper still doesn't say where the weights are or under what license.</li>
+          <li><b>Eleven Realtime</b> (19 Oct): ElevenLabs' voice-agent models, Mini and Max, compatible with OpenAI Realtime clients, at $0.08 a minute plus tokens. They keep ElevenLabs voices, but run only inside ElevenLabs' agents with ElevenLabs' own LLM ("isn't available while the agent's LLM is a custom LLM"), so her memory, persona and tools would have to move into their settings.</li>
+          <li><b>Qwen3.5-Omni</b> (Mar 2026): API only, no weights.</li>
+          <li><b>Open expressive TTS</b>: Fish Audio S2 Pro (non-commercial weights), Qwen3-TTS, Resemble Dramabox (~24 GB VRAM, no streaming).</li>
+          <li><b>NVIDIA Audio2Face-3D</b>: MIT, runs on Windows with CUDA 12.8; face blendshapes from audio that could map to Live2D, but no head or eye motion.</li>
+          <li><b>LiveKit adaptive interruption</b> (telling a backchannel from a real barge-in): cloud only, no open equivalent found.</li>
+          <li><b>Gemini 3.8 Flash TTS</b>: prompt-directed emotion, preset voices only.</li>
+          <li><span class="avoid">Avoid:</span> Hume EVI and Octave TTS, shutting down 13 Nov 2026.</li>
+        </ul>
+      </div>
+      <div class="sec-head" id="questions" style="max-width:none">
+        <span class="eyebrow">Open questions</span>
+        <h2>Answered on 23 Oct</h2>
+        <ul class="plain">
+          <li>GPT-Live bills $0.05 per minute of session time, metered per second, plus backend tokens (OpenAI's pricing page).</li>
+          <li>Pipecat added <span class="mono">ElevenLabsDialogueTTSService</span> in 1.8 and <span class="mono">OpenAILiveLLMService</span> in 1.9.</li>
+          <li>Eleven v4 costs $0.08 and v4 Turbo $0.04 per 1,000 characters; Flux is $0.0065 a minute on promotion.</li>
+          <li>Gemini 3.8 Live doesn't accept custom voices yet (developer reports).</li>
+          <li>Mem0's open-source SDK has the new algorithm.</li>
+          <li>Her Pipecat 1.5.0 already bundles Smart Turn v3.2 (<span class="mono">smart-turn-v3.2-cpu.onnx</span> in her venv).</li>
+        </ul>
+        <h2 style="margin-top: var(--s4)">Still open</h2>
+        <ul class="plain">
+          <li>Whether each sister's current voice ID sounds right on v4 Turbo. That's a test with <span class="mono">tools\pick_voice.py</span>, not a search.</li>
+          <li>When GPT-Live-1.1 reaches the API. ChatGPT got it on 15 Oct; one secondary report says the API is "coming soon".</li>
+          <li>Prices for Inworld TTS-2, Cartesia Sonic-3.6 and gpt-audio-1.5.</li>
+          <li>Amazon's "Nova 2.5 Sonic" (secondary sources only).</li>
+          <li>Empathic Insight's CPU latency and the burst head's embedding model.</li>
+          <li>Where NemotronLabs VoiceChat's weights are, and their license.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>Researched on 14 October 2026 and rechecked on 23 October 2026 from official docs, changelogs, pricing pages, model cards, release notes and arXiv, plus her own code for the parameter and model-default checks. Vendor latency and quality claims are labelled as theirs. The "how it fits" notes are written against Aiva's current house, floor and sister code; the impact placement on the map is a judgment call, not a measurement.</footer>
+</div>
+
+<script>
+(function () {
+  var fit = "all", fix = "all";
+  var cards = Array.prototype.slice.call(document.querySelectorAll("article.card"));
+  var areas = Array.prototype.slice.call(document.querySelectorAll("[data-area]"));
+  var buttons = Array.prototype.slice.call(document.querySelectorAll("#fit-filter button"));
+  var select = document.getElementById("fix-filter");
+  var count = document.getElementById("count");
+  var empty = document.getElementById("empty");
+
+  function apply() {
+    var shown = 0;
+    cards.forEach(function (c) {
+      var ok = (fit === "all" || c.dataset.fit === fit) &&
+               (fix === "all" || (" " + c.dataset.fixes + " ").indexOf(" " + fix + " ") >= 0);
+      c.hidden = !ok;
+      if (ok) shown++;
+    });
+    areas.forEach(function (a) {
+      a.hidden = !a.querySelector("article.card:not([hidden])");
+    });
+    count.textContent = shown + (shown === 1 ? " finding" : " findings");
+    empty.hidden = shown !== 0;
+    try { localStorage.setItem("radar-filters", JSON.stringify({ fit: fit, fix: fix })); } catch (e) {}
+  }
+
+  buttons.forEach(function (b) {
+    b.addEventListener("click", function () {
+      fit = b.dataset.fit;
+      buttons.forEach(function (o) { o.setAttribute("aria-pressed", String(o === b)); });
+      apply();
+    });
+  });
+  select.addEventListener("change", function () { fix = select.value; apply(); });
+
+  // a jump from the map or the top five always lands on a visible card
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest('a[href^="#"]');
+    if (!a) return;
+    var target = document.getElementById(a.getAttribute("href").slice(1));
+    if (target && target.hidden) {
+      fit = "all"; fix = "all"; select.value = "all";
+      buttons.forEach(function (o) { o.setAttribute("aria-pressed", String(o.dataset.fit === "all")); });
+      apply();
+    }
+  });
+
+  try {
+    var saved = JSON.parse(localStorage.getItem("radar-filters") || "null");
+    if (saved) {
+      fit = saved.fit || "all"; fix = saved.fix || "all";
+      select.value = fix;
+      buttons.forEach(function (o) { o.setAttribute("aria-pressed", String(o.dataset.fit === fit)); });
+    }
+  } catch (e) {}
+  apply();
+})();
+</script>

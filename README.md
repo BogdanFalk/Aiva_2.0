@@ -1,16 +1,18 @@
 # Aiva 2.0
 
-A voice AI companion for Windows with her own Live2D desktop avatar. Talk to her, and she talks
-back — while launching apps, managing files, checking the weather, and emoting through her avatar.
+A voice AI companion for Windows — two of them: **Aiva** and her sister **Saga**, each with her own
+Live2D desktop avatar. Talk to them, and they talk back — while launching apps, managing files,
+checking the weather, and emoting through their avatars.
 
-Rebuilt in 2026 as a fully streaming pipeline:
+Rebuilt in 2026 as a fully streaming pipeline, split across three processes: the **house** (the one
+microphone and ear) and one process per sister:
 
 ```
-mic ─► Silero VAD + smart-turn v3 (local; tolerates stutters and "uhhmm")
-    ─► Deepgram Nova-3 streaming STT
-    ─► LLM with native tool calling (gpt-4.1-mini, streamed)
-    ─► ElevenLabs Flash v2.5 streaming TTS (Aiva's voice)
-    ─► speakers  (+ RMS envelope ─► her Live2D avatar's mouth, in-process)
+house:   mic ─► Silero VAD + smart-turn v3 (local; tolerates stutters and "uhhmm")
+             ─► Deepgram Nova-3 streaming STT ─► the floor (who answers) ─► loopback TCP
+sister:  ─► LLM with native tool calling (streamed; AIVA_LLM_MODEL)
+         ─► ElevenLabs Flash v2.5 streaming TTS (her own voice)
+         ─► speakers  (+ RMS envelope ─► her avatar renderer process, for lip-sync)
 ```
 
 Voice-to-voice latency is ~1 s (the old blocking loop was 8–15 s).
@@ -30,10 +32,15 @@ Voice-to-voice latency is ~1 s (the old blocking loop was 8–15 s).
    DEEPGRAM_API_KEY=...          # free at console.deepgram.com ($200 credit)
    OPENWEATHER_API_KEY=...       # optional, for weather
    DEFAULT_CITY=...              # optional
+   SAGA_ELEVENLABS_VOICE_ID=...  # optional, Saga's voice (text-only without one)
+   TAVILY_API_KEY=...            # optional, web search for both sisters
+   NTFY_TOPIC=...                # optional, phone alerts when a spend cap is near
    ```
 3. Optional overrides in `.env`: `AIVA_LLM_MODEL` (default `gpt-4.1-mini`),
    `ELEVENLABS_MODEL` (default `eleven_flash_v2_5`),
-   `AIVA_INPUT_DEVICE_INDEX` / `AIVA_OUTPUT_DEVICE_INDEX` (see below).
+   `AIVA_INPUT_DEVICE_INDEX` / `AIVA_OUTPUT_DEVICE_INDEX` (see below). Every knob, with its
+   default, is also listed and editable on the dashboard's **Settings** tab (config is read at
+   boot, so it tells you what to restart).
 
 ## Run
 
@@ -115,35 +122,47 @@ the recipe in `training/` (`hey_saga.yaml`).
 
 All the knobs live in the `SAGA_*` and `AIVA_SISTER_*` / `AIVA_HOUSE_*` blocks of `.env`.
 
+## Dashboard
+
+A live web view of both sisters at http://127.0.0.1:8760 — the house opens it at boot; by hand:
+`cd aiva && ..\.venv\Scripts\python dashboard.py` (`--open` opens the browser). Tabs **Aiva | Saga |
+Conversations | Tasks | Settings**: mood, diary, wishes, traits, books, tasks start to finish, the
+sisters' conversations, spend caps. It is read-only and loopback-only, except the Controls strip,
+the chat box (types a line to them as if it had been heard) and Settings' Save.
+
 ## Memory
 
-Aiva keeps `aiva/memory.db`: full transcripts per session, plus a `facts` table
-of durable things she's learned about you (extracted by a cheap LLM pass at
-shutdown). Facts are injected into her system prompt at startup, so she
-remembers you across restarts.
+Each sister keeps her own SQLite file — `aiva/memory.db` for Aiva, `aiva/saga.db` for Saga: full
+transcripts per session, plus a `facts` table of durable things she's learned about you (extracted
+by a cheap LLM pass at shutdown). Facts are injected into her system prompt at startup, so she
+remembers you across restarts. The same file holds her diary, wishes, tastes and task history, so
+it is snapshotted into `aiva/backups/` at boot; her current mood is kept apart, in
+`aiva/inner_state.json` (`aiva/saga_inner_state.json` for Saga). The house keeps the shared
+conversation log in `aiva/house.db`.
 
 ## Ambient mode (wake word)
 
-Set `AIVA_WAKE_WORD=1` in `.env` and she starts asleep: nothing streams to
-Deepgram (idle time costs nothing) until the wake word — currently the
-pretrained **"Hey Jarvis"** model from openWakeWord as a placeholder. After
-`AIVA_IDLE_TIMEOUT` seconds (default 60) without conversation she dozes off
+Set `AIVA_WAKE_WORD=1` (the `start_*.bat` launchers set it) and the house starts
+asleep: nothing streams to Deepgram (idle time costs nothing) until a wake word.
+After `AIVA_IDLE_TIMEOUT` seconds (default 20) without conversation it dozes off
 again.
 
-To make her answer to "Aiva" instead: train a custom openWakeWord model (their
-[automatic training notebook](https://github.com/dscripka/openWakeWord#training-new-models)
-takes ~an hour on Colab), drop the `.onnx` file in the repo, and set
-`AIVA_WAKE_MODEL=path\to\aiva.onnx`.
+The repo ships custom openWakeWord models: `aiva/models/hey_aiva.onnx` (set
+`AIVA_WAKE_MODEL=models/hey_aiva.onnx`; without it the house falls back to the
+pretrained **"Hey Jarvis"**) and `aiva/models/hey_saga.onnx`, which the house
+picks up for Saga on its own (`SAGA_WAKE_MODEL` overrides it). The training
+recipes live in `training/`.
 
 **Verified wakes.** A wake-word hit alone is only a *candidate*: the listener
 keeps the last 2.5 s of audio (the wake phrase itself), hands it to Deepgram
-ahead of the live mic, and she only truly wakes if that first transcript
-contains her name — otherwise she drops it and goes straight back to sleep
+ahead of the live mic, and the house only truly wakes if that first transcript
+contains a sister's name — otherwise it drops it and goes straight back to sleep
 without reacting. This is what stops TV/game dialogue and other people's
-speech waking her (the custom model fires on those with the same scores as a
+speech waking them (the custom model fires on those with the same scores as a
 real "hey Aiva"). Knobs: `AIVA_WAKE_VERIFY=0` disables the check,
-`AIVA_WAKE_VERIFY_SECS` (default 5) is how long she waits for speech, and
-`AIVA_NAME_VARIANTS=eyva,ayvah` adds spellings Deepgram uses for her name.
+`AIVA_WAKE_VERIFY_SECS` (default 5) is how long it waits for speech, and
+`AIVA_NAME_VARIANTS=eyva,ayvah` / `SAGA_NAME_VARIANTS` add spellings Deepgram
+uses for their names.
 The log shows `wake candidate`, `AWAKE — wake word confirmed`, and
 `wake rejected — ...` lines so you can see what got filtered.
 
@@ -167,11 +186,12 @@ that" and it's gone for good (`drop_trait`). Say "you can read whenever you
 like" and she'll read quietly when you're away (`reading_permission`);
 otherwise she asks first, and only when you're at the PC but it's gone quiet.
 
-Study and synthesis run on their own models (`AIVA_STUDY_MODEL`,
-`AIVA_STUDY_SYNTH_MODEL` — luna and terra by default) so they never eat the
-voice model's rate limit; a whole novel costs roughly ten to twenty-five cents,
-capped at `AIVA_BOOK_MAX_COST_USD`. `python -m modules.becoming --show` prints
-the traits, lessons, and turns of phrase she's picked up. Offline tests:
+Study and synthesis run on their own models (`AIVA_STUDY_MODEL`, which falls
+back to the task model, and `AIVA_STUDY_SYNTH_MODEL`, default `gpt-5.6-terra`)
+so they can stay off the voice model's rate limit; a whole novel costs roughly
+ten to twenty-five cents, capped at `AIVA_BOOK_MAX_COST_USD`.
+`python -m modules.becoming --show` prints the traits, lessons, and turns of
+phrase she's picked up. Offline tests:
 `.venv\Scripts\python -m pytest tests -q`; a semi-live read:
 `cd aiva && ..\.venv\Scripts\python ..\tests\e2e_reading.py <book> --all`.
 
@@ -189,12 +209,14 @@ if she has done that *kind* of task before and you never told her she got it
 wrong, she just does it — one short line naming what she's about to touch, then
 go. If it's new to her, or you corrected her on it, or it deletes, moves, sends
 or pays for anything, she states the plan in one sentence and waits for your
-yes. Shell commands and handing code to Claude Code always wait for a yes.
+yes. Shell commands and handing code to Claude Code wait for a yes.
 When a new task has two genuinely different approaches (UI vs terminal vs
 Claude Code, quick vs thorough) she offers both and asks which you prefer —
 and after three consistent picks she remembers your preference and stops
 asking. She grades Claude Code's work (diff, tests) and tells you honestly
-whether it did well, got partway, or botched it.
+whether it did well, got partway, or botched it. `AIVA_TASK_FREE_RANGE=1` (off by
+default) lets coding tasks run without the plan and hand-off approvals; shell
+commands and anything that sends or pays on your behalf still wait for a yes.
 
 Tasks that go well twice become **flows** she offers to keep ("want me to
 remember that as a flow called streaming setup?"); "run my streaming setup"
@@ -202,24 +224,26 @@ then replays it. Say "no, that's wrong" or "next time do X first" right after
 a task and she records it against that task — the next time it comes up she
 confirms first and says what she'll do differently.
 
-Knobs: `AIVA_TASK_MODEL` (planner/verifier model; `.env` sets gpt-4.1-mini so task
-calls don't eat the voice model's tokens-per-minute allowance — see below).
-Per-task safety limits live in `tasks.Limits` (12 steps, 40 tool calls, 60 LLM
-calls, 20 minutes, $1.50). Look for `task t-…` lines in `aiva/logs` to see
-plans, familiarity scores and decisions. Offline tests:
+Knobs: `AIVA_TASK_MODEL` (planner/verifier model; defaults to the voice model —
+point it elsewhere if task calls compete for the voice model's tokens-per-minute
+allowance, see below). Per-task safety limits live in `tasks.Limits` (12 steps,
+80 tool calls, 90 LLM calls, 20 minutes, $1.50). Look for `task t-…` lines in
+`aiva/logs` to see plans, familiarity scores and decisions. Offline tests:
 `.venv\Scripts\python -m pytest tests -q`.
 
 ## Models
 
-`AIVA_LLM_MODEL` (her voice), `AIVA_TASK_MODEL` (task planner/verifier) and
-`AIVA_VISION_MODEL` (screen vision) all default to **gpt-5.6-luna** as of
-August 2026: OpenAI's fast/cheap tier — sub-second first token on tool-calling
-turns, $0.20 / $1.20 per million tokens, and 500k tokens-per-minute even on the
-entry usage tier (gpt-4.1 gets 30k). `gpt-5.6-terra` is the step up if you want
-more brains at the same limits; `gpt-4.1` still works if you ever want to
-compare. The gpt-5 line needs `max_completion_tokens` and `reasoning_effort:
-none` on Chat Completions — the code handles that automatically per model
-(`modules/utilities.py: llm_kwargs`), so switching is just the env var.
+`AIVA_LLM_MODEL` (their voice), `AIVA_TASK_MODEL` (task planner/verifier) and
+`AIVA_VISION_MODEL` (screen vision) fall back to `gpt-4.1-mini` in code (the
+task and vision models follow `AIVA_LLM_MODEL` when unset). The recommended
+setting since August 2026 is **gpt-5.6-luna** for all three: OpenAI's fast/cheap
+tier — sub-second first token on tool-calling turns, $0.20 / $1.20 per million
+tokens, and 500k tokens-per-minute even on the entry usage tier (gpt-4.1 gets
+30k). `gpt-5.6-terra` is the step up if you want more brains at the same limits;
+`gpt-4.1` still works if you ever want to compare. The gpt-5 line needs
+`max_completion_tokens` and `reasoning_effort: none` on Chat Completions — the
+code handles that automatically per model (`modules/utilities.py: llm_kwargs`),
+so switching is just the env var.
 
 ## Rate limits (OpenAI tokens per minute)
 
@@ -228,26 +252,27 @@ Every voice turn re-sends her whole context plus all tool schemas (roughly
 gpt-4.1) a few quick turns plus a task in the background can hit a 429. What's
 in place: the OpenAI clients retry rate limits with backoff
 (`AIVA_LLM_MAX_RETRIES`, default 5) instead of dropping the turn; task planning,
-verification and screen vision run on `gpt-4.1-mini` (`AIVA_TASK_MODEL`,
-`AIVA_VISION_MODEL`), which has its own, far larger allowance; and the live
-context is trimmed to `AIVA_CONTEXT_BUDGET_CHARS` (24000) so long sessions
-don't grow without bound. The lasting fix is a higher usage tier on the
-OpenAI account (tier 2 lifts gpt-4.1 to 450k TPM) — then point the side-call
-models back at gpt-4.1 if you want.
+verification and screen vision can run on a different model with its own
+allowance (`AIVA_TASK_MODEL`, `AIVA_VISION_MODEL`); and the live context is
+trimmed to `AIVA_CONTEXT_BUDGET_CHARS` (24000) so long sessions don't grow
+without bound. On gpt-5.6-luna (500k TPM) this is rarely an issue; on gpt-4.1
+the lasting fix is a higher usage tier (tier 2 lifts it to 450k TPM).
 
 ## Desktop avatar (self-owned Live2D renderer)
 
-Aiva renders her own body: `modules/avatar_renderer.py` is a separate process
+Each sister renders her own body: `modules/avatar_renderer.py` is a separate process
 (live2d-py + PyQt5) drawing the Live2D model in a transparent, click-through,
 always-on-top window. No VTube Studio, no Spout overlay, no VB-Cable — her TTS
 audio goes straight to your speakers, and a pipeline tap streams its loudness
 to the renderer for lip-sync.
 
 - Model assets live in `aiva/assets/avatar/ariu/` (licensed content, not committed).
-- The renderer outlives Aiva's self-restarts; a rebooted Aiva adopts it via
-  `aiva/avatar_state.json`. It dies with her on a real quit. If the renderer she
-  finds speaks an older protocol (an update changed it), she retires it and starts
-  a fresh one — her placement carries over.
+- The renderer outlives a sister's self-restarts; a rebooted sister adopts it via
+  her state file (`aiva/avatar_state.json`, `aiva/saga_avatar_state.json`). It dies
+  with her on a real quit. If the renderer she finds speaks an older protocol (an
+  update changed it), she retires it and starts a fresh one — her placement carries over.
+- Saga's body also draws a quiet **constellation** to her upper left: one faint star per
+  moment she lives through (`SAGA_CONSTELLATION=0` turns it off).
 - Demo it standalone (never starts Aiva): `cd aiva && python -m modules.avatar_renderer --demo`
 - **What she's doing shows.** While she reads, she pulls up a book: her hands come
   up, the book rises into them, her head tips down and her eyes run along the lines;
@@ -258,6 +283,29 @@ to the renderer for lip-sync.
   Either way her eyes stay open even while the house sleeps. Preview it without a
   sister: `cd aiva && python -m modules.avatar_renderer --instance demo --demo-activity`
   (add `--windowed` for a small movable window).
+- **She has her own drawing canvas.** `open_drawing` / `draw_stroke` / `clear_drawing`
+  open the standalone `drawing-app/` window straight from her process (no terminal, no
+  console, your keyboard focus left alone) and draw on it in her own ink; one window per
+  sister, reused until you close it. "Open your drawing app" means this canvas, never
+  Aseprite or Paint. Check it with no terminal by opening `drawing-app/verify_drawing.pyw`
+  (details in `drawing-app/README.md`).
+- **Her drawings are kept.** Saved drawings go to
+  `%USERPROFILE%\Pictures\Aiva and Saga Drawings\` as `.aivadraw` plus a `.png`. Use
+  **Save** (`Ctrl+S`), **Save As…** or **Open…** (`Ctrl+O`) in the canvas toolbar, or
+  ask her: `save_drawing` ("save that as sleepy cat") and `open_saved_drawing` ("bring
+  back the tree"). The status bar shows the folder and whether the drawing is saved.
+  You don't need to save for nothing to be lost: every finished stroke updates a
+  recovery copy, and closing the window, a crash or her restart never loses the canvas.
+  The next time it opens, her last drawing is back. After a restart she reuses the
+  window that's still up rather than opening a second, blank one. Clear keeps a
+  `recovery\<name>-before-clear` copy, and opening a drawing over unsaved work saves
+  that work first. A damaged recovery copy is set aside, never overwritten. Details:
+  *Saving and recovery* in `drawing-app/README.md`.
+- **A stroke that came out wrong can be taken back.** The canvas toolbar has **Undo**
+  (`Ctrl+Z`), and she has `undo_stroke` ("undo that"). Each one takes back only that
+  author's newest finished stroke, never her sister's, and repeating it walks back
+  further. In her window, strokes you draw by hand count as hers. Clear still can't
+  be undone; its before-clear copy is how you get a cleared drawing back.
 - Lip-sync is two-channel: loudness drives how open the mouth is, spectral
   brightness drives its shape (`ParamMouthForm`) — dark vowels (oo/oh) purse it,
   bright ones (ee/eh) widen it, so she appears to mouth phoneme shapes.
@@ -269,7 +317,7 @@ to the renderer for lip-sync.
 
 ## Shell command safety
 
-Aiva can stage shell commands but **cannot execute them without your verbal
+Either sister can stage shell commands but **cannot execute them without your verbal
 confirmation** — she'll tell you what the command does and ask first. Every staged and
 executed command is printed to the console.
 
@@ -279,6 +327,8 @@ executed command is printed to the console.
 aiva/house.py                the house: mic, STT, wake words, hotkeys, the floor, house.db
 aiva/main.py                 one sister's process (--character aiva|saga): her LLM, voice, core
 aiva/launcher.py             boots OBS (optional), ensures the house, then one sister
+aiva/dashboard.py            live web view of both sisters (http://127.0.0.1:8760)
+aiva/version.py              her version (changes are logged in CHANGELOG.md)
 aiva/modules/house_*.py      protocol, server, client, floor, memory, stage (house side)
 aiva/modules/house_link.py   sister-side processors (HouseLink, PrivacyGate, MindWatcher, ...)
 aiva/modules/sisters.py      pure turn-taking decisions (addressee, sister rounds, floor)
@@ -295,6 +345,13 @@ aiva/modules/app_launcher.py launch Windows apps (app_paths.json + registry)
 aiva/modules/file_operations.py  create/open/list files (fenced to your user profile)
 aiva/modules/utilities.py    time/date/weather
 aiva/modules/memory.py       session transcripts + long-term facts (SQLite)
+aiva/modules/tasks.py        task runner (+ task_memory.py: experience-based autonomy, flows)
+aiva/modules/reading.py      reading books (+ library.py parsers, becoming.py how books change her)
+aiva/modules/inner.py        mood, diary, wishes (+ drives.py, dreams.py, projects.py, preferences.py)
+aiva/modules/web.py          web search/fetch (+ space.py, her kept finds; limits.py spend caps)
+aiva/modules/constellation.py  Saga's constellation witness
+aiva/modules/drawing.py      her drawing canvas: launch or reuse drawing-app/, draw on it
+drawing-app/                 the standalone drawing app (own README and tests; imports nothing from aiva/)
 ```
 
 ## Roadmap
@@ -304,7 +361,7 @@ aiva/modules/memory.py       session transcripts + long-term facts (SQLite)
 - [x] Phase 2 — self-hearing gate for speaker use, F10 interrupt, pipecat 1.x API migration
   - [x] VB-Cable lip-sync routing into VTube Studio + expression hotkeys (queried from the live model at startup)
 - [x] Phase 3 — long-term memory (facts table, injected into the prompt)
-- [x] Phase 4 — wake word + ambient mode (placeholder "Hey Jarvis"; custom "Aiva" model pending)
+- [x] Phase 4 — wake word + ambient mode (custom "Hey Aiva" / "Hey Saga" models, transcript-verified)
 - [x] Phase 5 — session cost telemetry
 - [x] Phase 6 — self-owned Live2D avatar renderer (dropped VTube Studio, Spout overlay, VB-Cable)
   - [ ] packaging / autostart

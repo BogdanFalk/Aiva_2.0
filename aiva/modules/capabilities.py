@@ -28,7 +28,9 @@ SAFE_TOOLS = frozenset({
     "recall_from_space", "study_book", "reading_status", "recall_reading", "add_to_wishlist",
     "remember", "note_desire", "note_preference", "recall_journal", "what_can_i_do",
     "cat_status", "feed_cat", "pet_cat", "play_with_cat", "avatar_expression",
-    "recall_about_sister", "call_sister", "set_sister_talk",
+    "recall_about_sister", "call_sister", "set_sister_talk", "open_drawing", "draw_stroke",
+    # saving never replaces another drawing; opening one saves unsaved work first
+    "save_drawing", "open_saved_drawing",
 })
 
 
@@ -90,6 +92,13 @@ CAPABILITIES = (
         ("call_sister",),
         ("call", "wake", "bring", "boot", "start", "fetch", "get", "sister", "aiva", "saga",
          "get her", "call her")),
+    Capability(
+        "draw", "want to draw or sketch something",
+        "open my own drawing canvas and draw on it, stroke by stroke, without touching your mouse or "
+        "keyboard", "auto",
+        ("open_drawing", "draw_stroke", "save_drawing", "open_saved_drawing"),
+        ("draw", "drawing", "sketch", "doodle", "paint", "painting", "canvas", "scribble",
+         "drawing app", "drawapp")),
     Capability(
         "build_software", "want to make or change software, or build a tool",
         "build or change software by planning it with Claude Code — I pitch the plan first, then do "

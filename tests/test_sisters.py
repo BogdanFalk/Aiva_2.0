@@ -364,3 +364,19 @@ def test_calls_errands_and_reports_2026_10_14():
     rep = turn(kind="report")
     assert exchange_should_continue("Saga, want me to make that change?", rep, AddressState(), ExchangeState(),
                                     ExchangeConfig(), T0) is None
+
+
+def test_filler_openers_dashes_and_spoken_to_2026_10_21():
+    from modules.sisters import BOTH, spoken_to, vocative
+    others = [SAGA_NAMES]
+    assert vocative("Yep, Saga, you’re looking at it—the shared drawing canvas.", others) == "saga"
+    assert vocative("Sure, Saga, go ahead.", others) == "saga"
+    assert vocative("Oh, hey—Saga, look at this.", others) == "saga"
+    assert vocative("Saga—look at this.", others) == "saga"
+    # still about her, not to her
+    assert vocative("Wow—Saga's going to love it.", others) is None
+    assert vocative("Nice, Saga is starting up.", others) is None
+    assert spoken_to("Yep, Saga, you’re looking at it.", others) == "saga"
+    assert spoken_to("Oh, hey—you’re back. Saga, Frank wants you to see my app.", others) == BOTH
+    assert spoken_to("Pizza. Saga, you in?", others) == BOTH
+    assert spoken_to("Sunny all day, and Saga agrees.", others) is None

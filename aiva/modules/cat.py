@@ -27,7 +27,7 @@ import random
 import threading
 import time
 from ctypes import wintypes
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from modules import cat_sprites
 
@@ -128,6 +128,7 @@ class CatState:
     last_seen: float = 0.0
     last_fed: float = 0.0
     naming_note_shown: bool = False  # first-meeting note fired once already
+    self_care: dict = field(default_factory=dict)  # Aiva's own care: action -> last wall time
 
     @classmethod
     def load(cls, path):
@@ -616,6 +617,7 @@ class DesktopCat:
         self._announce = None
         self._last_announce = 0.0
         self._event_last = {}
+        self._user_care = {}                 # his own care from the cat itself: action -> wall time
 
     # -- lifecycle (call from anywhere) ---------------------------------------------
 
@@ -655,12 +657,23 @@ class DesktopCat:
 
     def feed(self):
         self._cmd_q.put(("feed", None))
+        self._mark_care("feed")
 
     def play(self):
         self._cmd_q.put(("play", None))
+        self._mark_care("play")
 
     def pet(self):
         self._cmd_q.put(("pet", None))
+        self._mark_care("pet")
+
+    def _mark_care(self, action):
+        """Everything through this facade is Aiva (tool or caretaker); his clicks go straight to
+        the brain. Under the state lock: the tk thread may be saving the dict right now."""
+        with self._state_lock:
+            care = self.state.self_care if isinstance(self.state.self_care, dict) else {}
+            care[action] = time.time()
+            self.state.self_care = care
 
     def dismiss(self):
         self._cmd_q.put(("dismiss", None))
@@ -691,7 +704,36 @@ class DesktopCat:
             "energy": f"{self._label(e, 'exhausted', 'sleepy', 'rested', 'energetic')} ({int(e)}/100)",
             "total_pets": snap["total_pets"],
             "hidden": snap["dismissed"],
+            **({"you_last": recent} if (recent := self._recent_self_care()) else {}),
         }
+
+    _CARE_PAST = {"feed": "fed it", "play": "played ball with it", "pet": "petted it"}
+
+    def _recent_self_care(self, within_s=12 * 3600):
+        """'fed it 12 minutes ago, petted it 2 hours ago' — what she did herself lately."""
+        with self._state_lock:
+            care = dict(self.state.self_care) if isinstance(self.state.self_care, dict) else {}
+        now, bits = time.time(), []
+        for action, ts in sorted(care.items(), key=lambda kv: -(kv[1] or 0)):
+            age = now - (ts or 0)
+            if action in self._CARE_PAST and 0 <= age <= within_s:
+                mins = int(age // 60)
+                when = ("just now" if mins < 1 else f"{mins} minute{'s' if mins != 1 else ''} ago"
+                        if mins < 90 else f"{round(age / 3600)} hours ago")
+                bits.append(f"{self._CARE_PAST[action]} {when}")
+        return ", ".join(bits)
+
+    def care_snapshot(self):
+        """Raw numbers for the caretaker (modules/cat_care.py); None until the window publishes."""
+        with self._lock:
+            snap = dict(self._snapshot)
+            user_care = dict(self._user_care)
+        if not snap:
+            return None
+        with self._state_lock:
+            self_care = dict(self.state.self_care) if isinstance(self.state.self_care, dict) else {}
+        snap.update(self_care=self_care, user_care=user_care)
+        return snap
 
     @staticmethod
     def _label(v, l0, l1, l2, l3):
@@ -723,11 +765,17 @@ class DesktopCat:
             "name": s.name, "hunger": s.hunger, "mood": s.mood, "energy": s.energy,
             "dismissed": s.dismissed, "total_pets": s.total_pets,
             "doing": "away (dismissed)" if s.dismissed else self._DOING.get(brain.behavior, "idling"),
+            "behavior": brain.behavior, "last_fed": s.last_fed,
         }
         with self._lock:
             self._snapshot = snap
 
+    _USER_CARE = {"petted": "pet", "fed_by_user": "feed", "played_by_user": "play"}
+
     def _emit(self, kind):
+        if kind in self._USER_CARE:          # before the announce throttle: she must always know
+            with self._lock:
+                self._user_care[self._USER_CARE[kind]] = time.time()
         now = time.monotonic()
         if now - self._last_announce < self._GLOBAL_MIN:
             return

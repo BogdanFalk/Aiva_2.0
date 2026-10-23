@@ -86,6 +86,7 @@ KIN_LINES = {
     "tend_cat": "she can look after the desktop cat — feed it, pet it, play with it",
     "know_sister": "she keeps track of what she has seen me do, make and say",
     "call_sister": "she can call me over — start me up when I'm off",
+    "draw": "she can open her own drawing canvas and draw on it",
     "build_software": "she can build or change software by planning it with Claude Code, on his say-so",
     "change_myself": "she can change her own look or her own code, with his say-so",
     "use_the_pc": "she can work the PC — open apps, click around, type, and run things in a terminal",
