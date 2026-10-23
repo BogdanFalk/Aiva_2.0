@@ -33,11 +33,14 @@ from modules.sisters import (BOTH, DEFAULT_NAMESETS, HIM, AddressState, Decision
                              arbiter_messages, arrival_cue, both_second_cue, chat_cue, errand_cue,
                              errand_to, exchange_should_continue, floor_decision, is_question, name_order,
                              overheard_reply_line, overheard_user_line, parse_arbiter_reply, prune_stale,
-                             report_cue, sister_cue, spoken_to, wants_report, which_names)
+                             report_cue, same_line, sister_cue, spoken_to, wants_report, which_names)
 
 # a line he meant for a sister who wasn't running is picked up when she arrives — if she arrives
 # within this long (booting takes ~10-30 s; a minute later it's a different conversation)
 ERRAND_TTL_S = 180.0
+
+# a held speculative reply that nothing settled in this long is dropped (pipecat's own bound is 5 s)
+SPEC_TTL_S = 10.0
 
 
 @dataclass
@@ -96,6 +99,10 @@ class Floor:
         self._gate = False
         self._seq = int(memory.kv_get("turn_seq", 0) or 0)
         self._msg_seq = 0
+        # answer sooner: one speculative reply a sister is holding for a line that may be over
+        # ({id, slug, text, decision, at}); settled by submit_user_turn, unspeculate or tick
+        self._spec = None
+        self._spec_seq = 0
         # per-grant flags
         self._response_started = False
         self._response_open = False
@@ -294,7 +301,10 @@ class Floor:
         Returns the Decision (None when the line was empty)."""
         self.last_user_turn_id = None
         text = (text or "").strip()
+        spec, self._spec = self._spec, None
         if not text:
+            if spec is not None:
+                self._send(spec["slug"], proto.Unprepare(spec=spec["id"]))
             return None
         now = self._now()
         self._fs.user_speaking = False
@@ -305,10 +315,13 @@ class Floor:
         prune_stale(self._queue, self._fs)
         namesets = self._namesets()
 
-        d = addressee_decision(text, self._addr, namesets, wake_hint=wake_hint, now=now,
-                               sticky_secs=self.cfg.sticky_s)
-        if d is None and self.arbiter is not None and len(self._present()) >= 2:
-            d = await self._ask_arbiter(text)
+        if spec is not None and same_line(spec["text"], text):
+            d = spec["decision"]            # decided while he finished: any arbiter call already ran
+        else:
+            d = addressee_decision(text, self._addr, namesets, wake_hint=wake_hint, now=now,
+                                   sticky_secs=self.cfg.sticky_s)
+            if d is None and self.arbiter is not None and len(self._present()) >= 2:
+                d = await self._ask_arbiter(text)
         if d is None:
             if self._addr.last_speaker in self._slugs():
                 d = Decision(self._addr.last_speaker, "fallback:last_speaker", False)
@@ -338,6 +351,8 @@ class Floor:
                 cue = absent_cue(self._name(absent_slug))
 
         if not minds:
+            if spec is not None:
+                self._send(spec["slug"], proto.Unprepare(spec=spec["id"]), now)
             self.memory.log_user_line(None, text, d.addressee, kind=f"{d.reason}|unrouted", now=now)
             self.log(f"floor: nobody home for '{text[:60]}' (addressee={d.addressee}, {d.reason})")
             return d
@@ -362,6 +377,12 @@ class Floor:
                                         cue=both_second_cue(self._name(minds[0])), source_text=text,
                                         reply_to=first.id, speaker_vec=speaker_vec, affect=affect,
                                         wake_hint=wake_hint))
+        if spec is not None:
+            if not both and first.mind == spec["slug"] and first.cue is None and same_line(spec["text"], text):
+                first.prepared = spec["id"]             # her held reply answers exactly this line
+            else:
+                self._send(spec["slug"], proto.Unprepare(spec=spec["id"]), now)
+                self.log(f"floor: speculation {spec['id']} dropped (the line went elsewhere)")
         label = BOTH if both else minds[0]
         kind = d.reason + (f"|absent:{absent_slug}" if absent_slug is not None else "")
         self.memory.log_user_line(first.id, text, label, kind=kind, now=now)
@@ -407,6 +428,50 @@ class Floor:
             if slug not in out and self._send(slug, proto.Affect(turn=turn_id, affect=aff), now):
                 out[slug] = "sent"
         return out
+
+    # --- answer sooner (AIVA_SPECULATE) ---------------------------------------------------------
+
+    async def speculate(self, text, *, wake_hint=None):
+        """Flux thinks his turn may be over. When the floor is idle and the line plainly goes to ONE
+        present sister (no 'both', no errand to her sister, nobody absent), ask her to prepare a reply
+        now and hold it; `submit_user_turn` releases it if the committed line is the same, otherwise
+        it's dropped. Not a grant: no gate, no transcript, nothing overheard. → the slug, or None."""
+        self.unspeculate("superseded")
+        text = (text or "").strip()
+        if not text or self.busy or self._queue or self._gate:
+            return None
+        now = self._now()
+        namesets = self._namesets()
+        present = self._present()
+        d = addressee_decision(text, self._addr, namesets, wake_hint=wake_hint, now=now,
+                               sticky_secs=self.cfg.sticky_s)
+        if d is None and self.arbiter is not None and len(present) >= 2:
+            d = await self._ask_arbiter(text)        # Decisions: ~0.5 s spent while he finishes
+        if d is None and len(present) == 1:
+            d = Decision(present[0], "speculation:only_one_here", False)
+        if d is None or d.addressee == BOTH or d.addressee not in self._present():
+            return None
+        other = next((ns for ns in namesets if ns.slug != d.addressee and ns.slug in self._present()), None)
+        if other is not None and errand_to(text, other):
+            return None
+        if self.busy or self._queue or self._gate or self._spec is not None:
+            return None                                 # the floor moved while the arbiter thought
+        self._spec_seq += 1
+        self._spec = {"id": self._spec_seq, "slug": d.addressee, "text": text, "decision": d, "at": now}
+        if not self._send(d.addressee, proto.Prepare(spec=self._spec_seq, text=text), now):
+            self._spec = None
+            return None
+        self.log(f"floor: speculating {d.addressee} on {text[:60]!r} ({d.reason}), spec {self._spec_seq}")
+        return d.addressee
+
+    def unspeculate(self, why="he went on"):
+        """Drop the held speculative reply, if any."""
+        spec, self._spec = self._spec, None
+        if spec is None:
+            return False
+        self._send(spec["slug"], proto.Unprepare(spec=spec["id"]))
+        self.log(f"floor: speculation {spec['id']} dropped ({why})")
+        return True
 
     async def _ask_arbiter(self, text) -> Optional[Decision]:
         tail = list(reversed(self.memory.recent_transcript(limit=8)))
@@ -809,6 +874,9 @@ class Floor:
     def tick(self, now=None):
         """Drive every deadline. Call often (the server: every ~100 ms); tests: with a fake clock."""
         now = now if now is not None else self._now()
+        if self._spec is not None and (now - self._spec["at"] >= SPEC_TTL_S
+                                       or self._spec["slug"] not in self.clients):
+            self.unspeculate("nothing settled it")
         if self._ack_deadline is not None and now >= self._ack_deadline:
             self._said_seen = True                  # she never started; no said will come
             self._release("no_response_start", now)
@@ -870,5 +938,7 @@ class Floor:
         self._send(turn.mind, proto.TurnMsg(turn=turn.id, kind=turn.kind, audible=turn.audible,
                                              addressee=turn.addressee, text=turn.text, cue=turn.cue,
                                              speaker_vec=turn.speaker_vec, affect=turn.affect,
-                                             wake_hint=turn.wake_hint, reply_to=turn.reply_to), now)
-        self.log(f"floor: grant {turn.mind} turn {turn.id} kind={turn.kind} audible={turn.audible} to={turn.addressee}")
+                                             wake_hint=turn.wake_hint, reply_to=turn.reply_to,
+                                             prepared=turn.prepared), now)
+        self.log(f"floor: grant {turn.mind} turn {turn.id} kind={turn.kind} audible={turn.audible} to={turn.addressee}"
+                 + (f" (prepared {turn.prepared})" if turn.prepared else ""))

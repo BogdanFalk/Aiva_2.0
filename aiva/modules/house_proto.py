@@ -194,6 +194,25 @@ class TurnMsg(Msg):
     affect: Optional[dict] = None
     wake_hint: Optional[str] = None
     reply_to: Optional[int] = None
+    prepared: Optional[int] = None  # the `Prepare.spec` whose held reply answers this turn, if any
+
+
+@dataclass(kw_only=True)
+class Prepare(Msg):
+    """Answer sooner (`AIVA_SPECULATE`): Flux thinks his turn MAY be over. She runs her LLM on a
+    provisional copy of her context with `text` and HOLDS the reply (pipecat's speculation gate):
+    no audio, nothing committed, no `response`/`speaking`/`said`. A later `turn` with
+    `prepared == spec` releases it; `Unprepare` (or any other turn) drops it. NOT a floor grant."""
+    T: ClassVar[str] = "prepare"
+    spec: int
+    text: str
+
+
+@dataclass(kw_only=True)
+class Unprepare(Msg):
+    """He went on talking (or the line went elsewhere): drop the held reply for `spec`."""
+    T: ClassVar[str] = "unprepare"
+    spec: int
 
 
 @dataclass(kw_only=True)
@@ -262,7 +281,8 @@ class Shutdown(Msg):
 
 CHARACTER_TO_HOUSE = (Hello, Response, Tool, Speaking, Said, Event, WantFloor, Mode, Sleep, Wake, Restart, Control,
                       Say, Pong, Bye)
-HOUSE_TO_CHARACTER = (Welcome, Reject, TurnMsg, Overheard, Affect, Backchannel, Interrupt, Mode, State, Absent, Ping, Shutdown)
+HOUSE_TO_CHARACTER = (Welcome, Reject, TurnMsg, Prepare, Unprepare, Overheard, Affect, Backchannel, Interrupt, Mode,
+                      State, Absent, Ping, Shutdown)
 MESSAGE_TYPES = {cls.T: cls for cls in CHARACTER_TO_HOUSE + HOUSE_TO_CHARACTER}
 
 

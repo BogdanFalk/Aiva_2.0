@@ -419,8 +419,16 @@ async def main():
         stage_ctx,
         params=stage_params(stt_cfg, [FloorUserMuteStrategy(lambda: floor.gate_active)]),
     )
+    async def _on_speculate(text):
+        # answer sooner: only for a heard, confirmed, unmuted turn (the wake check sees finals only)
+        if not mic.visibly_awake or mic.verifying or mic.muted:
+            return
+        await floor.speculate(text, wake_hint=mic.wake_hint)
+
     router = StageRouter(stage_ctx, on_user_turn=_on_user_turn, on_user_speaking=floor.note_user_speaking,
-                         log=log_event)
+                         log=log_event,
+                         on_speculate=_on_speculate if stt_cfg.speculate else None,
+                         on_unspeculate=(lambda: floor.unspeculate("he went on")) if stt_cfg.speculate else None)
 
     pipeline = Pipeline([
         transport.input(),

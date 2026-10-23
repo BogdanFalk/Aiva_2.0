@@ -59,6 +59,8 @@ def test_the_v4_voice_and_appraisal_follow_their_settings():
     assert "2026-10-appraisal" in flash
     assert "2026-10-appraisal" not in ids(upgrades.applicable("aiva", {"AIVA_APPRAISAL": "0"}, sister()))
     assert "2026-10-facts-replace" in flash
+    assert "2026-10-answer-sooner" not in flash                       # off by default
+    assert "2026-10-answer-sooner" in ids(upgrades.applicable("aiva", {"AIVA_SPECULATE": "1"}, sister()))
 
 
 def test_told_record_round_trips_and_tolerates_garbage():

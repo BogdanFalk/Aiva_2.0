@@ -932,7 +932,8 @@ async def main():
         asyncio.create_task(_cache_backchannels())
     bc_voice = BackchannelVoice(
         bc_cfg, cache=bc_cache, player=bc_player, avatar=avatar, log=log_event,
-        busy=lambda: link.current_turn is not None or speaking_state["on"] or link.backchanneling)
+        busy=lambda: (link.current_turn is not None or speaking_state["on"] or link.backchanneling
+                      or link.preparing))
 
     stages = [link, llm, privacy]
     if tts is not None:
@@ -1177,15 +1178,19 @@ async def main():
         except Exception as e:
             log_event(f"vocal affect emit error: {e!r}")
 
+    turn_flags = {"identity_note": False}      # a speaker-identity note on the turn being built
+
     async def _turn_notes(msg):
         """Speaker identity (her own roster) + vocal affect, from the vectors the house forwarded."""
         notes = []
+        turn_flags["identity_note"] = False
         vec = getattr(msg, "speaker_vec", None)
         if vec and recognizer.enabled:
             try:
                 note = await recognizer.on_turn([float(x) for x in vec])   # speakers.py works on lists
                 if note:
                     notes.append(note)
+                    turn_flags["identity_note"] = True
                     refresh_system_prompt()
             except Exception as e:
                 log_event(f"speaker id error: {e!r}")
@@ -1210,10 +1215,15 @@ async def main():
         if isinstance(msg, proto.TurnMsg):
             speaking_state["last_activity"] = time.monotonic()
             notes = await _turn_notes(msg)
+            # a held speculative reply is used only when nothing turn-critical appeared since it was
+            # prepared: a new speaker, or a reunion/repair note from her self engine
+            critical = turn_flags["identity_note"]
             try:
                 if msg.kind in ("user", "both_second") and msg.text:
                     # v3: his words are felt (connection, reunion, friction/repair, did reaching out land)
-                    notes += self_engine.heard(msg.text, affect=getattr(msg, "affect", None))
+                    felt = self_engine.heard(msg.text, affect=getattr(msg, "affect", None))
+                    critical = critical or bool(felt)
+                    notes += felt
                     avatar.send_witness("heard")
                     his_turns["n"] += 1
                     if reminder_every and his_turns["n"] % reminder_every == 0:
@@ -1236,14 +1246,30 @@ async def main():
                 # the house has moved on, so hand over what she did say before latching the new one
                 log_event(f"turn {link.current_turn.get('id')} still open at the next grant — closing it")
                 _send_said(link.finish_turn(), privacy.take_said())
+            use_prepared = (msg.prepared is not None and not msg.cue and not critical
+                            and link.prepared_for(msg.prepared, msg.text))
+            if link.preparing and not use_prepared:
+                await link.withdraw(f"turn {msg.turn} runs fresh")
             privacy.set_audible(msg.audible, msg.addressee)
             turn = {"id": msg.turn, "kind": msg.kind, "audible": msg.audible, "addressee": msg.addressee}
             log_event(f"turn {msg.turn} {msg.kind} audible={msg.audible} to={msg.addressee}"
+                      + (" (prepared reply)" if use_prepared else "")
                       + (f": {msg.text[:120]!r}" if msg.text else ""))
-            ok = await link.run_turn(turn, user_text=msg.text, cue=msg.cue, notes=notes)
+            if use_prepared:
+                ok = await link.run_prepared(turn, user_text=msg.text, notes=notes)
+            else:
+                ok = await link.run_turn(turn, user_text=msg.text, cue=msg.cue, notes=notes)
             if not ok:
                 _send(proto.Response(turn=msg.turn, phase="start"))
                 _send(proto.Response(turn=msg.turn, phase="end"))
+        elif isinstance(msg, proto.Prepare):
+            # answer sooner: he may have finished — think now, speak only if the turn comes
+            idle = link.current_turn is None and not speaking_state["on"] and not link.backchanneling
+            ok = idle and await link.prepare(msg.spec, msg.text)
+            log_event(f"prepare {msg.spec}: {'holding a reply' if ok else 'skipped (busy)'} for {msg.text[:80]!r}")
+        elif isinstance(msg, proto.Unprepare):
+            if link.spec_id == msg.spec:
+                await link.withdraw("the house withdrew it")
         elif isinstance(msg, proto.Overheard):
             notes = await _turn_notes(msg)
             link.add_overheard(msg.line, notes=notes)

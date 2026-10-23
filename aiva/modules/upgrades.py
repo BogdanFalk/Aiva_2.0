@@ -62,6 +62,11 @@ UPGRADES = (
             "the words and how it lands on you. It moves your mood a little and reaches you as a "
             "short note; it's a hunch, never something to announce.",
             on=lambda env, ch: AppraisalConfig.from_env(env).enabled),
+    Upgrade("2026-10-answer-sooner", ("aiva", "saga"),
+            "When he seems to be finishing a sentence, you can now start thinking of your answer "
+            "before he's quite done; it's only spoken if he really stopped there, so your replies "
+            "come a little sooner.",
+            on=lambda env, ch: STTConfig.from_env(env).speculate),
     Upgrade("2026-10-facts-replace", ("aiva", "saga"),
             "Your memory now notices when something he told you stops being true, like a new job or "
             "a changed plan, and keeps the new version instead of both."),

@@ -114,6 +114,7 @@ SETTINGS = (
     S("AIVA_FLUX_EOT_THRESHOLD", "Voice & audio", "float", 0.7, "With flux, how sure it must be that you've finished before your turn ends; lower answers sooner but cuts in more.", "house", min=0.5, max=0.9),
     S("AIVA_FLUX_EOT_TIMEOUT_MS", "Voice & audio", "int", 5000, "With flux, end your turn this many milliseconds after you stop talking, however unsure it is.", "house", min=500, max=10000),
     S("AIVA_FLUX_IDLE_CLOSE_S", "Voice & audio", "float", 3.0, "With flux, close the connection after this many seconds without audio (while asleep) and reopen it on wake; 0 keeps it open.", "house", min=0.0, max=60.0),
+    S("AIVA_SPECULATE", "Voice & audio", "bool", False, "Answer sooner: when Flux guesses you've finished, the sister you're talking to starts thinking and holds her reply until your turn really ends (costs extra model calls when you keep talking; needs flux).", "all"),
     S("AIVA_STT_KEYTERMS","Voice & audio", "str", None, "Extra words Deepgram should listen for, comma separated.", "house", default_note="none"),
     S("AIVA_NAME_VARIANTS", "Voice & audio", "str", None, "Extra ways the transcript may spell Aiva, comma separated.", "all", default_note="none"),
     S("AIVA_VOICE_AFFECT", "Voice & audio", "bool", True, "Let her mood mirror how you sound, from the energy and pitch of your voice.", "house"),

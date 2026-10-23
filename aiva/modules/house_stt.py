@@ -4,10 +4,15 @@
                    when he started and finished a turn (StartOfTurn / EndOfTurn with a confidence
                    threshold), so the stage aggregator runs NO local VAD and NO smart-turn model:
                    `ExternalUserTurnStrategies` resolve Flux's proposed start/stop into the turn.
-                   One final `TranscriptionFrame` per turn, at EndOfTurn (no interims — the
-                   in-turn `Update` events keep the idle timer awake and, via `on_turn_info`,
-                   feed the backchannel pause tracker in `modules/backchannel.py`). Plain
-                   end-of-turn only; eager end-of-turn (speculative replies) stays OFF.
+                   One final `TranscriptionFrame` per turn, at EndOfTurn (since pipecat 1.13 also an
+                   interim per `Update`, which `ActivityWatcher` drops during a wake check and while
+                   asleep, as it did for nova) — the in-turn `Update` events keep the idle timer awake and, via `on_turn_info`,
+                   feed the backchannel pause tracker in `modules/backchannel.py`). With
+                   `AIVA_SPECULATE=1` Flux's eager end of turn is on and the stage runs
+                   `EagerUserTurnStrategies`: the sister he's talking to prepares (and holds) a reply
+                   on Flux's guess, released only if the turn ends on the same words (see
+                   `house_stage.StageRouter`, `Floor.speculate`, `HouseLink.prepare`). Off by default:
+                   it costs extra model calls when he goes on talking.
   nova           — the previous path: Deepgram nova-3 (`/v1/listen`) streaming interims + finals,
                    Silero VAD + LocalSmartTurnAnalyzerV3 in the stage aggregator.
 
@@ -53,6 +58,7 @@ class STTConfig:
     eot_threshold: float = 0.7          # Flux: end-of-turn confidence needed to close a turn
     eot_timeout_ms: int = 5000          # Flux: close the turn this long after speech regardless
     idle_close_s: float = 3.0           # Flux: close the socket after this long with no audio (0=never)
+    speculate: bool = False             # Flux: answer the eager end of turn (held until confirmed)
     note: str = ""                      # why a value fell back (shown at boot)
 
     @property
@@ -72,13 +78,16 @@ class STTConfig:
             eot_threshold=_num(env, "AIVA_FLUX_EOT_THRESHOLD", 0.7, float, *EOT_THRESHOLD_RANGE),
             eot_timeout_ms=_num(env, "AIVA_FLUX_EOT_TIMEOUT_MS", 5000, int, *EOT_TIMEOUT_MS_RANGE),
             idle_close_s=_num(env, "AIVA_FLUX_IDLE_CLOSE_S", 3.0, float, 0.0, 60.0),
+            speculate=engine == "flux" and (env.get("AIVA_SPECULATE") or "").strip().lower() in
+            ("1", "true", "yes", "on"),
             note=note,
         )
 
     def describe(self) -> str:
         if self.flux:
             return (f"Deepgram Flux ({FLUX_MODEL}), turns by Flux: eot_threshold={self.eot_threshold}, "
-                    f"eot_timeout={self.eot_timeout_ms} ms")
+                    f"eot_timeout={self.eot_timeout_ms} ms"
+                    + (", answering sooner on its eager end of turn" if self.speculate else ""))
         return "Deepgram nova-3, turns by Silero VAD + smart-turn v3"
 
 
@@ -209,7 +218,7 @@ def build_stt(cfg: STTConfig, *, api_key: str, keyterms, log=print):
             api_key=api_key,
             sample_rate=SAMPLE_RATE,                # Flux connects at setup(), before any StartFrame
             should_interrupt=False,                 # nothing in the house to interrupt (F10 is the interrupt)
-            enable_eager_end_of_turn=False,         # plain end-of-turn only
+            enable_eager_end_of_turn=cfg.speculate,  # pipecat applies Flux's default eager threshold
             idle_close_s=cfg.idle_close_s,
             log=log,
             settings=cls.Settings(model=FLUX_MODEL, eot_threshold=cfg.eot_threshold,
@@ -231,11 +240,13 @@ def stage_params(cfg: STTConfig, mute_strategies):
     nova: Silero VAD starts the turn, smart-turn v3 ends it (unchanged)."""
     from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregatorParams
     if cfg.flux:
-        from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
+        from pipecat.turns.user_turn_strategies import EagerUserTurnStrategies, ExternalUserTurnStrategies
+        strategies = (EagerUserTurnStrategies(enable_interruptions=False) if cfg.speculate
+                      else ExternalUserTurnStrategies(enable_interruptions=False))
         return LLMUserAggregatorParams(
             vad_analyzer=None,
             user_mute_strategies=list(mute_strategies),
-            user_turn_strategies=ExternalUserTurnStrategies(enable_interruptions=False),
+            user_turn_strategies=strategies,
         )
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
     from pipecat.audio.vad.silero import SileroVADAnalyzer

@@ -9,6 +9,20 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **She can answer sooner (`AIVA_SPECULATE=1`, off by default).** With Flux, the house turns on its
+  eager end of turn and the stage runs `EagerUserTurnStrategies`. When Flux guesses he's done,
+  `StageRouter` calls `Floor.speculate`: if the floor is idle and the line plainly goes to one
+  present sister (no "both", no errand, nobody absent; the arbiter runs now, while he finishes), she
+  gets a new `prepare` message. She runs her LLM on a provisional copy of her context and pipecat's
+  own speculation gate in her LLM service HOLDS the reply (`HouseLink.prepare`). Nothing past the
+  LLM sees it: no audio, no gate, no transcript, nothing overheard. If the turn ends on the same
+  words (pipecat's NormalizedMatch, then `same_line` on the floor), the granted `turn` carries
+  `prepared` and `HouseLink.run_prepared` writes his line into her real context and releases the
+  reply into the turn, saving the model's think time. If he goes on, or the words differ, the house
+  sends `unprepare` and the turn runs fresh. A speculative reply that wants a tool withdraws itself,
+  so tools only run on a confirmed turn. A new speaker or a reunion/repair note at turn time also
+  discards it. Floor-side TTL 10 s. Costs extra model calls when he keeps talking, hence off by
+  default. Tests run through pipecat's real gate: `tests/test_speculation.py`.
 - **A persona drift check, and a nudge to stay herself in long talks.** `python -m modules.persona_drift
   --who aiva` samples her lines from the first, middle and last third of her recent long sessions
   and has a judge model rate each 1-5 for how much it sounds like her ("Stable Personas": observed

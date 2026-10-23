@@ -40,6 +40,7 @@ import time
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
+    EagerEndOfTurnCancelFrame,
     Frame,
     FunctionCallCancelFrame,
     FunctionCallInProgressFrame,
@@ -56,8 +57,11 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import LLMUsageMetricsData, TTSUsageMetricsData
+from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from modules.voice_tags import strip_tags
@@ -91,6 +95,7 @@ class HouseLink(FrameProcessor):
         self._speaking_turn_id = None
         self._bc_expect_until = 0.0         # a backchannel clip was just pushed: its speaking is ours
         self._bc_speaking = False           # inside a backchannel's speaking stretch (unreported)
+        self._spec = None                   # a held speculative reply: {id, text, withdrawn}
 
     def expect_backchannel(self, secs=3.0):
         """The next BotStarted/StoppedSpeaking pair is a backchannel clip, not her turn — don't
@@ -147,6 +152,69 @@ class HouseLink(FrameProcessor):
         if self._started:
             await self.push_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
 
+    # --- answer sooner: a held speculative reply (house `prepare` / `unprepare`) ---------------
+    #
+    # Her LLM service carries pipecat's SpeculationGate: an LLMContextFrame(speculation=True) has
+    # its reply HELD from LLMFullResponseStartFrame on, a UserStoppedSpeakingFrame releases it and
+    # an EagerEndOfTurnCancelFrame drops it (a speculative reply that wants a tool withdraws itself
+    # the same way, so tools only ever run on a confirmed turn). Nothing past the LLM — PrivacyGate,
+    # TTS, MindWatcher, the assistant aggregator — sees a held reply, so the house hears nothing
+    # about it until it's released inside a granted turn.
+
+    @property
+    def preparing(self) -> bool:
+        return self._spec is not None
+
+    @property
+    def spec_id(self):
+        return self._spec["id"] if self._spec is not None else None
+
+    def prepared_for(self, spec_id, user_text) -> bool:
+        """Is she holding a live speculative reply for exactly this line?"""
+        from modules.sisters import same_line
+        s = self._spec
+        return (s is not None and spec_id is not None and s["id"] == spec_id and not s["withdrawn"]
+                and same_line(s["text"], user_text))
+
+    async def prepare(self, spec_id, user_text) -> bool:
+        """Run her LLM on a provisional copy of her context + his (maybe unfinished) line, held."""
+        if not self._started or self.current_turn is not None or not (user_text or "").strip():
+            return False
+        if self._spec is not None:
+            await self.withdraw("superseded")
+        self._spec = {"id": spec_id, "text": user_text, "withdrawn": False}
+        # the gate holds only while a turn is open: a fresh "he started" re-opens it after the last
+        # release (a turn that already ended would let the reply straight through)
+        await self.push_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+        provisional = LLMContext(messages=[*self._ctx.get_messages(), {"role": "user", "content": user_text}],
+                                 tools=self._ctx.tools, tool_choice=self._ctx.tool_choice)
+        await self.push_frame(LLMContextFrame(context=provisional, speculation=True), FrameDirection.DOWNSTREAM)
+        return True
+
+    async def withdraw(self, why="withdrawn"):
+        """Drop the held reply (and stop its generation)."""
+        spec, self._spec = self._spec, None
+        if spec is None:
+            return False
+        if not spec["withdrawn"] and self._started:
+            await self.push_frame(EagerEndOfTurnCancelFrame(), FrameDirection.DOWNSTREAM)
+        self._log(f"house link: speculation {spec['id']} dropped ({why})")
+        return True
+
+    async def run_prepared(self, turn: dict, *, user_text, notes=()):
+        """The turn ended on the guessed line: his line (and the turn's notes) go into her real
+        context, the turn is latched, and "he stopped" releases the held reply into it — the
+        assistant aggregator then commits it after his line, exactly as a fresh reply would be."""
+        self._spec = None
+        self.current_turn = dict(turn)
+        self.last_turn_id = self.current_turn.get("id")
+        for n in notes:
+            if n:
+                self._ctx.add_message({"role": "system", "content": n})
+        self._ctx.add_message({"role": "user", "content": user_text})
+        await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+        return True
+
     # --- pipeline ----------------------------------------------------------------------------
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -154,6 +222,11 @@ class HouseLink(FrameProcessor):
         from pipecat.frames.frames import StartFrame
         if isinstance(frame, StartFrame):
             self._started = True
+        elif isinstance(frame, EagerEndOfTurnCancelFrame) and direction == FrameDirection.UPSTREAM:
+            # her LLM withdrew the speculation itself (it wanted a tool): the turn runs fresh
+            if self._spec is not None and not self._spec["withdrawn"]:
+                self._spec["withdrawn"] = True
+                self._log(f"house link: speculation {self._spec['id']} withdrew itself (it wanted a tool)")
         elif isinstance(frame, BotStartedSpeakingFrame) and time.monotonic() < self._bc_expect_until:
             self._bc_expect_until = 0.0
             self._bc_speaking = True

@@ -454,6 +454,15 @@ class Turn:
     speaker_vec: Optional[list] = None
     affect: Optional[dict] = None
     wake_hint: Optional[str] = None
+    prepared: Optional[int] = None   # a speculative reply she is holding for this exact line
+
+
+def same_line(a, b) -> bool:
+    """Is the committed line the one a speculation answered? Case, punctuation and spacing don't
+    count (Flux formats the final transcript; the eager one is raw)."""
+    def key(s):
+        return " ".join(re.sub(r"[^\w\s']", " ", (s or "").lower()).split())
+    return bool(key(a)) and key(a) == key(b)
 
 
 @dataclass
