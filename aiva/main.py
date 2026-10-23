@@ -64,6 +64,7 @@ from pipecat.pipeline.task import PipelineParams
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAggregator
+from pipecat.services.elevenlabs.dialogue.tts import ElevenLabsDialogueTTSService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
@@ -111,6 +112,8 @@ from modules.tools import register_life_tools
 from modules.dreams import Consolidation
 from modules import projects as projects_mod
 from modules import upgrades as upgrades_mod
+from modules.appraisal import AppraisalConfig, appraisal_messages, appraisal_note, parse_appraisal
+from modules.voice_tags import performs_tags
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -370,7 +373,19 @@ async def main():
     )
 
     tts = None
-    if ch.voice_id:
+    voice_cues = bool(ch.voice_id) and performs_tags(ch.tts_model)
+    if voice_cues:
+        # Eleven v3/v4 (incl. eleven_v4_turbo) speak through Text-to-Dialogue, which performs
+        # [laughs]/[sighs]; stability is the only voice setting it reads (0.5 = closest to her
+        # reference recording, lower = more expressive but can hallucinate)
+        tts = ElevenLabsDialogueTTSService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            settings=ElevenLabsDialogueTTSService.Settings(
+                voice=ch.voice_id, model=ch.tts_model,
+                stability=float(os.getenv("AIVA_TTS_STABILITY", "0.5"))),
+        )
+        log_event(f"voice: {ch.tts_model} via Text-to-Dialogue (voice cues on)")
+    elif ch.voice_id:
         tts = ElevenLabsTTSService(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
             settings=ElevenLabsTTSService.Settings(voice=ch.voice_id, model=ch.tts_model),
@@ -823,6 +838,7 @@ async def main():
             sister=sister, free_range=task_runner.free_range,
             story=cd["story"], habits=cd["habits"], moments=cd["moments"],
             projects=project_book.prompt_lines() if _projects_on else None,
+            voice_cues=voice_cues,
             upgrades=upgrades_mod.prompt_lines(
                 upgrades_mod.recent(ups["on"], ups["told"], datetime.now().date())))
 
@@ -1114,6 +1130,34 @@ async def main():
     # --- messages from the house ----------------------------------------------------------------------
     emotion_cfg = EmotionConfig.from_env()
     late_emotion = {"note": None, "at": 0.0}     # a confident late reading, for his NEXT turn
+    # read him, feel, then speak (modules/appraisal.py): runs while she answers, felt at once,
+    # noted on his next turn
+    appraisal_cfg = AppraisalConfig.from_env()
+    appraise_call = openai_llm_call(oai, task_model, label="appraisal") if appraisal_cfg.enabled else None
+    late_appraisal = {"note": None, "at": 0.0}
+
+    async def _appraise(his_line, tail, heard):
+        try:
+            res = await asyncio.wait_for(
+                appraise_call(appraisal_messages(ch.name, tail, his_line, heard),
+                              json_mode=True, max_tokens=220, temperature=0.3), 20)
+        except Exception as e:
+            log_event(f"appraisal failed: {e!r}")
+            return
+        a = parse_appraisal(res)
+        if a is None:
+            log_event("appraisal: unusable reply")
+            return
+        try:
+            experience.emit("appraisal", "conversation", f"{a['him']} {a['me']}",
+                            valence=a["valence"] * 0.3 * a["confidence"],
+                            arousal=(a["arousal"] - 0.5) * 0.3 * a["confidence"],
+                            social=0.02, salience=0.2 + 0.3 * a["confidence"], payload=a)
+        except Exception as e:
+            log_event(f"appraisal emit error: {e!r}")
+        late_appraisal["note"] = appraisal_note(a, appraisal_cfg.min_confidence)
+        late_appraisal["at"] = time.monotonic()
+        log_event(f"appraisal (conf {a['confidence']:.2f}): {a['him']} | {a['me']}")
 
     def _emit_voice_affect(affect):
         """One `voice_affect` event on her bus: the DSP energy and/or the audio model's labels."""
@@ -1153,6 +1197,9 @@ async def main():
             if note:
                 notes.append(note)
                 log_event(f"emotion note: {note}")
+            if late_appraisal["note"] and time.monotonic() - late_appraisal["at"] <= appraisal_cfg.note_ttl_s:
+                notes.append(late_appraisal["note"])
+            late_appraisal["note"] = None
         return notes
 
     async def on_house_message(msg):
@@ -1164,6 +1211,10 @@ async def main():
                     # v3: his words are felt (connection, reunion, friction/repair, did reaching out land)
                     notes += self_engine.heard(msg.text, affect=getattr(msg, "affect", None))
                     avatar.send_witness("heard")
+                    if appraise_call is not None:
+                        emo = (getattr(msg, "affect", None) or {}).get("emotion")
+                        tail = context.get_messages()[-appraisal_cfg.tail_lines:]
+                        asyncio.create_task(_appraise(msg.text, tail, describe_emotion(emo) if emo else None))
                 elif msg.kind == "sister" and msg.text:
                     avatar.send_witness("sister")
                     experience.emit("sister_talk", "kin", f"my sister said: {msg.text[:120]}",

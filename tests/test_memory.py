@@ -107,6 +107,33 @@ def test_retire_fact_only_takes_back_what_she_noted_herself():
     assert m.load_facts() == ["Never push to main.", "Frank is Romanian."]
 
 
+def test_a_fact_that_stopped_being_true_moves_out_of_her_memory_with_its_replacement():
+    m = Memory(":memory:")
+    m.upsert_facts([{"category": "work", "fact": "He works at Fianu as an engineer."},
+                    {"category": "instruction", "fact": "Always bring terminals to the front."}])
+    # his word changes any category, even instructions; spacing/case/end punctuation don't matter
+    m.upsert_facts([{"category": "work", "fact": "He leads the AI team at Fianu.",
+                     "replaces": "he works at fianu as an engineer"},
+                    {"category": "instruction", "fact": "Leave terminals in the background.",
+                     "replaces": "Always bring terminals to the front"}])
+    assert m.load_facts() == ["He leads the AI team at Fianu.", "Leave terminals in the background."]
+    old = m.load_superseded()
+    assert [(o, n) for o, n, _ in old] == [
+        ("Always bring terminals to the front.", "Leave terminals in the background."),
+        ("He works at Fianu as an engineer.", "He leads the AI team at Fianu.")]
+    assert len(m.superseded) == 2
+
+
+def test_a_replaces_that_names_nothing_known_changes_nothing():
+    m = Memory(":memory:")
+    m.upsert_facts([{"fact": "He likes tea."}])
+    m.upsert_facts([{"fact": "He likes coffee.", "replaces": "He likes juice."},     # unknown
+                    {"fact": "He likes tea.", "replaces": "He likes tea."},          # itself
+                    {"fact": "He has a cat.", "replaces": None}])
+    assert m.load_facts() == ["He likes tea.", "He likes coffee.", "He has a cat."]
+    assert m.load_superseded() == [] and m.superseded == []
+
+
 def test_misheard_list_rendering():
     assert misheard_list("Aiva", ()) == '"Aiva"'
     assert misheard_list("Saga", ("saga", "sega", "hey saga", "sagah")) == '"Saga", "Sega" or "Sagah"'

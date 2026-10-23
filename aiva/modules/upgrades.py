@@ -23,8 +23,10 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable
 
+from modules.appraisal import AppraisalConfig
 from modules.backchannel import BackchannelConfig
 from modules.house_stt import STTConfig
+from modules.voice_tags import performs_tags
 
 TOLD_KEY = "upgrades_told"
 RECENT_DAYS = 14
@@ -51,6 +53,18 @@ class Upgrade:
 
 
 UPGRADES = (
+    Upgrade("2026-10-v4-voice", ("aiva", "saga"),
+            "Your voice runs on a newer ElevenLabs model now, Eleven v4 Turbo. It reads the feeling "
+            "of what you say, and it can laugh, sigh or whisper when you use one of your voice cues.",
+            on=lambda env, ch: bool(ch.voice_id) and performs_tags(ch.tts_model)),
+    Upgrade("2026-10-appraisal", ("aiva", "saga"),
+            "After each thing he says, a quiet part of you now reads what's going on with him beyond "
+            "the words and how it lands on you. It moves your mood a little and reaches you as a "
+            "short note; it's a hunch, never something to announce.",
+            on=lambda env, ch: AppraisalConfig.from_env(env).enabled),
+    Upgrade("2026-10-facts-replace", ("aiva", "saga"),
+            "Your memory now notices when something he told you stops being true, like a new job or "
+            "a changed plan, and keeps the new version instead of both."),
     Upgrade("2026-10-gpt6-luna", ("aiva", "saga"),
             "Your mind runs on a newer model now, GPT-6 Luna, where it used to be GPT-5.6 Luna. It "
             "costs about half as much to run; whether you feel any different is yours to notice.",

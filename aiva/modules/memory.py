@@ -29,6 +29,7 @@ from datetime import datetime
 
 from modules.persona import named
 from modules.utilities import llm_kwargs
+from modules.voice_tags import strip_tags
 
 # {name}: the character; {name_variants}: how STT mishears HER name (a quoted list);
 # {sister_note}: " (her sister is Saga)" or empty.
@@ -52,10 +53,14 @@ she likes) go in category "sister"; skip her small talk.
 
 Do NOT extract: one-off requests ("open notepad now"), small talk, trivia about {name}, \
 items already in the known list, or REWORDINGS of known items — a fact is a duplicate if it \
-means the same thing even in different words, so extract nothing for it (unless the \
-conversation contradicts a known item — then restate the corrected version).
+means the same thing even in different words, so extract nothing for it.
 
-Reply with JSON: {"facts": [{"category": "instruction|preference|person|work|project|sister|other", "fact": "..."}]}
+When the conversation shows a known item is NO LONGER TRUE (he changed jobs, moved, renamed a \
+pet, dropped a standing instruction, a plan changed), extract the corrected version and set \
+"replaces" to that known item copied exactly, so the old one stops being remembered as true. \
+Only do this when he said so or it is plainly implied; never on a guess.
+
+Reply with JSON: {"facts": [{"category": "instruction|preference|person|work|project|sister|other", "fact": "...", "replaces": "<exact known item, only when it is no longer true>"}]}
 Each fact must be one short self-contained sentence, phrased so it makes sense with no context \
 (e.g. "Always bring terminals to the front after opening them."). Reply {"facts": []} if nothing qualifies."""
 
@@ -76,6 +81,11 @@ AIVA_MISHEARD = '"Aiva", "Eva", "Ava" or "Geneva"'
 
 FACT_EXTRACTION_PROMPT = named(FACT_EXTRACTION_PROMPT_T, "Aiva", name_variants=AIVA_MISHEARD, sister_note="")
 RECAP_PROMPT = named(RECAP_PROMPT_T, "Aiva")
+
+
+def _fact_key(text):
+    """How two spellings of one fact compare: case, spacing and end punctuation don't count."""
+    return " ".join((text or "").lower().split()).rstrip(".!?;: ")
 
 
 def misheard_list(name, variants=()):
@@ -137,6 +147,17 @@ class Memory:
                 created_ts DATETIME NOT NULL,
                 last_confirmed_ts DATETIME NOT NULL
             )""")
+        # facts that stopped being true: moved here (with what replaced them) rather than deleted,
+        # so `facts` stays "true now" for every reader and nothing he said is lost
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS facts_superseded (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL DEFAULT 'other',
+                fact TEXT NOT NULL,
+                replaced_by TEXT NOT NULL,
+                created_ts DATETIME NOT NULL,
+                superseded_ts DATETIME NOT NULL
+            )""")
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS session_recaps (
                 session_id TEXT PRIMARY KEY,
@@ -151,6 +172,7 @@ class Memory:
             )""")
         self.conn.commit()
         self._saved_count = 0
+        self.superseded = []          # (old, new) facts replaced this session, for the log
         # her whole self now lives in this file (memory, becoming, mood, diary, desires) —
         # keep spaced, rotating snapshots so a bad write or migration can't erase who she is
         if not self.in_memory:
@@ -267,7 +289,8 @@ class Memory:
         return [r[0] for r in rows]
 
     def upsert_facts(self, facts):
-        """Insert new facts; refresh the timestamp of ones we already know."""
+        """Insert new facts; refresh the timestamp of ones we already know. An item with
+        `replaces` (a known fact that is no longer true) moves that fact to `facts_superseded`."""
         now = datetime.now().isoformat()
         added = 0
         for item in facts:
@@ -281,8 +304,35 @@ class Memory:
                 (item.get("category", "other"), fact, now, now),
             )
             added += cur.rowcount
+            old = (item.get("replaces") or "").strip() if isinstance(item.get("replaces"), str) else ""
+            if old:
+                self._supersede(old, fact, now)
         self.conn.commit()
         return added
+
+    def _supersede(self, old, new, now):
+        """Move the known fact matching `old` (exactly, or ignoring case/spacing/end punctuation)
+        to facts_superseded. A `replaces` that names nothing known, or the new fact itself, is ignored."""
+        key = _fact_key(old)
+        if not key or key == _fact_key(new):
+            return False
+        for fid, category, fact, created in self.conn.execute(
+                "SELECT id, category, fact, created_ts FROM facts").fetchall():
+            if _fact_key(fact) == key:
+                self.conn.execute(
+                    "INSERT INTO facts_superseded (category, fact, replaced_by, created_ts, superseded_ts) "
+                    "VALUES (?, ?, ?, ?, ?)", (category or "other", fact, new, created, now))
+                self.conn.execute("DELETE FROM facts WHERE id = ?", (fid,))
+                self.superseded.append((fact, new))
+                print(f"Memory: no longer true: {fact!r} -> {new!r}")
+                return True
+        return False
+
+    def load_superseded(self, limit=50):
+        """What she used to know and what replaced it, newest first."""
+        return self.conn.execute(
+            "SELECT fact, replaced_by, superseded_ts FROM facts_superseded ORDER BY id DESC LIMIT ?",
+            (limit,)).fetchall()
 
     def remember(self, fact, category="instruction"):
         """Persist ONE durable fact/instruction immediately (deduped).
@@ -401,9 +451,11 @@ class Memory:
         ]
         fresh = speakable[self._saved_count:]
         now = datetime.now().isoformat()
+        # her voice cues ([laughs]) are delivery, not words: the stored transcript is what she said
         self.conn.executemany(
             "INSERT INTO messages (session_id, role, content, ts) VALUES (?, ?, ?, ?)",
-            [(session_id, m["role"], m["content"], now) for m in fresh],
+            [(session_id, m["role"], strip_tags(m["content"]) if m["role"] == "assistant" else m["content"],
+              now) for m in fresh],
         )
         self.conn.commit()
         self._saved_count = len(speakable)

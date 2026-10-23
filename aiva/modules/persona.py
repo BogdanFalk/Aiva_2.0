@@ -278,6 +278,7 @@ def build_system_prompt(
     moments: list[dict] | None = None,
     projects: list[str] | None = None,
     upgrades: list[str] | None = None,
+    voice_cues: bool = False,
 ) -> str:
     """Assemble the system prompt: personality + date + recaps + facts + flows + lessons + reading + avatar abilities.
 
@@ -289,7 +290,8 @@ def build_system_prompt(
     `sister` ({"name", "lines"}) what she has noticed about her sister. v3: `story` ({"text",
     "chapter"}) her own autobiography so far, `habits` behaviour she's formed from what landed with
     him, `moments` ({"his", "hers"}) exchanges that landed, `projects` what she's working on.
-    `upgrades` are recent real changes made to her (modules/upgrades.py)."""
+    `upgrades` are recent real changes made to her (modules/upgrades.py); `voice_cues` adds the
+    [laughs]/[sighs] block for a voice that performs them (modules/voice_tags.py)."""
     parts = [personality or PERSONALITY]
     tag = tag or ("the same cheeky Aiva" if name == "Aiva" else f"still {name}")
 
@@ -371,6 +373,10 @@ def build_system_prompt(
             "asks what's new or whether you've changed, answer from these honestly, in your own "
             "words. Once you've mentioned one, don't bring it up again unprompted, and never recite "
             "the list.\n" + "\n".join(f"- {u}" for u in upgrades))
+
+    if voice_cues:
+        from modules.voice_tags import VOICE_CUES_BLOCK
+        parts.append(VOICE_CUES_BLOCK)
 
     if reading:
         parts.append(

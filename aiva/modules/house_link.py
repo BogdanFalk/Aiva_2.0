@@ -60,6 +60,8 @@ from pipecat.frames.frames import (
 from pipecat.metrics.metrics import LLMUsageMetricsData, TTSUsageMetricsData
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
+from modules.voice_tags import strip_tags
+
 
 async def _call(fn, *args, **kwargs):
     """Call a sync-or-async callback; swallow its errors (reporting must never stall speech)."""
@@ -210,7 +212,7 @@ class PrivacyGate(FrameProcessor):
 
     def take_said(self) -> str:
         """What the latched turn has said so far (for closing a turn whose last response never came)."""
-        text = "".join(self._said).strip()
+        text = strip_tags("".join(self._said).strip())
         self._said = []
         return text
 
@@ -240,7 +242,7 @@ class PrivacyGate(FrameProcessor):
                     frame, (TranscriptionFrame, InterimTranscriptionFrame)):
                 self._said.append(frame.text)
             elif isinstance(frame, LLMFullResponseEndFrame) and not self._tool_called:
-                turn_done = "".join(self._said).strip()
+                turn_done = strip_tags("".join(self._said).strip())     # [laughs] is voice, not words
         if direction == FrameDirection.DOWNSTREAM and isinstance(
                 frame, (LLMFullResponseStartFrame, TextFrame, LLMFullResponseEndFrame)) \
                 and not isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
@@ -249,7 +251,7 @@ class PrivacyGate(FrameProcessor):
                 if isinstance(frame, TextFrame):
                     self._buf.append(frame.text)
                 elif isinstance(frame, LLMFullResponseEndFrame):
-                    text = "".join(self._buf).strip()
+                    text = strip_tags("".join(self._buf).strip())
                     self._buf = []
                     if text:
                         self._log(f"{self._name} (text-only) -> {self._addressee}: {text}")

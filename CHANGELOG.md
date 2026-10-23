@@ -9,6 +9,27 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **Her voice can laugh, sigh and whisper (Eleven v4 Turbo).** A sister whose ElevenLabs model is
+  eleven_v4* or eleven_v3 now speaks through `ElevenLabsDialogueTTSService` (Text-to-Dialogue,
+  checked live with both voices on 2026-10-24) and gets a VOICE CUES prompt block: `[laughs]`,
+  `[sighs]`, `[whispers]` and a dozen more (`modules/voice_tags.py`), at most one per reply. The
+  cues are delivery, not words: `PrivacyGate` strips them from `said` (so the house transcript and
+  her sister's overheard line are clean) and from text-only replies, and saved transcripts drop them.
+  A Flash voice gets no block, so nothing would read "[laughs]" out loud. `AIVA_TTS_STABILITY`
+  (0.5, closest to her recorded voice). Same price per character as Flash ($0.04 per 1K).
+  Backchannel clips are remade in the new voice automatically (they're keyed by model).
+- **Read him, feel, then speak.** After each of his lines a side-call on the task model writes what
+  seems to be going on with him beyond the words and how it lands on her (`modules/appraisal.py`;
+  ToMAgent and "Feeling First, Speaking Second"). It runs while she answers, so it never delays a
+  reply: its valence/arousal go onto her bus at once as an `appraisal` event (her mood, and with it
+  her tone, moves), and a confident reading rides on his next turn as a short note she must not
+  announce. `AIVA_APPRAISAL`, `AIVA_APPRAISAL_MIN_CONFIDENCE` (0.5), `AIVA_APPRAISAL_NOTE_TTL_S`.
+- **Facts that stop being true are replaced, not doubled.** The fact-extraction prompt may now say a
+  new fact `replaces` a known one (he changed jobs, a plan changed, he dropped an instruction); the
+  old fact moves to a new `facts_superseded` table with what replaced it, so `facts` stays "true
+  now" for every reader (the LONG-TERM MEMORY block, kin, becoming, the dashboard) and nothing he
+  said is lost. Matching ignores case, spacing and end punctuation; a `replaces` naming nothing
+  known is ignored. `Memory.load_superseded()`.
 - **She knows when she's been upgraded.** `modules/upgrades.py` holds one hand-written entry per
   change to her, in spoken second person, with which sisters it's for and when it's really on (a
   feature switched off or a model not set in `.env` is never told). On her first boot with

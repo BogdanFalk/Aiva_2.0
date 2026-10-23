@@ -104,7 +104,8 @@ SETTINGS = (
 
     # --- Voice & audio ---------------------------------------------------------------------------
     S("ELEVENLABS_VOICE_ID", "Voice & audio", "str", None, "Aiva's ElevenLabs voice; without one she runs text-only.", "aiva", default_note="none (text-only)"),
-    S("ELEVENLABS_MODEL", "Voice & audio", "str", "eleven_flash_v2_5", "ElevenLabs model both voices use unless Saga has her own."),
+    S("ELEVENLABS_MODEL", "Voice & audio", "str", "eleven_flash_v2_5", "ElevenLabs model both voices use unless Saga has her own. eleven_v4_turbo speaks through Text-to-Dialogue and lets her laugh, sigh or whisper."),
+    S("AIVA_TTS_STABILITY", "Voice & audio", "float", 0.5, "For Eleven v3/v4 voices: 0.5 stays closest to her recorded voice, lower is more expressive but can garble, higher is steadier but ignores cues.", "sisters", min=0.0, max=1.0),
     S("AIVA_INPUT_DEVICE_INDEX", "Voice & audio", "int", None, "Microphone by device index; wins over the name when set.", "house", min=0, default_note="use the name"),
     S("AIVA_INPUT_DEVICE_NAME", "Voice & audio", "str", None, "Microphone by name substring, which survives driver re-numbering.", "house", default_note="system default"),
     S("AIVA_OUTPUT_DEVICE_INDEX", "Voice & audio", "int", None, "Aiva's speaker by device index; wins over the name when set.", "aiva", min=0, default_note="use the name"),
@@ -204,6 +205,9 @@ SETTINGS = (
     C("becoming.CURIOSITY.decline_backoff_s", "Reading & books", 6 * 3600, "Seconds she waits after you say no to reading.", "aiva/modules/becoming.py CURIOSITY"),
 
     # --- Mood & self loop ------------------------------------------------------------------------
+    S("AIVA_APPRAISAL", "Mood & self loop", "bool", True, "After each of your lines, a quick side-call reads what's going on with you and how it lands on her; it moves her mood and is noted on your next turn.", "sisters"),
+    S("AIVA_APPRAISAL_MIN_CONFIDENCE", "Mood & self loop", "float", 0.5, "How sure that reading must be before she gets a note about it.", "sisters", min=0.0, max=1.0),
+    S("AIVA_APPRAISAL_NOTE_TTL_S", "Mood & self loop", "float", 600.0, "A reading older than this many seconds isn't noted on your next turn.", "sisters", min=0.0, max=86400.0),
     S("AIVA_MOOD_BASE_VALENCE", "Mood & self loop", "float", 0.15, "Aiva's resting mood from gloomy to cheerful.", "aiva", min=-1.0, max=1.0),
     S("AIVA_MOOD_BASE_AROUSAL", "Mood & self loop", "float", 0.50, "Aiva's resting energy.", "aiva", min=0.0, max=1.0),
     S("AIVA_MOOD_BASE_SOCIAL", "Mood & self loop", "float", 0.10, "Aiva's resting wish for company.", "aiva", min=-1.0, max=1.0),

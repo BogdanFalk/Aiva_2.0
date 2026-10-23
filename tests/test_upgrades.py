@@ -10,8 +10,8 @@ from modules.upgrades import UPGRADES, Upgrade
 TODAY = date(2026, 10, 23)
 
 
-def sister(slug="aiva", llm="gpt-5.6-luna", voice="v1"):
-    return SimpleNamespace(slug=slug, llm_model=llm, voice_id=voice)
+def sister(slug="aiva", llm="gpt-5.6-luna", voice="v1", tts="eleven_flash_v2_5"):
+    return SimpleNamespace(slug=slug, llm_model=llm, voice_id=voice, tts_model=tts)
 
 
 def ids(ups):
@@ -49,6 +49,16 @@ def test_house_features_follow_their_switches():
     assert not {"2026-10-flux-ear", "2026-10-emotion-hearing", "2026-10-backchannels"} & set(off)
     assert "2026-10-backchannels" not in ids(upgrades.applicable("aiva", {"AIVA_BACKCHANNEL": "0"}, sister()))
     assert "2026-10-backchannels" not in ids(upgrades.applicable("aiva", {}, sister(voice=None)))
+
+
+def test_the_v4_voice_and_appraisal_follow_their_settings():
+    v4 = ids(upgrades.applicable("aiva", {}, sister(tts="eleven_v4_turbo")))
+    flash = ids(upgrades.applicable("aiva", {}, sister()))
+    assert "2026-10-v4-voice" in v4 and "2026-10-v4-voice" not in flash
+    assert "2026-10-v4-voice" not in ids(upgrades.applicable("aiva", {}, sister(voice=None, tts="eleven_v4_turbo")))
+    assert "2026-10-appraisal" in flash
+    assert "2026-10-appraisal" not in ids(upgrades.applicable("aiva", {"AIVA_APPRAISAL": "0"}, sister()))
+    assert "2026-10-facts-replace" in flash
 
 
 def test_told_record_round_trips_and_tolerates_garbage():
