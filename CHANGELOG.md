@@ -9,6 +9,18 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **A GPT-Live trial: talk to one sister in true full duplex** (`aiva/live_trial.py`). A standalone
+  script, run with the house and the sisters stopped (it refuses to start while the house runs) and
+  with headphones (no echo cancellation). She hears you while she talks and you can cut in any
+  time. Her persona and long-term facts are read from her db read-only as the session's
+  instructions, and she's told it's a trial, so nothing is saved and her house tools aren't there.
+  Look-ups go to an OpenAI-hosted backend (`AIVA_LIVE_BACKEND_MODEL`, gpt-6-luna, hosted web search)
+  while she keeps talking. Voice: a preset (`--voice marin`) or one designed from a description
+  (`--design "…"`, `POST /v1/audio/voices`, free, GPT-Live only, id printed for reuse).
+  `--minutes` caps it (10), `--check` validates config without a session. $0.05 a minute plus
+  backend tokens, printed at the end. A 3-second live session on 2026-10-24 confirmed the account
+  can use gpt-live-1 with this delegation. This is a feel test beside the house, not a change to it:
+  the floor, gate and tools still assume one grant at a time.
 - **She can answer sooner (`AIVA_SPECULATE=1`, off by default).** With Flux, the house turns on its
   eager end of turn and the stage runs `EagerUserTurnStrategies`. When Flux guesses he's done,
   `StageRouter` calls `Floor.speculate`: if the floor is idle and the line plainly goes to one

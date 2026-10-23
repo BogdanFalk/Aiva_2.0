@@ -95,6 +95,7 @@ SETTINGS = (
     S("AIVA_LLM_MODEL", "Models", "str", "gpt-5.6-luna", "The voice model Aiva thinks and talks with, and Saga too unless SAGA_LLM_MODEL gives her her own.", "all"),
     S("AIVA_TASK_MODEL", "Models", "str", None, "Model for background tasks and the house arbiter, on its own token bucket.", "all", default_from="AIVA_LLM_MODEL"),
     S("AIVA_VISION_MODEL", "Models", "str", None, "Model that looks at screenshots and images.", default_from="AIVA_LLM_MODEL"),
+    S("AIVA_LIVE_BACKEND_MODEL", "Models", "str", "gpt-6-luna", "For the GPT-Live trial (live_trial.py) only: the model she hands look-ups and thinking to while she keeps talking. Read when the trial starts; the sisters themselves don't use it.", "sisters"),
     S("AIVA_STUDY_MODEL", "Models", "str", None, "Model that close-reads each section of a book.", default_from="AIVA_TASK_MODEL"),
     S("AIVA_STUDY_SYNTH_MODEL", "Models", "str", "gpt-5.6-terra", "Model that writes the whole-book synthesis when she finishes one."),
     S("AIVA_WEB_MODEL", "Models", "str", None, "Model that summarises web pages she reads.", default_from="AIVA_TASK_MODEL"),
