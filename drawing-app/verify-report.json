@@ -1,0 +1,45 @@
+{
+  "ok": true,
+  "pid": 5216,
+  "port": 49970,
+  "log": "C:\\Users\\Extre\\AppData\\Local\\Temp\\drawapp-9s0hk1kk\\drawapp.log",
+  "interpreter": "C:\\Users\\Extre\\Desktop\\Work\\UnseenMedia\\Aiva_2.0\\.venv\\Scripts\\pythonw.exe",
+  "left_open": true,
+  "checks": [
+    {
+      "name": "launch",
+      "ok": true,
+      "detail": "listening on 127.0.0.1:49970 after 0.6s"
+    },
+    {
+      "name": "no console",
+      "ok": true,
+      "detail": "no console host under the app"
+    },
+    {
+      "name": "window shown",
+      "ok": true,
+      "detail": "Aiva & Saga \u2014 Drawing (aiva) \u00b7 commands on 127.0.0.1:49970"
+    },
+    {
+      "name": "focus kept",
+      "ok": true,
+      "detail": "foreground window belongs to pid 35552"
+    },
+    {
+      "name": "aiva stroke",
+      "ok": true,
+      "detail": "{\"ok\": true, \"stroke_id\": \"aiva-bb3922b27ec4\", \"revision\": 102}"
+    },
+    {
+      "name": "saga stroke",
+      "ok": true,
+      "detail": "{\"ok\": true, \"stroke_id\": \"saga-bb8b46b2a35e\", \"revision\": 164}"
+    },
+    {
+      "name": "bad command refused",
+      "ok": true,
+      "detail": "invalid: point (-50, 10) is outside the 1024x768 canvas"
+    }
+  ]
+}

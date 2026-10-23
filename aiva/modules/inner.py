@@ -31,7 +31,7 @@ import sqlite3
 import struct
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from modules import drives as dr
 from modules.persona import named
@@ -318,6 +318,25 @@ def _loads(s):
 DESIRE_DEDUPE_COSINE = 0.86     # matches task_memory.SAME_TASK
 DESIRE_DEDUPE_JACCARD = 0.60    # lexical fallback when either side has no embedding
 DESIRE_KINDS = {"do", "learn", "ask", "make", "revisit", "change"}
+# A wish ends when it's DONE, not when she's been told twice (2026-10-17: eight open wordings of
+# "run one focused Saga check", two passing checks and a "you already did it" she agreed with, and
+# she still raised it every quarter hour). A finished task, or him saying it's done or to let it go,
+# settles every open wish it covers — one wish in eight wordings is still one wish. The side model
+# judges which; without it only a near-restatement counts.
+SETTLE_PROMPT_T = (
+    "You keep {name}'s list of open wishes: things she wants to do, make, find, ask or learn. "
+    "Something just happened. Say which of her open wishes it settles. A wish is settled when the "
+    "thing is done, when what she wanted to find out is now known (wanting to ask what a check "
+    "showed is settled once the check has run and its result is in), or when nothing is left to "
+    "want. The same wish often appears several times in different words, or under an older name "
+    "for the same thing: settle every one of them. A wish that is only about the same topic but "
+    "wants something this didn't do stays open. Return JSON only: {\"settled\": [the numbers of the "
+    "wishes it settles]}; an empty list is fine."
+)
+WISH_SETTLE_COSINE = 0.72       # the fallback: a near-restatement of what got done
+# After she raises a wish on her own she lets it rest — a day, then three, then a week — instead of
+# bringing the same thing up again a quarter of an hour later.
+ASK_REST_H = (24.0, 72.0, 168.0)
 # A diary wish about her own inner weather ("notice what remains when the brightness settles") is
 # a rut, not a want: it can't be acted on, and fed back into the next digest it breeds more of
 # itself (2026-10-12: all 12 open wishes were like that). Backstop for the prompt rule — a wish
@@ -553,6 +572,7 @@ class SelfEngine:
         # house_emit(kind, summary, capability=None): her public acts, relayed to her sister(s)
         self._house_emit = house_emit
         self.journal_prompt = self._render_prompt()
+        self.settle_prompt = named(SETTLE_PROMPT_T, name)
         self.state = state or InnerState.fresh(brain.cfg)
         self.state_path = state_path
         self._embed = embed                 # async (text) -> vec | None
@@ -1040,6 +1060,9 @@ class SelfEngine:
         if open_wants:
             lines.append("YOU ALREADY WANT (don't just repeat these): "
                          + "; ".join(d["text"] for d in open_wants))
+        done = self._recently_settled()
+        if done:
+            lines.append("ALREADY DONE (settled — don't wish for these again): " + "; ".join(done))
         if self.preferences:
             try:
                 pb = self.preferences.prompt_block(budget=6)
@@ -1130,11 +1153,17 @@ class SelfEngine:
         if len(rows) > self.desire_cap:
             self.conn.commit()
 
-    async def drop_desire(self, text_or_id, reason=None):
-        """Veto a wish (id -> substring -> embedding/lexical). Dropped forever. Returns the
-        matched text or None."""
-        row = None
-        if isinstance(text_or_id, int) or (isinstance(text_or_id, str) and text_or_id.isdigit()):
+    async def drop_desire(self, text_or_id, reason=None, done=False):
+        """Veto a wish (id -> substring -> side model -> embedding/lexical). Dropped forever — or,
+        when he says it's already done (`done`), closed as fulfilled. Asked in words, every other
+        open wording of the same wish goes with it (settle_wishes). The loose similarity guess is
+        only for when the side model can't say: it once took "the focused Saga constellation check"
+        for "whether the constellation feels emotionally right to Saga". Returns the matched text or None."""
+        status = "fulfilled" if done else "dropped"
+        by_id = isinstance(text_or_id, int) or (isinstance(text_or_id, str) and text_or_id.isdigit())
+        said = f"He told {self.name} " + ("it's already done" if done else "to let this go") + f": {text_or_id}"
+        row, siblings = None, None
+        if by_id:
             row = self.conn.execute("SELECT id, text FROM desires WHERE id = ?",
                                     (int(text_or_id),)).fetchone()
         if not row:
@@ -1145,7 +1174,9 @@ class SelfEngine:
                     if q in t.lower():
                         row = (rid, t)
                         break
-        if not row:
+        if not row and not by_id:
+            siblings = await self.settle_wishes(said, status=status, reason=reason, model_only=True)
+        if not row and siblings is None:
             vec = await self._vec(str(text_or_id))
             best, best_score = None, 0.0
             for rid, t, emb in self.conn.execute(
@@ -1156,16 +1187,98 @@ class SelfEngine:
                     best, best_score = (rid, t), score
             if best and best_score >= 0.6:
                 row = best
-        if not row:
+        if row:
+            self.conn.execute("UPDATE desires SET status = ?, veto_reason = ?, last_touched_ts = ? "
+                              "WHERE id = ?", (status, reason, self._now(), row[0]))
+            self.conn.commit()
+            if not by_id and siblings is None:
+                siblings = await self.settle_wishes(said, status=status, reason=reason, model_only=True)
+        siblings = siblings or []
+        if not row and not siblings:
             return None
-        self.conn.execute("UPDATE desires SET status = 'dropped', veto_reason = ?, last_touched_ts = ? "
-                          "WHERE id = ?", (reason, self._now(), row[0]))
-        self.conn.commit()
         try:
             self._refresh_prompt()
         except Exception:
             pass
-        return row[1]
+        return row[1] if row else siblings[0]
+
+    async def settle_wishes(self, what, *, status="fulfilled", reason=None, match=None, model_only=False):
+        """Something happened — a task got done, or he said it's done or to let it go — so close
+        every open wish it settles, not just the nearest one. The side model judges which; when it
+        can't say, only a near-restatement of `match` (default `what`) counts — or, with
+        `model_only`, the answer is None (couldn't judge) rather than []. Returns the settled texts."""
+        what = (what or "").strip()
+        wishes = self.list_desires(status="open", limit=self.desire_cap + 8)
+        if not what or not wishes:
+            return []
+        ids = await self._settled_by_model(what, wishes)
+        if ids is None and model_only:
+            return None
+        if ids is None:
+            ids = set()
+            vec = await self._vec(match or what)
+            for d in wishes:
+                emb = self.conn.execute("SELECT embedding FROM desires WHERE id = ?", (d["id"],)).fetchone()
+                other = _unpack_vec(emb[0]) if emb else None
+                if vec and other:
+                    hit = _cosine(vec, other) >= WISH_SETTLE_COSINE
+                else:
+                    hit = _jaccard(match or what, d["text"]) >= DESIRE_DEDUPE_JACCARD
+                if hit:
+                    ids.add(d["id"])
+        settled = [d for d in wishes if d["id"] in (ids or ())]
+        if not settled:
+            return []
+        now = self._now()
+        for d in settled:
+            self.conn.execute("UPDATE desires SET status = ?, veto_reason = ?, last_touched_ts = ? "
+                              "WHERE id = ? AND status = 'open'", (status, reason, now, d["id"]))
+        self.conn.commit()
+        self.log(f"self: {len(settled)} wish(es) {status}: " + "; ".join(d["text"][:60] for d in settled))
+        try:
+            self._refresh_prompt()
+        except Exception:
+            pass
+        return [d["text"] for d in settled]
+
+    async def _settled_by_model(self, what, wishes):
+        """The side model's pick as a set of wish ids, or None when it can't say (no model, a failed
+        call, an unreadable answer)."""
+        if not self._llm:
+            return None
+        listing = "\n".join(f"{i}. {d['text']}" for i, d in enumerate(wishes, 1))
+        try:
+            reply = await self._llm([{"role": "system", "content": self.settle_prompt},
+                                     {"role": "user", "content": f"WHAT HAPPENED: {what[:1500]}\n\n"
+                                                                 f"HER OPEN WISHES:\n{listing}"}],
+                                    json_mode=True, max_tokens=120, temperature=0.0)
+            data = json.loads(reply.text or "")
+        except Exception as e:
+            self.log(f"self: settle call failed ({e!r})")
+            return None
+        nums = data.get("settled") if isinstance(data, dict) else None
+        if not isinstance(nums, list):
+            return None
+        ids = set()
+        for n in nums:
+            try:
+                k = int(n)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= k <= len(wishes):
+                ids.add(wishes[k - 1]["id"])
+        return ids
+
+    def _recently_settled(self, days=3, limit=5):
+        """What she wanted and got done (or acted on) lately — so the diary doesn't wish it again."""
+        try:
+            cutoff = (datetime.fromisoformat(self._now()) - timedelta(days=days)).isoformat()
+        except (ValueError, TypeError):
+            return []
+        rows = self.conn.execute(
+            "SELECT text FROM desires WHERE status IN ('fulfilled', 'acted') AND last_touched_ts >= ? "
+            "ORDER BY last_touched_ts DESC LIMIT ?", (cutoff, limit)).fetchall()
+        return [r[0] for r in rows]
 
     def list_desires(self, status="open", limit=20):
         where = "WHERE status = ?" if status else ""
@@ -1223,6 +1336,36 @@ class SelfEngine:
         d = self.list_desires(status="open", limit=1)
         return d[0] if d else None
 
+    def _raised(self):
+        try:
+            data = json.loads(self._get("wishes_raised", "{}") or "{}")
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def _askable_desire(self):
+        """Her strongest open wish that isn't resting: once she's raised one on her own she lets it
+        be (ASK_REST_H) rather than bring it up again — 2026-10-17, the same wish four times
+        before lunch."""
+        raised, now = self._raised(), self._now()
+        for d in self.list_desires(status="open", limit=self.desire_cap + 8):
+            r = raised.get(str(d["id"]))
+            if isinstance(r, dict) and r.get("ts"):
+                n = max(1, int(r.get("n", 1)))
+                if _hours_between(r["ts"], now) < ASK_REST_H[min(n, len(ASK_REST_H)) - 1]:
+                    continue
+            return d
+        return None
+
+    def _mark_raised(self, desire_id, now):
+        raised = self._raised()
+        r = raised.get(str(desire_id))
+        n = int(r.get("n", 0)) if isinstance(r, dict) else 0
+        raised[str(desire_id)] = {"n": n + 1, "ts": now}
+        if len(raised) > 40:
+            raised = dict(sorted(raised.items(), key=lambda kv: str(kv[1].get("ts", "")))[-40:])
+        self._set("wishes_raised", json.dumps(raised))
+
     def _secs_since(self, key):
         ts = self._get(key)
         return _hours_between(ts, self._now()) * 3600.0 if ts else 1e9
@@ -1251,6 +1394,10 @@ class SelfEngine:
                 return None
         return None
 
+    def initiative_mode(self):
+        """always | ask | quiet | never — the switch `set_initiative` flips."""
+        return self._get("initiative", "ask")
+
     def set_initiative(self, mode):
         mode = (mode or "").strip().lower()
         if mode not in ("always", "ask", "quiet", "never"):
@@ -1276,7 +1423,7 @@ class SelfEngine:
             "hour": hour,
             "valence": self.state.valence, "arousal": self.state.arousal, "social": self.state.social,
             "focus": bool(self.state.focus),
-            "has_askable_desire": self._top_desire() is not None,
+            "has_askable_desire": self._askable_desire() is not None,
             "has_actionable_desire": self._actionable_desire() is not None,
             "acts_today": self._day_count("act_day"),
             "secs_since_last_initiative": self._secs_since("last_initiative_ts"),
@@ -1299,7 +1446,7 @@ class SelfEngine:
         self._set("last_initiative_ts", now)
         self._bump_day_count(now)
         if what != "chat":
-            d = self._top_desire()
+            d = self._askable_desire()
             self._set("initiative_pending", now)
             self._set("initiative_pending_what", {
                 "express": "said what was on my mind",
@@ -1321,7 +1468,9 @@ class SelfEngine:
             self.log(f"self initiative: chat -> {sister}")
             return what
         if what == "ask":
-            d = self._top_desire()
+            d = self._askable_desire()
+            if d:
+                self._mark_raised(d["id"], now)
             note = ASK_NOTE.format(desire=d["text"] if d else "something you've been meaning to bring up")
         else:
             focus = self.state.focus

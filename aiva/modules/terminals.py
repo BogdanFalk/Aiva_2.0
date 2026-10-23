@@ -40,6 +40,9 @@ JOBS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 EXECUTE_MODES = ("auto", "acceptEdits")
 
 
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")   # claude --effort
+
+
 def execute_permission_mode():
     mode = os.getenv("AIVA_CLAUDE_PERMISSION_MODE", "auto").strip()
     return mode if mode in EXECUTE_MODES else "auto"
@@ -416,7 +419,7 @@ class TerminalManager:
     # --- Claude Code ---------------------------------------------------------
 
     async def start_claude(self, job_name, project_dir, prompt, mode="plan", resume_id=None,
-                           announce_done=True):
+                           announce_done=True, effort=None):
         if is_whole_home(project_dir):
             return {"success": False, "error": "won't run Claude Code across his whole home folder; "
                                                "give the project's own folder"}
@@ -433,6 +436,9 @@ class TerminalManager:
             args += ["--permission-mode", execute_permission_mode()]
         if resume_id:
             args += ["--resume", resume_id]
+        if effort in CLAUDE_EFFORTS:
+            # how hard this one job thinks (tasks.job_effort); None leaves his own Claude Code setting
+            args += ["--effort", effort]
 
         proc = await asyncio.create_subprocess_exec(
             *args, cwd=project_dir,

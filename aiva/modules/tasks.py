@@ -47,6 +47,10 @@ RUNNER_TOOL_ALLOW = frozenset({
     "recall_from_space", "space_status",
     # what she has seen her sister do — read-only, her own observations
     "recall_about_sister",
+    # her drawing canvas, opened and drawn on from her own process (modules/drawing.py). A task that
+    # draws or checks the drawing app uses these, never a terminal (2026-10-20: he saw the PowerShell)
+    "open_drawing", "draw_stroke", "clear_drawing", "undo_stroke", "save_drawing",
+    "open_saved_drawing",
 })
 
 DESTRUCTIVE_RE = re.compile(
@@ -77,6 +81,30 @@ def delegate_read_only(action):
     if action.get("read_only") is not None:
         return _flag(action["read_only"])
     return bool(READ_ONLY_RE.search(action.get("prompt") or ""))
+
+
+# How hard a Claude Code job thinks (`claude --effort`). Every job used to inherit his own xhigh: a
+# read-only README review spent 18k of its 31k output tokens thinking, ~5 min and ~$2 (2026-10-17).
+# The planner sizes each job; a job that came back short on the same project goes one level up.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def job_effort(asked, read_only, misses=0, forced=None):
+    """PURE: the --effort for one Claude Code job, or None to leave his own Claude Code setting.
+    `asked` is the planner's (or the agent's) level; missing or unknown → medium for a look, high
+    for a change. A look never goes past high, a change past xhigh (max only when forced). Each
+    earlier job on this project in this task that came back partial or bad (`misses`) is one level
+    up: it wasn't enough the first time. `forced` (AIVA_CLAUDE_EFFORT) is auto, inherit, or a level."""
+    forced = (forced or "auto").strip().lower()
+    if forced == "inherit":
+        return None
+    if forced in EFFORT_LEVELS:
+        return forced
+    level = (asked or "").strip().lower()
+    if level not in EFFORT_LEVELS[:4]:
+        level = "medium" if read_only else "high"
+    top = EFFORT_LEVELS.index("high" if read_only else "xhigh")
+    return EFFORT_LEVELS[min(EFFORT_LEVELS.index(level) + max(0, int(misses or 0)), top)]
 # her own code (and her sister's, the house's): the planner is told, so work on herself gets this
 # folder and not "." — which resolves to his home (2026-10-14: a job ran across all of C:\Users\Extre)
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -243,9 +271,13 @@ PRIVATE_TOOLS = [
           {"command": {"type": "string"}, "purpose": {"type": "string",
            "description": "One plain sentence: what this command is for"}}, ["command", "purpose"]),
     _tool("delegate_to_claude", "Hand coding work (multi-file edits, bug fixes, features, tests) in a "
-                                "project directory to Claude Code. Takes minutes; the result is graded.",
+                                "project directory to Claude Code. Takes minutes; the result is graded. "
+                                "Reading or searching a few files yourself is faster.",
           {"project_dir": {"type": "string"}, "task": {"type": "string"},
-           "why": {"type": "string", "description": "Why this needs an agent rather than you"}},
+           "why": {"type": "string", "description": "Why this needs an agent rather than you"},
+           "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"],
+                      "description": "How hard it should think: low = confirm one thing, medium = a "
+                                     "review or small edit, high = a real change, xhigh = build from scratch"}},
           ["project_dir", "task", "why"]),
     # looking needs no yes: these only read (2026-10-14: with nothing but the shell to read a file,
     # search or run the tests, every look was a PowerShell command that waited on him — a text-file
@@ -521,8 +553,12 @@ def _merged_delegate(parts):
               "says only to look, or not to change anything, means only that part.\n\n"
               + "\n\n".join(f"{i}. {p.get('title')}:\n{a.get('prompt')}" for i, (p, a) in enumerate(zip(parts, acts), 1)))
     risks = [p.get("risk") if p.get("risk") in _RISK_ORDER else "none" for p in parts]
+    # the one job does every part, so it thinks as hard as its hardest part asked
+    efforts = [str(a.get("effort") or "").strip().lower() for a in acts]
+    efforts = [e for e in efforts if e in EFFORT_LEVELS]
     return {"title": doing.get("title"), "kind": "delegate",
             "action": {"project_dir": acts[0].get("project_dir"), "prompt": prompt, "read_only": read_only,
+                       "effort": max(efforts, key=EFFORT_LEVELS.index) if efforts else None,
                        "merged": True},
             "expect": "; ".join(str(p.get("expect") or p.get("title")) for p in parts),
             "verify": "result", "milestone": False, "risk": max(risks, key=_RISK_ORDER.index),
@@ -630,7 +666,14 @@ then remove it) so the user confirms once. Plan only the steps the goal needs: w
 file, writing it IS the task — any looking it needs goes in the same agent step that writes it, \
 not a research step in front that can fail on its own.
 - "delegate": hand CODING work (multi-file edits, bug fixes, features, tests) in a project \
-directory to Claude Code. action: {"project_dir", "prompt", "read_only"}. ONE piece of coding work \
+directory to Claude Code. action: {"project_dir", "prompt", "read_only", "effort"}. A question about \
+one or a few files (what does it say, is X set, does Y pass) is NOT a delegate: an "agent" step \
+answers it with read_file / search_text / run_tests in seconds, while every Claude Code job costs \
+minutes and a fixed ~$0.25 before it even starts. effort is how hard the job thinks: "low" = find \
+or confirm one thing in the code; "medium" = a review or inspection across several files, or a \
+small contained edit; "high" = a real change across files, a bug that needs understanding, tests \
+to fix; "xhigh" = building something new from the ground up, a redesign, or a hard bug that already \
+beat a first try. Pick the lowest that will do it well. ONE piece of coding work \
 is ONE delegate step: Claude Code looks at the code, makes the change and runs the project's tests \
 itself in that one job, so never split it into separate inspect / implement / test / verify delegate \
 steps (back-to-back delegate steps on the same project are merged into one job anyway). read_only \
@@ -643,6 +686,11 @@ created if missing), never the assistant's own repo unless the work is on that r
 your_own_code is that repo (your code, your sister's, the house's): use its full path for work on \
 any of you. Never "." or "~" — that is his whole home folder, not a project.
 - "ask": ask the user one question you cannot proceed without. action: {"question"}.
+
+{name}'s own drawing app (her drawing canvas, drawapp) opens with ONE "tool" step, open_drawing \
+(it reuses the window if it's up), is drawn on with draw_stroke and saved with save_drawing, \
+never Ctrl+S or press_keys (open_saved_drawing brings a saved one back). It is not a program on the \
+PC: never launch_app, a terminal, Aseprite, Paint or any other drawing program for it.
 
 Every step: {"n", "title" (<= 12 words, spoken to the user), "kind", "action", "expect" (plain-words \
 success criterion), "verify": "result"|"screen"|"terminal"|"file"|"none", "milestone": bool, \
@@ -676,7 +724,9 @@ file with create_file — none of them waits for the user, and several can go in
 file he asked for is already approved: create_file never replaces an existing file unless you pass \
 overwrite true (a taken name gets ' (2)' and the result says so), so there is nothing to check first. \
 The shell tool stops the whole task until the user answers, so it is only for what no tool here can \
-do (delete, move, install); never for reading, searching, writing a file, git or tests. Never try a \
+do (delete, move, install); never for reading, searching, writing a file, git or tests. Your own \
+drawing canvas is open_drawing, draw_stroke and save_drawing, never launch_app, another drawing program \
+or Ctrl+S. Never try a \
 destructive command any other way. Use the tools before you give up: step_failed is for a tool that \
 really failed or a step none of them can do. A \
 look-around is a means, not the goal: once you know enough, finish. Do ONLY this step: never do the work of later \
@@ -738,7 +788,7 @@ class TaskRunner:
                  log=print, execute_shell=None, describe_screen=None, list_monitors=None,
                  resolve_path=None, facts=None, model_name="gpt-4.1", name="Aiva", on_done=None,
                  free_range=None, on_outcome=None, git=None, test_command=None, test_runner=None,
-                 verify_tests=None):
+                 verify_tests=None, on_result=None):
         self.tm = task_memory
         # free range (AIVA_TASK_FREE_RANGE=1, user decision 2026-09-22): no plan, shell or
         # delegate confirmations — see task_memory.decide_autonomy
@@ -763,6 +813,10 @@ class TaskRunner:
         # on_outcome(outcome, goal): EVERY finish (success|partial|failed|cancelled) — what it felt
         # like to get it done or not (v3 drives: competence). Sync or async; never breaks the finish.
         self._on_outcome = on_outcome
+        # on_result(goal, summary): a task that got done (success|partial), with its WHOLE goal and
+        # what came of it — what she wanted is now done, so the wishes it settles can close
+        # (SelfEngine.settle_wishes). Sync or async; never breaks the finish.
+        self._on_result = on_result
         self.planner_prompt = named(PLANNER_PROMPT_T, name)
         self.runner_prompt = named(RUNNER_SYSTEM_PROMPT_T, name)
         self.rethink_prompt = named(RETHINK_PROMPT_T, name)
@@ -1325,7 +1379,8 @@ class TaskRunner:
                       "prompt": action.get("prompt") or action.get("task") or s.get("prompt"),
                       # None = the planner didn't say; delegate_read_only then reads the wording
                       "read_only": None if (ro := action.get("read_only", s.get("read_only"))) is None
-                      else _flag(ro)}
+                      else _flag(ro),
+                      "effort": action.get("effort") or s.get("effort")}
         elif kind == "ask":
             action = {"question": action.get("question") or action.get("text") or s.get("question")}
         s["kind"] = kind
@@ -1566,7 +1621,9 @@ class TaskRunner:
                     result = out.get("result") or {"success": not out.get("failed"), "error": out.get("reason")}
                 elif name == "delegate_to_claude":
                     out = await self._delegate_step(task, step, {"project_dir": args.get("project_dir"),
-                                                                 "prompt": args.get("task")})
+                                                                 "prompt": args.get("task"),
+                                                                 "effort": args.get("effort")
+                                                                 or (step.get("action") or {}).get("effort")})
                     result = out.get("result") or {"success": not out.get("failed"), "error": out.get("reason")}
                 else:
                     result = await self._tool(task, step, name, args)
@@ -1683,12 +1740,15 @@ class TaskRunner:
             # once per project per task, before the agent touches anything: tests he left failing
             # are never blamed on the agent
             tests_before[where] = await self._run_tests(task, test_cmd, project_dir, "before")
+        misses = (task.get("_misses") or {}).get(where, 0)
+        effort = job_effort(action.get("effort"), read_only, misses, os.getenv("AIVA_CLAUDE_EFFORT"))
         started = await self.terminals.start_claude(job_name=job, project_dir=project_dir, prompt=brief,
                                                     mode="plan" if read_only else "execute",
-                                                    resume_id=resume, announce_done=False)
+                                                    resume_id=resume, announce_done=False, effort=effort)
         if not started.get("success"):
             return {"failed": True, "reason": started.get("error", "Claude Code didn't start")}
-        self._log(task, "delegate", f"{job} in {project_dir}" + (f" (continuing session {resume})" if resume else ""))
+        self._log(task, "delegate", f"{job} in {project_dir}" + (f" (continuing session {resume})" if resume else "")
+                  + (f", effort {effort}" + (f" (up {misses} after a short try)" if misses else "") if effort else ""))
         waited = 0.0
         result = None
         while waited < self.limits.claude_wait_secs:
@@ -1701,7 +1761,7 @@ class TaskRunner:
             await self._announce(task, f"[Task '{self._short_goal(task)}': Claude Code is still working on step "
                                        f"{step['n']}.]\n[One short spoken sentence.]", "milestone")
         task["_claude_job"] = None
-        self._log_claude(task, job, result)
+        self._log_claude(task, job, result, effort)
         if result is None:
             try:
                 self.terminals.kill_job(job)
@@ -1714,7 +1774,7 @@ class TaskRunner:
             sessions.pop(where, None)            # that session couldn't be continued: start fresh next time
         report = result.get("result") or ""
         evidence = {"job_status": result.get("status"), "mode": "inspect" if read_only else "execute",
-                    "result_text": tm.clip_middle(report, 4000), "cost_usd": result.get("cost"),
+                    "result_text": tm.clip_middle(report, tm.JUDGE_REPORT_CHARS), "cost_usd": result.get("cost"),
                     "project_dir": project_dir}
         if result.get("denied"):
             evidence["not_allowed_to_run"] = result["denied"][:8]
@@ -1726,7 +1786,16 @@ class TaskRunner:
                     out = await self._run_git(task, project_dir, "-c", "core.quotepath=false", "diff",
                                               "--name-only", base["head"], after["head"])
                     changed |= {p.strip() for p in (out.get("stdout") or "").splitlines() if p.strip()}
-                evidence["agent_changed"] = sorted(p for p in changed if not WORKTREE_NOISE_RE.search(p))[:40]
+                found = sorted(p for p in changed if not WORKTREE_NOISE_RE.search(p))[:40]
+                if read_only:
+                    # plan mode can't edit the project, so whatever changed while it ran was someone
+                    # else's (2026-10-17: a README review failed "for modifying tasks.py" — fixes to
+                    # the runner made in Frank's own Claude Code session while it ran)
+                    evidence["agent_changed"] = []
+                    if found:
+                        evidence["changed_by_others_meanwhile"] = found
+                else:
+                    evidence["agent_changed"] = found
                 evidence["user_uncommitted_before"] = len(base["files"])
             out = await self._run_git(task, project_dir, "log", "-3", "--oneline")
             evidence["git_log"] = (out.get("stdout") or "")[-600:]
@@ -1750,6 +1819,10 @@ class TaskRunner:
             self._log(task, "finding", grade["reason"])
             grade = {**grade, "blocked": None}
         task["grade"] = grade
+        if grade["grade"] in ("partial", "bad") and not grade.get("blocked"):
+            # came back short: the next job on this project in this task thinks one level harder
+            # (a question or a broken premise is not a matter of thinking harder)
+            task.setdefault("_misses", {})[where] = task.get("_misses", {}).get(where, 0) + 1
         task.setdefault("_reports", []).append({"n": step["n"], "title": step["title"], "report": report})
         # the raw report stays on the live task (not the persisted plan, which can become a flow)
         task.setdefault("_step_reports", {})[step["n"]] = {"report": report, "grade": grade, "denied": result.get("denied") or [],
@@ -1772,7 +1845,7 @@ class TaskRunner:
         return {"failed": False, "result": {"success": True, "job": job, "grade": grade["grade"],
                                             "summary": evidence["result_text"][:400]}}
 
-    def _log_claude(self, task, job, result):
+    def _log_claude(self, task, job, result, effort=None):
         """The link from a task to its Claude Code run: session id (its full transcript lives in
         ~/.claude/projects/*/<session>.jsonl), cost, status and where the result was saved."""
         log = (result or {}).get("log_path")
@@ -1785,7 +1858,8 @@ class TaskRunner:
         self._log(task, "claude", json.dumps({
             "job": job, "session": (result or {}).get("claude_session_id"),
             "cost": (result or {}).get("cost"),
-            "status": (result or {}).get("status") or "timed out", "log": log}, ensure_ascii=False))
+            "status": (result or {}).get("status") or "timed out", "log": log, "effort": effort},
+            ensure_ascii=False))
 
     async def _look(self, task, name, args):
         """The read-only private tools (LOOK_TOOLS). Nothing here changes anything, so nothing waits
@@ -1922,7 +1996,7 @@ class TaskRunner:
                 "grade": {k: grade.get(k) for k in ("grade", "reason", "blocked", "question")},
                 "not_allowed_to_run": info.get("denied"), "files_agent_changed": info.get("agent_changed"),
                 "tests_you_ran": info.get("tests"),
-                "agent_report": tm.clip_middle(info.get("report"), 6000),
+                "agent_report": tm.clip_middle(info.get("report"), tm.JUDGE_REPORT_CHARS),
             }, ensure_ascii=False), max_tokens=700)
         except BudgetExceeded:
             return False
@@ -2192,6 +2266,12 @@ class TaskRunner:
                     f"Result: {summary}\nChecked: {checked}\n")
             if task.get("grade"):
                 note += f"Claude Code's work checked: grade {task['grade']['grade'].upper()} — {task['grade']['reason']}.\n"
+            reports = task.get("_reports") or []
+            if reports:
+                # what the job actually said, so she can tell him (2026-10-17: "take a look and tell me
+                # what you'd change" came back as two sentences made from 300 characters of the report)
+                note += ("What Claude Code reported, in its own words: "
+                         + tm.clip_middle(reports[-1]["report"], 3000) + "\n")
             if task.get("_pattern_line"):
                 note += f"Pattern noticed: {task['_pattern_line']}\n"
             if task.get("_rethought"):
@@ -2234,6 +2314,13 @@ class TaskRunner:
                     await res
             except Exception as e:
                 self.log(f"tasks: on_outcome hook failed ({e!r})")
+        if outcome in ("success", "partial") and self._on_result is not None:
+            try:
+                res = self._on_result(task["goal"], task["result_summary"])
+                if hasattr(res, "__await__"):
+                    await res
+            except Exception as e:
+                self.log(f"tasks: on_result hook failed ({e!r})")
         if outcome == "success" and self._on_done is not None:
             try:
                 res = self._on_done(task["result_summary"], task.get("family"))

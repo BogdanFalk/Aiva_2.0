@@ -137,7 +137,8 @@ async def test_both_ordering_with_second_cue():
     r.finish_audible(r.aiva, "Pizza. Saga, you in?")
     kinds = [type(m).__name__ for m in r.saga.sent]
     assert kinds == ["Overheard", "Overheard", "TurnMsg"]                 # user line, Aiva's reply, then her turn
-    assert r.saga.sent[1].line == '[Aiva said to him: "Pizza. Saga, you in?"]'
+    assert r.saga.sent[1].line == '[Aiva said to you and him: "Pizza. Saga, you in?"]'
+    assert r.transcript()[1]["addressee"] == "both"                       # answered him, then turned to her
     second = r.saga.turn
     assert second.kind == "both_second" and second.text is None and second.cue == both_second_cue("Aiva")
     assert second.reply_to == first.turn and second.audible is True and r.floor.gate_active is True
@@ -145,6 +146,23 @@ async def test_both_ordering_with_second_cue():
 
     r.finish_audible(r.saga, "Sure, pizza.")
     assert r.floor.holder is None and r.floor.queue == [] and r.aiva.last(p.Overheard).line == '[Saga said to him: "Sure, pizza."]'
+
+
+async def test_sister_lines_labelled_by_whom_she_spoke_to_2026_10_21():
+    # both lines of this exchange showed "→ you" on the dashboard, and Saga never got to answer
+    r = Rig()
+    await r.floor.submit_user_turn("Hey Saga check out Aiva's latest app! Tell her Aiva")
+    assert r.saga.turn.kind == "user" and r.aiva.turn is None
+
+    r.finish_audible(r.saga, "Oh, hey—you’re back. Aiva, Frank wants you to show me your latest app.")
+    assert r.transcript()[1]["addressee"] == "both"                       # to him first, then to Aiva
+    assert r.aiva.of(p.Overheard)[-1].line.startswith("[Saga said to you and him:")
+    assert r.aiva.turn.kind == "both_second"
+
+    r.finish_audible(r.aiva, "Yep, Saga, you’re looking at it—the shared drawing canvas. I just cleared it.")
+    assert r.transcript()[2]["addressee"] == "saga"
+    assert r.saga.of(p.Overheard)[-1].line.startswith("[Aiva said to you:")
+    assert r.saga.turn.kind == "sister" and r.saga.turn.addressee == "aiva"   # she was called, so she answers
 
 
 # --- arbiter ----------------------------------------------------------------------------------------
@@ -198,7 +216,7 @@ async def test_said_continues_only_when_she_asks_her_sister():
     r = Rig()
     await r.floor.submit_user_turn("Aiva, what do you make of Saga's idea?")
     r.finish_audible(r.aiva, "I like it. Saga, would you do it differently?")
-    assert r.saga.of(p.Overheard)[-1].line == '[Aiva said to him: "I like it. Saga, would you do it differently?"]'
+    assert r.saga.of(p.Overheard)[-1].line == '[Aiva said to you and him: "I like it. Saga, would you do it differently?"]'
     st = r.saga.turn
     # he asked for this exchange and is in the room: spoken aloud even though the mode is private
     assert st is not None and st.kind == "sister" and st.audible is True and st.addressee == "aiva"

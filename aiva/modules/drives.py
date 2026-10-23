@@ -96,6 +96,7 @@ EFFECTS = {
     "space_find":          {"novelty": 0.10},
     "project_step":        {"competence": 0.10, "novelty": 0.05},
     "project_done":        {"competence": 0.25, "novelty": 0.05},
+    "cat_care":            {"competence": 0.04},
     "task_done":           {"competence": 0.20, "rest": -0.02},
     "task_failed":         {"competence": -0.08, "rest": -0.02},
     "unexpected_presence": {"connection": 0.03},

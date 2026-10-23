@@ -723,7 +723,7 @@ class TaskMemory:
             reason = "tests are failing" if cap else ("the report is in" if mode == "inspect"
                                                       else "the change is in place")
             return _graded(grade, reason)
-        summary = json.dumps({k: (str(v)[:4000] if k == "result_text" else str(v)[:1500])
+        summary = json.dumps({k: (clip_middle(str(v), JUDGE_REPORT_CHARS) if k == "result_text" else str(v)[:1500])
                               if v is not None else None for k, v in evidence.items()}, ensure_ascii=False)
         asked = f"\nThis step: {json.dumps(step, ensure_ascii=False)}" if step else ""
         try:
@@ -758,6 +758,11 @@ Trust those runs over what the report says about tests. Grade THIS step against 
 task: an inspect or review step is good when its report answers what was asked, with no edits. The \
 step's later_steps are what the plan does after this job (e.g. writing the findings into a note): \
 never mark this step down for work that belongs to one of them. \
+A "[… N characters left out here …]" line in the report is {name}'s own cut to keep the evidence \
+short, not the agent stopping: never call a report truncated or incomplete because of it. An inspect \
+step runs in Claude Code's plan mode, which writes its own plan file under ~/.claude/plans and ends \
+by saying it will wait for a go-ahead: that file is not an edit and that ending is not a question. \
+Plan mode can't edit the project at all, so changed_by_others_meanwhile is someone else's work. \
 good = the evidence matches the claim and nothing unrelated changed; partial = did some of it, \
 missed part, or left tests failing; bad = claims done but the evidence contradicts it or it changed \
 the wrong things. Separately, set "blocked": "question" if the agent stopped to ask something it \
@@ -797,14 +802,22 @@ def agent_question(report):
     return lines[-1][:240]
 
 
+# What a grader or a second-thoughts call sees of an agent's report. Opus writes 5-15k-character
+# reports; a 4,000-character cut with a bare "[…]" in it was graded "visibly truncated" three runs in
+# a row (2026-10-17), and every rerun to fix it wrote a longer report (~$2 each).
+JUDGE_REPORT_CHARS = 20000
+
+
 def clip_middle(text, limit=3000):
     """Keep the START and the end of a long report: an agent states what it found first and asks
-    last — keeping only the tail once dropped "there is no Miso renderer" and kept the question."""
+    last — keeping only the tail once dropped "there is no Miso renderer" and kept the question.
+    The cut says it's a cut, so nobody mistakes it for the agent stopping mid-sentence."""
     text = text or ""
     if len(text) <= limit:
         return text
     head = limit * 2 // 3
-    return text[:head].rstrip() + "\n[…]\n" + text[-(limit - head):].lstrip()
+    return (text[:head].rstrip() + f"\n[… {len(text) - limit} characters left out here to keep this "
+            f"short …]\n" + text[-(limit - head):].lstrip())
 
 
 def _squash(text):

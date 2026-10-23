@@ -9,6 +9,105 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **An initiative-probe experiment for the project itself** (`aiva/modules/initiative_probe.py`,
+  not wired into her). It finds a module that no project notes name, picks the most recently
+  modified one and proposes one step: the rules file to note it in. It only reads and proposes.
+  `python -m modules.initiative_probe` prints the result. First run: `house_memory.py` has no
+  note, and `.claude/rules/house.md` already loads it.
+- **A record of every canvas action, behind the scenes.** Each sister's drawing board now writes
+  one JSON line per action (`open`, `stroke`, `clear`, `undo`, `save`, `open_saved`, `close`) to
+  `aiva/logs/drawing-<author>-YYYYMMDD.jsonl` (`drawing.DrawingJournal`). A line holds the author,
+  the points as sent with their bbox/start/end, the color and width she asked for and the ones the
+  canvas used (her own ink when she named none), the stroke id and revision the window answered,
+  the window's pid/port, and the outcome: `ok`, `refused` (nothing drawn), `failed` (no window
+  reached) or `unknown` (a live window went silent, so it may be drawn). `drawing.read_journal()`
+  merges both sisters' files into one timeline. Nothing she says changes, a failing journal never
+  fails a stroke, and the drawing app and its wire are untouched. 2026-10-21 their two heart halves
+  didn't meet and a screenshot was the only evidence. The journal now shows each half's
+  coordinates directly.
+- **Undo on her drawing canvas.** The drawing app (`drawing-app/`, now 0.4.0) takes back a stroke:
+  **Undo** (`Ctrl+Z`) in the toolbar, the wire command `{"cmd": "undo", "author": …}`
+  (`DrawClient.undo()`), and a new sister tool `undo_stroke`. Each takes back only that author's
+  newest finished stroke, never a stroke still being drawn and never her sister's, and repeating
+  it walks back further. It goes through a new `RemoveStroke` op on the one mutation path, so the
+  canvas repaints and autosaves as it does for a stroke, and a restored canvas comes back without
+  the undone stroke. With nothing of hers left, the reply is `"stroke_id": null` and she says
+  there was nothing to undo. `undo_stroke` never opens a window. It is runner-allowed but outside
+  `SAFE_TOOLS` and the `draw` capability, because his hand-drawn strokes in her window carry her
+  name. A 0.3 window refuses undo, and she says to reopen the canvas (safe there, since 0.3
+  autosaves); a pre-0.3 window still gets "leave it open". No redo yet. Tests:
+  `drawing-app/tests/` (model, commands, client, storage + the window) and `tests/test_drawing.py`,
+  including a real offscreen canvas. She needs a restart to have the tool, and a canvas window
+  opened before this change needs reopening to take undo.
+- **Her drawings are saved, and her canvas is never lost.** The drawing app (`drawing-app/`, now
+  0.3.0) saves to `%USERPROFILE%\Pictures\Aiva and Saga Drawings\` as `.aivadraw` (plain JSON)
+  plus a `.png`. The canvas toolbar has **Open…** (`Ctrl+O`), **Save** (`Ctrl+S`) and **Save As…**,
+  and the status bar shows the folder and whether the drawing is saved. Each sister has two new
+  tools, `save_drawing` (optional name; a name never replaces another drawing) and
+  `open_saved_drawing` (by name, or the newest). Both are safe tools and runner-allowed, and both
+  belong to the `draw` capability. Without anyone saving: every finished stroke rewrites a recovery
+  copy (`recovery\<author>-autosave`), so the next window for that sister comes back with her
+  drawing ("with your last drawing back on it"). That holds whether the window was closed, killed
+  or crashed. A sister restart no longer opens a second, blank window: her board first adopts the
+  one still up (`launcher.find_running`, which checks the pid and asks the port for `status`). Clear
+  keeps a `before-clear` copy, opening a drawing over unsaved work saves that work as a new drawing
+  first, saving over a file keeps a `.bak`, writes are atomic, and a recovery copy that can't be
+  restored is renamed `.unrecovered-<time>` rather than overwritten. One window per sister owns the
+  recovery copy (an OS lock), so a second window can never overwrite it. Wire commands
+  `save`/`open`/`drawings`/`status` (`code: "storage"` for file problems), `--save-dir`,
+  `launch(save_dir=)`. Tests: `drawing-app/tests/test_storage.py`, new launcher tests,
+  `tests/test_drawing.py`. Tests and `drawapp.verify` never touch the real Pictures folder. Needs a
+  restart of the sister and a fresh canvas window: a window from before this change can't save,
+  and she says so.
+- **Saving her drawing is a tool, never a keypress.** Asked to save the canvas before her process
+  had `save_drawing`, a task pressed Ctrl+S into whatever window had his focus. The `save_drawing`
+  description and the planner/runner prompts now say saving is that tool, never `press_keys`
+  Ctrl+S or the window's buttons. Code in her process gets a blocking direct save next to
+  `launch_or_reuse`: `DrawingBoard.save_now(name)` / `drawing.save_drawing(author, name)`. A
+  window from before saving existed (it accepts only `stroke`/`clear` and has no autosave) used to
+  be answered with "close it and open your canvas again", which would have lost the drawing on it.
+  Now she says to leave it open. Tests: `tests/test_drawing.py`.
+- **A task saves her drawing with the same tool she uses, for Aiva and for Saga.** At 18:31 a task
+  failed with "no direct tool to invoke that API". Her process had booted at 17:10, before
+  `save_drawing` existed, so its runner had nothing to call. The tool itself was already complete,
+  so no new tool was added. A new test checks the path a task really takes: `main.py`'s handlers go
+  into the `ToolBox`, the toolbox lists and describes `save_drawing`, and one call saves under that
+  sister's own name and returns both paths without reopening anything. Each sister needs a restart
+  to get the tool. Tests: `tests/test_drawing.py::test_a_task_saves_through_her_toolbox_in_her_own_name`.
+- **She draws on her own canvas, straight from her own code.** When she verified the drawing app she
+  opened a PowerShell and ran `python -c "…launch()…"` in it, so he saw a terminal every time. Her
+  new tools `open_drawing`, `draw_stroke` and `clear_drawing` (`modules/drawing.py`) open the
+  standalone `drawing-app/` window from her own process: `drawapp.launcher.launch()` runs
+  `pythonw -m drawapp` with no console. The window now shows without taking his keyboard focus (new
+  `--no-activate`, which `launch()` passes), and strokes go over its loopback socket in her own ink.
+  Nothing touches his mouse or keyboard. If he closes the window, the next stroke opens a fresh one.
+  A lost reply is never resent while the app is up. The task runner may use all three, and the tool
+  descriptions tell her never to reach for a terminal to open or test the app. A wish to draw maps to
+  the new `draw` capability (auto, not on the self-act list). Needs a restart of the sister. Until
+  then (or any time), `drawing-app/verify_drawing.pyw` opened with `open_file` runs the clean check
+  with no terminal: it leaves the window up with an Aiva and a Saga stroke and writes
+  `drawing-app/verify-report.json`.
+- **"Open your drawing app" opens her drawing app, not Aseprite.** A task asked `launch_app` for
+  "drawing-app", the generic launcher guessed, and Windows put Aseprite up with a "can't find" dialog.
+  Now `launch_app` recognises her own app's names (`drawing.is_drawing_app_request`: "drawing app",
+  "drawapp", "your canvas", …) and hands them to her board's launch-or-reuse instead. Those names
+  never reach the generic launcher, and with no board it refuses rather than guess. A program he
+  names (Aseprite, Paint) still opens as before. Code in her process has one callable for this,
+  `drawing.launch_or_reuse(author)` (blocking) or `await board.open()`, on the one board per sister
+  that `drawing.board_for` keeps. A missing or broken `drawing-app/` is a spoken failure there too,
+  not an exception. The planner and step prompts, the `launch_app`/`open_drawing`
+  descriptions and the `draw` capability's keywords all point at `open_drawing`. Needs a restart of
+  the sister.
+- **She looks after Miso on her own.** Until now the cat could only ask (a 'hungry' announce) and
+  she only fed, played with or petted it when told. A caretaker (`modules/cat_care.py`) now glances
+  at the cat every minute and decides by itself, with no LLM call: she feeds it when it gets hungry,
+  tosses the ball or pets it when it seems down, and gives it a pet just because when she's in a warm
+  mood. She leaves a busy or napping cat alone (unless it's starving), doesn't repeat what you just
+  did yourself, only feeds at night, and caps the extras per day. It's felt on her experience bus
+  (`cat_care`, a little competence), her sister hears about it once a day, and she only mentions it
+  out loud now and then (you at the PC, her awake, twice a day at most). A wish about the cat is now
+  something she can act on herself (`tend_cat` joined the safe act list). `cat_status` says what
+  she did lately. Toggle `AIVA_CAT_CARE`.
 - **Her body shows what she's doing: a book while she reads, a work panel while she works.** The
   reading book-prop never really worked: it sat at a fixed spot on the monitor, much bigger than her,
   on Aiva's side of the screen even for Saga, and in a separate window that could fall behind her.
@@ -241,6 +340,25 @@ bullets into a new dated section and bump `aiva/version.py`.
   she has no floor and her own core stays the only thing a negation can erode.
 
 ### Changed
+- **Each Claude Code job thinks as hard as its job needs** (2026-10-17). Every job used to inherit
+  your own Claude Code setting, Opus at xhigh effort, because `claude -p` was started without
+  `--effort`. A read-only README review spent 18k of its 31k output tokens thinking, about 5
+  minutes and $2. Now `tasks.job_effort` sets `--effort` per job:
+  - The planner gives each delegate step a level: low to confirm one thing, medium for a review or
+    small edit, high for a real change, xhigh to build something new.
+  - A look never goes past high, and a change never past xhigh.
+  - A job that came back partial or bad makes the next job on that project in the same task go one
+    level up.
+  - A merged job takes the level of its hardest part.
+  - `AIVA_CLAUDE_EFFORT` sets the policy: auto (default), a fixed level for every job, or inherit
+    for your own setting.
+  - The level shows in the task log.
+  - The planner is also told that a question about one or a few files is not a Claude Code job.
+    One costs a fixed ~$0.25 before it starts: a one-file check cost the same at low and xhigh,
+    5.5 s vs 9.9 s.
+  - Asked to plan five kinds of job, the real planner kept the simple check on her own tools (3/3),
+    gave the rename medium, the bug fix high and the chess module from scratch xhigh (3/3 each).
+    The README review got medium or her own tools.
 - **Tasks look, search and test without asking you** (2026-10-14). The task agent could only read a
   file, search, check git or run the tests through a PowerShell command, and every command waits on
   your yes: one verification took nine approvals, and Saga's text-file task ran out of moves asking
@@ -323,6 +441,80 @@ bullets into a new dated section and bump `aiva/version.py`.
   context already holds both notes), so she doesn't say the same news twice.
 
 ### Fixed
+- **Aiva and Saga draw on one canvas, not two windows** (2026-10-21). Asked to tag-team a drawing,
+  each sister opened her own window. Each one launched and looked for a window under her own name
+  (`board_for(ch.slug)`, `find_running(author)`), so Saga never found Aiva's. Now the window is named
+  for the canvas, not for who draws. Both boards use `drawing.SHARED_CANVAS` ("shared"): either
+  sister finds it with `find_running("shared")` or launches it with
+  `launch(canvas="shared", author="user")`. Every stroke, undo, clear, save and open still sends her
+  own author, so strokes keep her ink and tag, and her undo never takes back her sister's.
+  Strokes he draws by hand there are tagged "user", so they're his and no longer count as hers.
+  The two of them opening it at the same moment still get one window, because
+  `launcher.opening("shared")` holds an OS lock across find-then-launch. Without that lock the same
+  race opened two. Their old canvases aren't lost: the first shared window takes in
+  `aiva-autosave` and `saga-autosave` (`--absorb`), strokes keeping their authors, as long as their
+  own windows are closed. It autosaves the merge first and only then renames each old copy
+  `*.merged-<time>.aivadraw`. The drawing app is now 0.5.0 (`--canvas`, `--absorb`,
+  `launcher.opening`). `clear_drawing` now wipes her sister's strokes too. It was already ask-first,
+  and it keeps a before-clear copy. Tests: `drawing-app/tests/test_storage.py`,
+  `drawing-app/tests/test_launcher.py`, and `tests/test_drawing.py`, which runs real offscreen windows
+  for two sisters on one window, for both opening at once, and for the old canvases being absorbed.
+  Needs both sisters restarted. Close the two old per-sister canvas windows first, so their
+  drawings join the shared one when it opens.
+- **The dashboard showed the sisters talking to him while they talked to each other** (2026-10-21).
+  On "Hey Saga check out Aiva's latest app! Tell her Aiva", both replies went down as "→ you":
+  - Aiva's "Yep, Saga, you're looking at it…" was to Saga, but "yep" was not one of the small
+    opening words the name check skips, so it saw no name. `sisters._OPENERS` now has yep, yup,
+    nope, sure, wow, cool and similar fillers, and an em/en dash splits words ("hey—Saga").
+  - Saga's "Oh, hey—you're back. Aiva, Frank wants you to…" answered him and then turned to Aiva.
+    Only the first sentence counted, so it was "to him". The new `sisters.spoken_to` labels such a
+    line `both`: the dashboard shows "→ both" and her sister overhears "said to you and him". A
+    `report` stays his, whatever it says.
+  The same label decides the overheard line, and a line that calls her sister by name gives that
+  sister a turn, so Saga now gets to answer "Yep, Saga, …". Takes effect when the house restarts.
+- **A finished report was graded "truncated", and she redid the job four times** (2026-10-17). "Take
+  a look at the README and tell me what you'd change" ran four Claude Code jobs (~$8.60 list price)
+  and still ended "failed". Each report was complete; the cut was on our side:
+  - the runner cut a report to 4,000 characters with a bare "[…]" in the middle;
+  - the grader then kept only the first 4,000 characters of that, so it ended mid-word ("…packaging
+    fi"). Graded "visibly truncated", it was rerun, and each rerun wrote a longer report.
+
+  Now:
+  - The grader and second thoughts see up to 20,000 characters (`JUDGE_REPORT_CHARS`), cut only
+    in the middle.
+  - A cut says what it is ("[… N characters left out here …]"), and the grading rules say it's
+    never the agent's doing.
+  - The rules also say plan mode's own plan file under `~/.claude/plans` isn't an edit, and its
+    "I'll wait for your go-ahead" isn't a question. The first run had been marked down for both.
+
+  Replayed with the real grader, both reports that had been graded partial now came back good,
+  3 runs out of 3. Two more problems are fixed:
+  - **A plan-mode job is never blamed for changes it couldn't make.** The last run failed "for
+    modifying tasks.py": those were edits to the runner made in Frank's own Claude Code session
+    while the job ran. They now go to the grader as `changed_by_others_meanwhile`.
+  - **She can tell you what the job found.** The done note carries the agent's report (up to
+    3,000 characters). Before, all she had was a two-sentence summary made from 300 characters
+    of it.
+- **Aiva kept asking to run a check she'd already run twice** (2026-10-17). She had eight open
+  wishes that were all "run one focused check on Saga's constellation and save the result somewhere
+  definite", in different words. The check ran and passed on Oct 15 and again on Oct 16, and she
+  agreed when you told her she'd done it. She still raised it at 11:49, 12:46, 13:01 and 13:17.
+  Nothing ever closed a wish except her acting on it alone, and every time she brought it up, her
+  diary wrote it down again. Now a wish ends when it's done (`SelfEngine.settle_wishes`):
+  - **A finished task closes the wishes it did.** `TaskRunner(on_result=)` hands the whole goal
+    and result to one side-model call, which picks which open wishes it settles: all wordings of
+    the same wish, never ones that are only on the same topic. Replayed on her real wishes it
+    closed the 3 "run the check" ones, the same all three times. An unrelated task closed nothing.
+    Without the model, only a near-restatement counts (cosine 0.72).
+  - **"You already did that" closes it.** `drop_desire` has `done=true` (status `fulfilled`), and
+    every wording goes, not just the nearest. The side model decides when his words don't match a
+    wish exactly. The old similarity guess had taken "the focused Saga constellation check" for
+    "whether the constellation feels emotionally right to Saga".
+  - **A wish she has raised gets a rest**: a day, then three days, then a week (`ASK_REST_H`). A
+    weaker wish that isn't resting gets its turn in the meantime.
+  - **Her diary sees what's done**: an "ALREADY DONE" line lists what she settled in the last
+    three days.
+  - Her 9 stale Saga-check wishes were closed in her memory by hand.
 - **You had to play middle man between the sisters** (2026-10-14). "Bring Saga in and ask her if she
   wants to change anything about the look, then let me know" took four more nudges from you. Saga
   booted and nothing happened ("ok she's up, ask her what I told you"). Aiva said "I'll ask her…"

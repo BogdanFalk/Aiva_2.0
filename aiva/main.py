@@ -74,6 +74,8 @@ from modules.avatar import AvatarClient
 from modules.avatar_ipc import read_state as _read_avatar_state
 from modules.becoming import Becoming, SELF_FORMING_BASELINE_DESC
 from modules.cat import CAT_NAME_RECOVERY_NOTE, CAT_NAMING_NOTE, DesktopCat
+from modules.cat_care import CatCaretaker
+from modules.drawing import board_for
 from modules.ear import MicController, device_index, list_audio_devices  # noqa: F401 (tests import MicController)
 from modules.eventlog import EventLog
 from modules.house_client import HouseClient
@@ -436,8 +438,12 @@ async def main():
         restart_state["requested"] = True
         stop_event.set()
 
+    # her drawing canvas: opened from her own process, never a terminal; strokes in her own ink.
+    # board_for is this process's one board, so anything else of hers reuses the same window
+    drawing = board_for(ch.slug)
     handlers = register_tools(llm, avatar, mic, terminals, memory, cat, restart=trigger_restart,
-                              name=ch.name, capability_exclude=ch.capability_exclude)
+                              name=ch.name, capability_exclude=ch.capability_exclude,
+                              drawing=drawing)
 
     # --- task runner --------------------------------------------------------------------------------
     task_model = os.getenv("AIVA_TASK_MODEL", llm_model)
@@ -451,6 +457,7 @@ async def main():
         resolve_path=file_operations.resolve_path, facts=memory.load_facts,
         model_name=task_model, name=ch.name,
         on_outcome=lambda outcome, goal: _feel_task(outcome, goal),
+        on_result=lambda goal, summary: _settle_wishes(goal, summary),
         on_done=lambda summary, family: _send(proto.Event(kind="task_done", summary=summary,
                                                           payload={"family": family})),
     )
@@ -702,6 +709,16 @@ async def main():
                                 arousal=0.1, salience=0.5)
         except Exception as e:
             log_event(f"self emit(task): {e!r}")
+
+    async def _settle_wishes(goal, summary):
+        # what she wanted got done, so the wishes it settles close — 2026-10-17 she kept asking to
+        # run a check she'd already run twice, from eight open wordings of the same wish
+        try:
+            await self_engine.settle_wishes(f"{ch.name} finished a task. The goal: {goal}\n"
+                                            f"What came of it: {summary}",
+                                            status="fulfilled", reason="done by a task", match=goal)
+        except Exception as e:
+            log_event(f"self: settling wishes failed ({e!r})")
 
     _orig_save_find = space_mem.save_find
 
@@ -968,8 +985,20 @@ async def main():
                           wants_novelty=lambda: (not self_engine.drives_on) or
                           self_engine.state.needs.get("novelty", 0.0) < _read_novelty_below)
 
+    # --- looking after the cat on her own ----------------------------------------------------------
+    # A loop-thread caretaker reads the cat's snapshot every minute and feeds / plays / pets it when it
+    # needs it (pure thresholds, no LLM call); the act is felt on her experience bus and only rarely
+    # spoken. Only the sister who owns the cat has one that does anything (_NoCat is never available).
+    cat_care = CatCaretaker(
+        cat, bus=experience, announce=announce, log=log_event,
+        enabled=bool(ch.cat_state_path) and os.getenv("AIVA_CAT_CARE", "1") == "1",
+        house_emit=lambda summary: _send(proto.Event(kind="self_act", summary=summary, capability="tend_cat")),
+        mood=lambda: {"valence": self_engine.state.valence, "social": self_engine.state.social},
+        tell_ctx=lambda: {"permission": self_engine.initiative_mode(), "awake": speaking_state["awake"],
+                          "busy": _busy(), "present": _user_present()})
+
     # --- safe autonomous action ---------------------------------------------------------------------
-    _ACT_CAPS = {"find_and_keep"}
+    _ACT_CAPS = {"find_and_keep", "tend_cat"}
     _self_act_on = os.getenv("AIVA_SELF_ACT", "1") == "1"
 
     def _self_actionable(desire):
@@ -980,11 +1009,19 @@ async def main():
             return False
         if cap.name == "find_and_keep" and not service_limits.allow("tavily"):
             return False
+        if cap.name == "tend_cat" and not cat_care.can_act_on_wish(desire.get("text", "")):
+            return False
         return True
 
     async def _act_on_wish(desire):
         text = (desire.get("text") or "").strip()
-        if not text or not service_limits.allow("tavily"):
+        if not text:
+            return
+        cap = capabilities.match(text, exclude=ch.capability_exclude)
+        if cap and cap.name == "tend_cat":
+            await cat_care.act_on_wish(text)
+            return
+        if not service_limits.allow("tavily"):
             return
         out = await asyncio.to_thread(web_client.search, text, "images")
         await service_limits.record("tavily")
@@ -1232,6 +1269,16 @@ async def main():
 
     curiosity_task = asyncio.create_task(curiosity_watch())
 
+    async def cat_care_watch():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await cat_care.tick()
+            except Exception as e:
+                log_event(f"cat care error: {e!r}")
+
+    cat_care_task = asyncio.create_task(cat_care_watch())
+
     def _recent_conversation(n=12):
         return "\n".join(
             f"{m.get('role')}: {str(m.get('content'))[:200]}"
@@ -1385,7 +1432,7 @@ async def main():
         await runner.run()
     finally:
         for t in (watcher_task, flush_task, sleep_face_task, body_task, avatar_watchdog_task,
-                  library_task, curiosity_task, self_task, finalize_task):
+                  library_task, curiosity_task, self_task, finalize_task, cat_care_task):
             if t:
                 t.cancel()
         await task_runner.shutdown()

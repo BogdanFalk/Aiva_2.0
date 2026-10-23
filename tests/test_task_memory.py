@@ -310,6 +310,38 @@ def test_clip_middle_keeps_the_finding_and_the_question():
     out = tm.clip_middle(text, 600)
     assert out.startswith("There is no Miso renderer.") and out.endswith("Which one did you mean?")
     assert len(out) < 700 and tm.clip_middle("short", 600) == "short"
+    assert "characters left out here" in out          # a cut says it's a cut, not the agent stopping
+
+
+class _CapturingClient:
+    """An OpenAI client stand-in: records the grader's messages, answers 'good'."""
+    def __init__(self):
+        self.messages = None
+        outer = self
+
+        class _Completions:
+            async def create(self, *, messages, **_kw):
+                outer.messages = messages
+
+                class _R:
+                    choices = [type("C", (), {"message": type("M", (), {
+                        "content": '{"grade": "good", "reason": "it answers", "blocked": null}'})()})()]
+                return _R()
+        self.chat = type("Chat", (), {"completions": _Completions()})()
+
+
+async def test_the_grader_reads_a_long_report_whole(mem):
+    # 2026-10-17: an 11,267-character README review was cut to 4,000 with a bare "[…]" in it, graded
+    # "visibly truncated" and rerun three times
+    report = "Inventory first. " + "Finding. " * 1200 + "Recommendation: add a Saga section."
+    assert 9000 < len(report) < tm.JUDGE_REPORT_CHARS
+    client = _CapturingClient()
+    g = await mem.grade_agent_work(client, "m", "g", {"job_status": "done", "mode": "inspect",
+                                                      "result_text": report})
+    sent = client.messages[1]["content"]
+    assert g["grade"] == "good" and "Recommendation: add a Saga section." in sent and "left out" not in sent
+    rules = client.messages[0]["content"]
+    assert "never call a report truncated" in rules and ".claude/plans" in rules
 
 
 def test_found_in_is_verbatim_but_forgiving_about_markup():

@@ -209,3 +209,10 @@ aiva/models/campplus*.onnx
 
 # her coding-job records (Claude Code results + raw JSON)
 aiva/logs/coding/
+
+# runtime event logs (aiva/logs/<stem>-YYYYMMDD.log) hold conversation text: never committed
+aiva/logs/
+
+# Claude Code local-only files (the shared rules in .claude/rules/ are committed)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

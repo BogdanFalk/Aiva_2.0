@@ -245,6 +245,109 @@ async def test_drop_desire_by_id():
     assert eng.list_desires(status="dropped")[0]["id"] == did
 
 
+# -- settling: a wish ends when it's done (2026-10-17) ------------------------------
+
+# her real ones that night: eight open wordings of one wish, plus some that weren't it
+SAGA_CHECK_WISHES = [
+    ("Ask him what the latest test or working-tree check shows for Saga's implementation.", "ask"),
+    ("Run one focused check on Saga's implementation and record whether it passes.", "do"),
+    ("Run one focused Saga check and save the result somewhere definite.", "do"),
+    ("Ask him whether he wants to add a README to the project folder.", "ask"),
+    ("Find one unfamiliar part of the project and learn what it does", "learn"),
+]
+
+
+class FakeSettleLLM:
+    """Answers the settle prompt with the wish numbers it was told to; records what it saw."""
+    def __init__(self, numbers, reply=None):
+        self.numbers, self.reply, self.seen = numbers, reply, []
+
+    async def __call__(self, messages, *, tools=None, json_mode=False, max_tokens=900, temperature=0.2):
+        assert messages[0]["content"].startswith("You keep Aiva's list of open wishes")
+        self.seen.append(messages[1]["content"])
+        return FakeReply(self.reply if self.reply is not None else json.dumps({"settled": self.numbers}))
+
+
+async def _with_wishes(llm=None):
+    con, bus, eng = make_engine(llm=llm, embed=fake_embed_factory())
+    for i, (text, kind) in enumerate(SAGA_CHECK_WISHES):
+        await eng.add_desire(text, kind, strength=0.9 - i * 0.1)   # listed in this order
+    assert len(eng.list_desires()) == len(SAGA_CHECK_WISHES)
+    return eng
+
+
+async def test_a_finished_task_settles_every_wording_of_the_wish_it_did():
+    llm = FakeSettleLLM([1, 2, 3])
+    eng = await _with_wishes(llm)
+    done = await eng.settle_wishes("Aiva finished a task. The goal: run one focused verification check "
+                                   "on Saga's constellation\nWhat came of it: 56 passed", reason="done by a task")
+    assert len(done) == 3
+    left = [d["text"] for d in eng.list_desires()]
+    assert left == [SAGA_CHECK_WISHES[3][0], SAGA_CHECK_WISHES[4][0]]
+    assert all(d["veto_reason"] == "done by a task" for d in eng.list_desires(status="fulfilled"))
+    assert "56 passed" in llm.seen[0] and "1. Ask him what the latest test" in llm.seen[0]
+
+
+async def test_a_settled_wish_stays_settled_when_the_diary_wants_it_again():
+    eng = await _with_wishes(FakeSettleLLM([2]))
+    await eng.settle_wishes("she ran the check")
+    assert await eng.add_desire(SAGA_CHECK_WISHES[1][0], "do") == "reinforced"
+    assert SAGA_CHECK_WISHES[1][0] not in [d["text"] for d in eng.list_desires()]
+    # and the next diary entry is told it's done
+    assert SAGA_CHECK_WISHES[1][0] in eng._digest_input([], None).split("ALREADY DONE")[1]
+
+
+async def test_without_the_side_model_only_a_near_restatement_settles():
+    eng = await _with_wishes(None)
+    done = await eng.settle_wishes("Run one focused check on Saga's implementation and record whether it passes")
+    assert done == [SAGA_CHECK_WISHES[1][0]]
+    # an answer it can't read falls back the same way
+    eng2 = await _with_wishes(FakeSettleLLM([], reply="no idea"))
+    assert await eng2.settle_wishes("Ask him whether he wants to add a README to the project folder") == \
+        [SAGA_CHECK_WISHES[3][0]]
+
+
+async def test_numbers_outside_the_list_settle_nothing():
+    eng = await _with_wishes(FakeSettleLLM([0, 9, "two", None]))
+    assert await eng.settle_wishes("something happened") == []
+    assert len(eng.list_desires()) == len(SAGA_CHECK_WISHES)
+
+
+async def test_he_says_its_done_and_every_wording_goes_as_fulfilled():
+    llm = FakeSettleLLM([1, 2])         # of what's still open after the nearest one went
+    eng = await _with_wishes(llm)
+    dropped = await eng.drop_desire("focused Saga check", done=True)
+    assert dropped == SAGA_CHECK_WISHES[2][0]           # the substring match
+    assert {d["text"] for d in eng.list_desires(status="fulfilled")} == {
+        SAGA_CHECK_WISHES[0][0], SAGA_CHECK_WISHES[1][0], SAGA_CHECK_WISHES[2][0]}
+    assert "already done" in llm.seen[0]
+    assert eng.list_desires(status="dropped") == []
+
+
+async def test_his_words_with_no_exact_match_go_to_the_side_model_not_a_loose_guess():
+    # 2026-10-17 replay: the similarity guess took "the focused Saga constellation check" for
+    # "whether the constellation feels emotionally right to Saga"
+    eng = await _with_wishes(FakeSettleLLM([2, 3]))
+    assert await eng.drop_desire("that Saga constellation check thing", done=True) == SAGA_CHECK_WISHES[1][0]
+    assert len(eng.list_desires(status="fulfilled")) == 2
+    # the model saying "none of them" is an answer: nothing goes, however close the words look
+    eng2 = await _with_wishes(FakeSettleLLM([]))
+    assert await eng2.drop_desire("Ask him whether he wants a README in the project folder") is None
+    assert len(eng2.list_desires()) == len(SAGA_CHECK_WISHES)
+    # a model that can't answer falls back to the old guess
+    eng3 = await _with_wishes(FakeSettleLLM([], reply="??"))
+    assert await eng3.drop_desire("Ask him if he wants a README for the project folder") == \
+        SAGA_CHECK_WISHES[3][0]
+
+
+async def test_drop_by_id_touches_only_that_wish():
+    llm = FakeSettleLLM([1, 2, 3, 4])
+    eng = await _with_wishes(llm)
+    did = eng.list_desires()[0]["id"]
+    assert await eng.drop_desire(did) is not None
+    assert llm.seen == [] and len(eng.list_desires()) == len(SAGA_CHECK_WISHES) - 1
+
+
 async def test_desire_cap_fades_weakest():
     con, bus, eng = make_engine(embed=fake_embed_factory(), desire_cap=2)
     await eng.add_desire("first wish entirely unique alpha", "do", strength=0.9)

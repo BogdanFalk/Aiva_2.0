@@ -268,6 +268,26 @@ async def test_seen_task_just_does_it(tmp_path):
     assert t["status"] == "done" and len(calls) == 2
 
 
+async def test_a_task_that_got_done_hands_its_whole_goal_and_result_to_on_result(tmp_path):
+    # what she wanted is now done: main.py closes the wishes it settles (SelfEngine.settle_wishes)
+    got = []
+    llm = FakeLLM(plans=[plan([step(1, "Open Notepad")]), plan([step(1, "Open Notepad")])])
+    runner, tmem, calls = make_runner(tmp_path, llm, [],
+                                      on_result=lambda goal, summary: got.append((goal, summary)))
+    goal = "open notepad and keep it open for the whole afternoon so I can jot things down"
+    first = await runner.start(goal)
+    await runner.answer("yes")
+    t = await wait_status(runner, first["task_id"], *TERMINAL)
+    assert t["status"] == "done" and len(got) == 1
+    assert got[0][0] == goal and got[0][1] == t["result_summary"]
+    # a cancelled one settles nothing
+    second = await runner.start("rename every photo in the pictures folder by the date it was taken")
+    await wait_status(runner, second["task_id"], "awaiting_user")
+    await runner.answer("no, don't")
+    assert (await wait_status(runner, second["task_id"], *TERMINAL))["status"] == "cancelled"
+    assert len(got) == 1
+
+
 async def test_no_cancels_the_plan(tmp_path):
     announces = []
     runner, tmem, calls = make_runner(tmp_path, FakeLLM(), announces)
@@ -719,6 +739,21 @@ async def test_delegate_logs_claude_link_for_the_dashboard(tmp_path):
     assert d["job"].endswith("-s1") and d["status"] == "done" and d["log"]
 
 
+async def test_the_done_note_carries_what_the_agent_reported(tmp_path):
+    # 2026-10-17: "take a look and tell me what you'd change" — she only had a two-sentence summary
+    announces = []
+    terms = FakeTerminals()
+    terms.job_result = {"status": "done", "cost": 0.2,
+                        "result": "README gaps: no Saga section. Add the house and both launchers."}
+    runner, tmem, calls = make_runner(tmp_path, FakeLLM(plans=[plan([step(1, "Review it", kind="delegate",
+                                                                          args=str(tmp_path))])]),
+                                      announces, terminals=terms, free_range=True)
+    first = await runner.start("look at the readme and tell me what you'd change")
+    t = await wait_status(runner, first["task_id"], *TERMINAL)
+    assert t["status"] == "done"
+    assert "What Claude Code reported, in its own words: README gaps: no Saga section." in announces[-1]
+
+
 async def test_delegate_creates_a_new_project_folder_inside_home_only(tmp_path):
     new_dir = tmp_path / "prime_project"                      # tmp_path lives under the profile
     terms = FakeTerminals()
@@ -981,6 +1016,21 @@ async def test_snapshot_sees_an_edit_listed_before_the_last_1000_characters(tmp_
     assert t["tool_calls"] == 0 and not any(e["event"] == "shell" for e in t["log"])
 
 
+async def test_what_changes_while_a_plan_mode_job_runs_is_not_the_agents(tmp_path):
+    # 2026-10-17: a README review failed "for modifying tasks.py": runner fixes being made in his own
+    # Claude Code session while it ran. Plan mode can't edit, so nothing that changed is the agent's.
+    git, edited = git_repo_with_his_work(tmp_path)
+    terms = EditingTerminals([edited])                  # someone edits the renderer mid-job
+    look = step(1, "Review the readme", kind="delegate", args=str(tmp_path))
+    look["action"].update(read_only=True, prompt="Review the README and say what to change.")
+    runner, tmem, calls = make_runner(tmp_path, FakeLLM(plans=[plan([look])]), [], terminals=terms,
+                                      free_range=True, git=git)
+    t = await wait_status(runner, (await runner.start("review the readme"))["task_id"], *TERMINAL)
+    assert terms.started[0]["mode"] == "plan"
+    assert t["status"] == "done" and t["_step_reports"][1]["agent_changed"] == []
+    assert t["grade"]["grade"] == "good"
+
+
 async def test_a_repair_rerun_is_judged_on_everything_its_step_changed(tmp_path):
     # the 18:45 run: the first job did the work, the re-run found it done and changed nothing
     git, edited = git_repo_with_his_work(tmp_path)
@@ -1013,6 +1063,62 @@ def scripted_tests(*results):
 GREEN = {"ran": True, "returncode": 0, "passed": True, "summary": "837 passed, 1 skipped", "failing": []}
 RED = {"ran": True, "returncode": 1, "passed": False, "summary": "1 failed, 836 passed",
        "failing": ["FAILED tests/test_constellation.py::test_sky - assert 0 == 5"]}
+
+
+# --- how hard a job thinks (2026-10-17: every job inherited his xhigh) -----------------------------
+
+def test_job_effort_sizes_the_job_and_climbs_after_a_short_try():
+    from modules.tasks import job_effort
+    assert job_effort("low", read_only=True) == "low"
+    assert job_effort(None, read_only=True) == "medium" and job_effort("bogus", read_only=False) == "high"
+    assert job_effort("xhigh", read_only=True) == "high"            # a look never needs xhigh
+    assert job_effort("max", read_only=False) == "high"             # max only when he forces it
+    assert job_effort("medium", read_only=False, misses=1) == "high"
+    assert job_effort("medium", read_only=False, misses=5) == "xhigh"
+    assert job_effort("low", read_only=True, misses=5) == "high"
+    assert job_effort("low", read_only=True, forced="xhigh") == "xhigh"   # AIVA_CLAUDE_EFFORT=<level>
+    assert job_effort("low", read_only=True, forced="inherit") is None   # his own Claude Code setting
+    assert job_effort("low", read_only=True, forced="auto") == "low"
+
+
+def test_merged_job_thinks_as_hard_as_its_hardest_part(tmp_path):
+    from modules.tasks import one_job_per_project
+    a = step(1, "Look", kind="delegate", args=str(tmp_path))
+    a["action"].update(effort="low", read_only=True)
+    b = step(2, "Build it", kind="delegate", args=str(tmp_path))
+    b["action"].update(effort="xhigh")
+    assert one_job_per_project([a, b])[0]["action"]["effort"] == "xhigh"
+
+
+async def test_the_planners_effort_reaches_claude_code_and_climbs_after_a_partial(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIVA_CLAUDE_EFFORT", raising=False)
+    git, edited = git_repo_with_his_work(tmp_path)
+    first = step(1, "Fix the renderer", kind="delegate", args=str(tmp_path))
+    first["action"]["effort"] = "medium"
+    between = step(2, "Open Notepad")
+    again = step(3, "Finish the renderer", kind="delegate", args=str(tmp_path))
+    again["action"]["effort"] = "medium"
+    terms = EditingTerminals([edited, edited])
+    runner, tmem, calls = make_runner(tmp_path, FakeLLM(plans=[plan([first, between, again])]), [],
+                                      terminals=terms, free_range=True, git=git,
+                                      test_command=lambda d: ["pytest"],
+                                      test_runner=scripted_tests(GREEN, RED, GREEN))
+    t = await wait_status(runner, (await runner.start("fix the renderer"))["task_id"], *TERMINAL)
+    assert [s["effort"] for s in terms.started] == ["medium", "high"]   # partial → one level up
+    assert any("effort high (up 1 after a short try)" in e["detail"] for e in t["log"] if e["event"] == "delegate")
+    claude = [json.loads(e["detail"]) for e in t["log"] if e["event"] == "claude"]
+    assert [c["effort"] for c in claude] == ["medium", "high"]
+
+
+async def test_inherit_leaves_his_own_claude_code_setting(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIVA_CLAUDE_EFFORT", "inherit")
+    look = step(1, "Review the readme", kind="delegate", args=str(tmp_path))
+    look["action"].update(read_only=True, effort="low")
+    terms = FakeTerminals()
+    runner, tmem, calls = make_runner(tmp_path, FakeLLM(plans=[plan([look])]), [], terminals=terms,
+                                      free_range=True)
+    await wait_status(runner, (await runner.start("review the readme"))["task_id"], *TERMINAL)
+    assert terms.started[0]["effort"] is None
 
 
 async def test_failing_tests_she_runs_cap_the_grade(tmp_path):

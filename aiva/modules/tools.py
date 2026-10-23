@@ -23,6 +23,7 @@ from pipecat.services.llm_service import FunctionCallParams
 
 from modules import computer, file_operations, utilities
 from modules.app_launcher import launch_app as _launch_app_impl
+from modules.drawing import is_drawing_app_request
 
 # --- avatar (rendered by our own modules/avatar_renderer.py process) --------
 
@@ -54,13 +55,32 @@ _pending_command: str | None = None
 
 # --- tool handlers ---------------------------------------------------------
 
-async def launch_app(params: FunctionCallParams):
-    app_name = params.arguments.get("app_name", "")
-    result = _launch_app_impl(app_name)
-    if result:  # non-empty means "Error: ..."
-        await params.result_callback({"success": False, "detail": result})
-    else:
-        await params.result_callback({"success": True, "launched": app_name})
+def make_launch_app_handler(drawing=None):
+    """launch_app, except for her own drawing app: that name goes to her DrawingBoard (launch or
+    reuse, modules/drawing.py), never to the generic launcher — 2026-10-20 "drawing-app" there put
+    Aseprite up instead. Without a board it refuses rather than guess a program."""
+
+    async def launch_app(params: FunctionCallParams):
+        app_name = params.arguments.get("app_name", "")
+        if is_drawing_app_request(app_name):
+            if drawing is None:
+                await params.result_callback({
+                    "success": False,
+                    "detail": "that's your own drawing canvas, not an app on his PC: open it with "
+                              "open_drawing, never another drawing program"})
+                return
+            await params.result_callback({**await drawing.open(), "via": "open_drawing"})
+            return
+        result = _launch_app_impl(app_name)
+        if result:  # non-empty means "Error: ..."
+            await params.result_callback({"success": False, "detail": result})
+        else:
+            await params.result_callback({"success": True, "launched": app_name})
+
+    return launch_app
+
+
+launch_app = make_launch_app_handler()
 
 
 async def create_file(params: FunctionCallParams):
@@ -551,12 +571,44 @@ def make_cat_handlers(cat):
     return name_cat, feed_cat, play_with_cat, pet_cat, cat_status, dismiss_cat, summon_cat
 
 
+def make_drawing_handlers(board):
+    """Her drawing canvas (modules/drawing.py): the drawing app opened and drawn on from her own
+    process — no terminal, no console, no focus taken from him. The board runs the blocking parts in
+    a worker thread and returns speakable dicts, failures included."""
+
+    async def open_drawing(params: FunctionCallParams):
+        await params.result_callback(await board.open())
+
+    async def draw_stroke(params: FunctionCallParams):
+        args = params.arguments
+        await params.result_callback(await board.stroke(
+            args.get("points"), color=args.get("color") or None, width=args.get("width")))
+
+    async def clear_drawing(params: FunctionCallParams):
+        await params.result_callback(await board.clear())
+
+    async def undo_stroke(params: FunctionCallParams):
+        await params.result_callback(await board.undo())
+
+    async def save_drawing(params: FunctionCallParams):
+        await params.result_callback(await board.save(params.arguments.get("name") or None))
+
+    async def open_saved_drawing(params: FunctionCallParams):
+        await params.result_callback(await board.open_saved(params.arguments.get("name") or None))
+
+    return {"open_drawing": open_drawing, "draw_stroke": draw_stroke, "clear_drawing": clear_drawing,
+            "undo_stroke": undo_stroke, "save_drawing": save_drawing,
+            "open_saved_drawing": open_saved_drawing}
+
+
 # --- schemas ---------------------------------------------------------------
 
 TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     FunctionSchema(
         name="launch_app",
-        description="Launch an application on the user's Windows PC by name, e.g. 'steam', 'notepad', 'chrome'.",
+        description="Launch an application on the user's Windows PC by name, e.g. 'steam', 'notepad', 'chrome'. "
+                    "Not for your own drawing app or canvas: that's open_drawing, and no other "
+                    "drawing program (Aseprite, Paint) stands in for it.",
         properties={"app_name": {"type": "string", "description": "Name of the application"}},
         required=["app_name"],
     ),
@@ -951,9 +1003,12 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     FunctionSchema(
         name="drop_desire",
         description="The user told you to let go of something you'd been wanting or kept bringing up "
-                    "('drop it', 'stop bringing that up'). Call it, then let it go in one short sentence.",
+                    "('drop it', 'stop bringing that up'), or that it's already done ('you already did "
+                    "that') — then done=true. Every wording of that wish goes. Call it, then let it go "
+                    "in one short sentence.",
         properties={"what": {"type": "string", "description": "His words, or the wish as you know it"},
-                    "reason": {"type": "string"}},
+                    "reason": {"type": "string"},
+                    "done": {"type": "boolean", "description": "true when it's already done"}},
         required=["what"],
     ),
     FunctionSchema(
@@ -1274,14 +1329,87 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
         properties={},
         required=[],
     ),
+    FunctionSchema(
+        name="open_drawing",
+        description="Open your drawing canvas: a window on his screen that you draw on with "
+                    "draw_stroke (the first stroke opens it by itself too). It opens straight from "
+                    "your own code, with no terminal and without taking his keyboard focus. Never "
+                    "use a terminal, run_in_terminal or a python command to open, test or draw on "
+                    "the drawing app; these drawing tools are the way. You and your sister share "
+                    "this one canvas: if either of you has it open, this just reuses it, and you "
+                    "draw together on it in your own inks. This is your own drawing app (drawapp, the drawing-app "
+                    "folder), not a program on his PC: never launch_app for it, and never Aseprite, "
+                    "Paint or any other drawing program in its place.",
+        properties={},
+        required=[],
+    ),
+    FunctionSchema(
+        name="draw_stroke",
+        description="Draw one stroke on your drawing canvas, opening it first if needed: a line "
+                    "through the points, in canvas pixels. The canvas is 1024 wide and 768 tall, "
+                    "x to the right and y DOWN from the top-left corner, and every point must be "
+                    "on it. A shape is its outline as many points (a circle is about 40 points "
+                    "around it); a dot is a single point. It's in your own ink unless you pass a "
+                    "color. Nothing touches his mouse or keyboard. Returns the stroke id.",
+        properties={
+            "points": {"type": "array", "minItems": 1, "maxItems": 2000,
+                       "items": {"type": "array", "items": {"type": "number"},
+                                 "minItems": 2, "maxItems": 2},
+                       "description": "[x, y] pairs in canvas pixels, in drawing order"},
+            "color": {"type": "string", "description": "optional ink as #rrggbb, e.g. #2a7de1"},
+            "width": {"type": "number", "description": "optional line width in pixels, 1 to 200 "
+                                                       "(default 4)"},
+        },
+        required=["points"],
+    ),
+    FunctionSchema(
+        name="clear_drawing",
+        description="Wipe your drawing canvas blank, every stroke on it, his and your sister's "
+                    "too; a clear can't be "
+                    "undone. Only when he asks for it or you're starting a drawing over; to take "
+                    "back one stroke, use undo_stroke instead.",
+        properties={},
+        required=[],
+    ),
+    FunctionSchema(
+        name="undo_stroke",
+        description="Take back your own last stroke on your drawing canvas, for a stroke that "
+                    "came out wrong or when he says undo that. Only your strokes, never your "
+                    "sister's or the ones he drew by hand. Call it again to take back the one "
+                    "before. It never opens the canvas.",
+        properties={},
+        required=[],
+    ),
+    FunctionSchema(
+        name="save_drawing",
+        description="Save what's on your drawing canvas into your drawings folder (Pictures, "
+                    "'Aiva and Saga Drawings'), as a drawing plus a picture of it. Without a name "
+                    "it updates the drawing's own file; a name makes a new one and never replaces "
+                    "another drawing. Your canvas also keeps itself between openings on its own. "
+                    "This is the only way to save it: never press_keys Ctrl+S, the window's own "
+                    "buttons or look_at_screen for it. It never opens a canvas just to save.",
+        properties={"name": {"type": "string",
+                             "description": "optional short title, e.g. 'sleepy cat'"}},
+        required=[],
+    ),
+    FunctionSchema(
+        name="open_saved_drawing",
+        description="Put a saved drawing back on your canvas, opening it if needed: by its name, or "
+                    "the newest one if you give none. Anything unsaved on the canvas is saved "
+                    "first, so nothing is lost. If the name isn't found, the result lists the "
+                    "saved ones.",
+        properties={"name": {"type": "string", "description": "optional drawing name"}},
+        required=[],
+    ),
 ])
 
 
 def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, restart=None,
-                   name="Aiva", capability_exclude=()):
+                   name="Aiva", capability_exclude=(), drawing=None):
     """Every tool handler by name. The voice LLM gets them via register_tools;
     the task runner (modules/tasks.py) reuses the same dict out-of-band. `name` is the
-    character these hands belong to; `capability_exclude` the powers she doesn't have."""
+    character these hands belong to; `capability_exclude` the powers she doesn't have;
+    `drawing` her DrawingBoard (modules/drawing.py)."""
     handlers = {}
     (avatar_expression, avatar_move, avatar_position,
      move_avatar_to_monitor, set_avatar_layer) = make_avatar_handlers(avatar)
@@ -1308,6 +1436,9 @@ def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, rest
                          "list_terminals": list_terminals, "close_terminal": close_terminal,
                          "show_terminal": show_terminal, "claude_code": claude_code})
 
+    if drawing is not None:
+        handlers.update(make_drawing_handlers(drawing))
+
     async def what_can_i_do(params: FunctionCallParams):
         from modules import capabilities
         await params.result_callback(
@@ -1315,7 +1446,7 @@ def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, rest
                                                       exclude=capability_exclude)})
 
     handlers.update({
-        "launch_app": launch_app, "create_file": create_file, "open_file": open_file,
+        "launch_app": make_launch_app_handler(drawing), "create_file": create_file, "open_file": open_file,
         "list_directory": list_directory, "run_command": run_command,
         "confirm_pending_command": confirm_pending_command, "get_weather": get_weather,
         "get_datetime": get_datetime, "move_avatar_to_monitor": move_avatar_to_monitor,
@@ -1390,10 +1521,10 @@ def _timed(name, handler):
 
 
 def register_tools(llm, avatar, mic=None, terminals=None, memory=None, cat=None, restart=None,
-                   name="Aiva", capability_exclude=()):
+                   name="Aiva", capability_exclude=(), drawing=None):
     """Register every tool handler on the LLM service; returns the handler dict."""
     handlers = build_handlers(avatar, mic, terminals, memory, cat, restart,
-                              name=name, capability_exclude=capability_exclude)
+                              name=name, capability_exclude=capability_exclude, drawing=drawing)
     for name, handler in handlers.items():
         llm.register_function(name, _timed(name, handler))
     return handlers
@@ -1613,7 +1744,8 @@ def make_self_handlers(self_engine):
         if not what:
             await params.result_callback({"success": False, "error": "drop what?"})
             return
-        dropped = await self_engine.drop_desire(what, params.arguments.get("reason"))
+        dropped = await self_engine.drop_desire(what, params.arguments.get("reason"),
+                                                done=params.arguments.get("done") is True)
         await params.result_callback({"success": bool(dropped), "dropped": dropped} if dropped
                                      else {"success": False, "hint": "no wish like that to drop"})
 
