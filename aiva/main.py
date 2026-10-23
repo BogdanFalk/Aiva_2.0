@@ -1135,6 +1135,10 @@ async def main():
     appraisal_cfg = AppraisalConfig.from_env()
     appraise_call = openai_llm_call(oai, task_model, label="appraisal") if appraisal_cfg.enabled else None
     late_appraisal = {"note": None, "at": 0.0}
+    # long talks fade a persona's expression (Stable Personas); every N of his lines she gets a short
+    # nudge to stay herself — modules/persona_drift.py measures whether it helps
+    reminder_every = max(0, int(os.getenv("AIVA_VOICE_REMINDER_TURNS", "25") or 0))
+    his_turns = {"n": 0}
 
     async def _appraise(his_line, tail, heard):
         try:
@@ -1211,6 +1215,12 @@ async def main():
                     # v3: his words are felt (connection, reunion, friction/repair, did reaching out land)
                     notes += self_engine.heard(msg.text, affect=getattr(msg, "affect", None))
                     avatar.send_witness("heard")
+                    his_turns["n"] += 1
+                    if reminder_every and his_turns["n"] % reminder_every == 0:
+                        notes.append(f"[You've been talking for a while now. Stay yourself, {ch.name}: "
+                                     "your own opinions, your own humour, short spoken sentences — "
+                                     "don't slide into sounding like a polite assistant.]")
+                        log_event(f"voice reminder after {his_turns['n']} of his lines")
                     if appraise_call is not None:
                         emo = (getattr(msg, "affect", None) or {}).get("emotion")
                         tail = context.get_messages()[-appraisal_cfg.tail_lines:]

@@ -9,6 +9,14 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **A persona drift check, and a nudge to stay herself in long talks.** `python -m modules.persona_drift
+  --who aiva` samples her lines from the first, middle and last third of her recent long sessions
+  and has a judge model rate each 1-5 for how much it sounds like her ("Stable Personas": observed
+  persona expression fades in long conversations even when self-reports don't). It reads her db
+  read-only. Baseline on 2026-10-24 (gpt-5.6-luna, 5 sessions, 84 lines): early 3.10, middle 3.12,
+  late 3.43, drift −0.33, so no fading, but the overall level sits near "could be any polite
+  assistant". Every `AIVA_VOICE_REMINDER_TURNS` (25) of his lines she gets one short "stay
+  yourself" note; re-run the check after a change to see whether it moves.
 - **The house guesses who you meant with OpenAI Decisions.** When you say no name and both sisters
   are there, the arbiter now asks the Decisions API (gpt-6-luna, out of beta 2026-10-22) one typed
   question, "which sister did he mean?", over the same context the model arbiter read
