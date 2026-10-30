@@ -8,6 +8,8 @@ bullets into a new dated section and bump `aiva/version.py`.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-30
+
 ### Added
 - **She draws a whole picture while she keeps talking** (`draw_picture`, `aiva/modules/artist.py`,
   2026-10-27). He asked the sisters for "more detail" and Aiva drew 50 strokes with `draw_stroke`,
@@ -475,6 +477,14 @@ bullets into a new dated section and bump `aiva/version.py`.
   she has no floor and her own core stays the only thing a negation can erode.
 
 ### Changed
+- **Saga thinks with GPT-6 Luna and speaks with Eleven v4 Turbo, like Aiva** (2026-10-30). For a
+  week she stayed on gpt-5.6-luna and the Flash voice so the two could be compared. He liked what
+  the update did for Aiva, so `.env` no longer sets `SAGA_LLM_MODEL` or `SAGA_ELEVENLABS_MODEL`,
+  and she shares Aiva's `AIVA_LLM_MODEL` and `ELEVENLABS_MODEL`. No code changed: on her next boot
+  the existing `2026-10-gpt6-luna` and `2026-10-v4-voice` upgrades come on for her and she's told
+  once, the "Aiva moved and you stayed" note stops showing, her VOICE CUES block turns on, and her
+  backchannel clips are remade in the new voice. `.env` isn't in the repo, so a fresh checkout
+  needs `AIVA_LLM_MODEL=gpt-6-luna` and `ELEVENLABS_MODEL=eleven_v4_turbo` for the same setup.
 - **Each Claude Code job thinks as hard as its job needs** (2026-10-17). Every job used to inherit
   your own Claude Code setting, Opus at xhigh effort, because `claude -p` was started without
   `--effort`. A read-only README review spent 18k of its 31k output tokens thinking, about 5

@@ -36,8 +36,9 @@ Voice-to-voice latency is ~1 s (the old blocking loop was 8–15 s).
    TAVILY_API_KEY=...            # optional, web search for both sisters
    NTFY_TOPIC=...                # optional, phone alerts when a spend cap is near
    ```
-3. Optional overrides in `.env`: `AIVA_LLM_MODEL` (default `gpt-4.1-mini`),
-   `ELEVENLABS_MODEL` (default `eleven_flash_v2_5`),
+3. Optional overrides in `.env`: `AIVA_LLM_MODEL` (default `gpt-5.6-luna`; the sisters run
+   `gpt-6-luna`), `ELEVENLABS_MODEL` (default `eleven_flash_v2_5`; `eleven_v4_turbo` gives them
+   the voice that can laugh, sigh and whisper),
    `AIVA_INPUT_DEVICE_INDEX` / `AIVA_OUTPUT_DEVICE_INDEX` (see below). Every knob, with its
    default, is also listed and editable on the dashboard's **Settings** tab (config is read at
    boot, so it tells you what to restart).
@@ -234,15 +235,17 @@ allowance, see below). Per-task safety limits live in `tasks.Limits` (12 steps,
 ## Models
 
 `AIVA_LLM_MODEL` (their voice), `AIVA_TASK_MODEL` (task planner/verifier) and
-`AIVA_VISION_MODEL` (screen vision) fall back to `gpt-4.1-mini` in code (the
-task and vision models follow `AIVA_LLM_MODEL` when unset). The recommended
-setting since August 2026 is **gpt-5.6-luna** for all three: OpenAI's fast/cheap
+`AIVA_VISION_MODEL` (screen vision) fall back to `gpt-5.6-luna` in code (the
+task and vision models follow `AIVA_LLM_MODEL` when unset): OpenAI's fast/cheap
 tier — sub-second first token on tool-calling turns, $0.20 / $1.20 per million
-tokens, and 500k tokens-per-minute even on the entry usage tier (gpt-4.1 gets
-30k). `gpt-5.6-terra` is the step up if you want more brains at the same limits;
-`gpt-4.1` still works if you ever want to compare. The gpt-5 line needs
-`max_completion_tokens` and `reasoning_effort: none` on Chat Completions — the
-code handles that automatically per model (`modules/utilities.py: llm_kwargs`),
+tokens, and 500k tokens-per-minute even on the entry usage tier.
+`gpt-5.6-terra` is the step up if you want more brains at the same limits.
+Since 0.11.0 both sisters' voice runs on **gpt-6-luna** (`AIVA_LLM_MODEL=gpt-6-luna`,
+about half the price), with the task and vision models left on gpt-5.6-luna;
+`SAGA_LLM_MODEL` gives Saga her own model if you ever want to compare them again.
+gpt-4.1 / gpt-4.1-mini shut down on 2027-01-14. The gpt-5 line and gpt-6-luna
+need `max_completion_tokens` and `reasoning_effort: none` on Chat Completions —
+the code handles that automatically per model (`modules/utilities.py: llm_kwargs`),
 so switching is just the env var.
 
 ## Rate limits (OpenAI tokens per minute)
