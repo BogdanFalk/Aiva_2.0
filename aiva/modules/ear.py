@@ -46,7 +46,7 @@ class MicController(FrameProcessor):
         self.last_activity = time.monotonic()
         self.last_user_final = None   # set on the user's final transcript; for turn-latency metric
         self.stt_seconds = 0.0
-        self.wake_hint = None         # which wake model fired last ("hey_aiva"/"hey_saga"), if any
+        self.wake_hint = None         # whose wake word fired last (her slug, "aiva"/"saga"), if any
         self._ambient = ambient
         self._bot_cooldown_secs = bot_cooldown_secs
         # Verified wake: the wake-word model alone is too trigger-happy (it fires on TV/game

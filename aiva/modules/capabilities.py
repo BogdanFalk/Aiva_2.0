@@ -29,6 +29,7 @@ SAFE_TOOLS = frozenset({
     "remember", "note_desire", "note_preference", "recall_journal", "what_can_i_do",
     "cat_status", "feed_cat", "pet_cat", "play_with_cat", "avatar_expression",
     "recall_about_sister", "call_sister", "set_sister_talk", "open_drawing", "draw_stroke",
+    "draw_picture",
     # saving never replaces another drawing; opening one saves unsaved work first
     "save_drawing", "open_saved_drawing",
 })
@@ -94,9 +95,9 @@ CAPABILITIES = (
          "get her", "call her")),
     Capability(
         "draw", "want to draw or sketch something",
-        "open my own drawing canvas and draw on it, stroke by stroke, without touching your mouse or "
-        "keyboard", "auto",
-        ("open_drawing", "draw_stroke", "save_drawing", "open_saved_drawing"),
+        "open my own drawing canvas and draw on it, a whole picture while we talk or a single "
+        "stroke, without touching your mouse or keyboard", "auto",
+        ("open_drawing", "draw_picture", "draw_stroke", "save_drawing", "open_saved_drawing"),
         ("draw", "drawing", "sketch", "doodle", "paint", "painting", "canvas", "scribble",
          "drawing app", "drawapp")),
     Capability(

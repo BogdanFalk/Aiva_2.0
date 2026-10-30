@@ -336,7 +336,7 @@ class HouseServer:
         elif isinstance(msg, proto.Response):
             f.on_response(slug, msg.turn, msg.phase)
         elif isinstance(msg, proto.Tool):
-            f.on_tool(slug, msg.turn, msg.delta)
+            f.on_tool(slug, msg.turn, msg.delta, msg.rerun)
         elif isinstance(msg, proto.Speaking):
             f.on_speaking(slug, msg.turn, msg.on)
         elif isinstance(msg, proto.Said):

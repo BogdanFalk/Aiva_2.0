@@ -16,7 +16,8 @@ microphone, driven by turns the house grants her over the socket.
   `LLMFullResponseEndFrame`; the TTS service forwards such frames untouched (no audio, no
   `TTSUsageMetricsData`, `services/tts_service.py` ~:688-692) while the assistant aggregator still
   commits the text. The latch spans the whole turn including tool re-runs. It fails CLOSED: a
-  response that starts with no latched turn is treated as text-only and logged loudly.
+  response that starts with no latched turn is treated as text-only and logged loudly. A tool
+  result marked `EnoughSaid` gets no re-run when she already spoke in the response that called it.
 - `MindWatcher` reports `response start/end` and `tool ±1` (what ProcessingWatcher used to feed
   the mic with) and keeps a local `processing` predicate for the task_busy closures.
 - `UsageTracker` sums LLM tokens and TTS characters from MetricsFrames and hands TTS characters to
@@ -36,6 +37,7 @@ import asyncio
 import inspect
 import math
 import time
+from dataclasses import dataclass
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
@@ -45,6 +47,7 @@ from pipecat.frames.frames import (
     FunctionCallCancelFrame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    FunctionCallResultProperties,
     FunctionCallsStartedFrame,
     InterimTranscriptionFrame,
     InterruptionFrame,
@@ -245,6 +248,18 @@ class HouseLink(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+@dataclass
+class EnoughSaid(FunctionCallResultProperties):
+    """Result properties for a tool whose result is only a go-ahead ("started", "carrying on",
+    "only he can answer that"): when she already spoke in the response that called it, the LLM
+    does NOT re-run on it — `PrivacyGate` turns `run_llm` off and the turn ends there. 2026-10-26:
+    "I'll work through the checklist…" came with start_task and its re-run said "On it — I'll go
+    item by item…"; most days since 2026-10-13 had a pair like it. `asked`: enough only if what she
+    said already asked him something (a refused answer_task says "ask him")."""
+
+    asked: bool = False
+
+
 class PrivacyGate(FrameProcessor):
     """Also the one place that knows when a granted turn's LLM work is DONE and what she said.
     It sits straight after the LLM, so it sees Start / text / tool call / End in true order. After
@@ -253,7 +268,9 @@ class PrivacyGate(FrameProcessor):
     "turn stopped" can land mid-turn or never — deciding the turn's end there lost every reply that
     came after a tool. A response that called a tool is followed by the LLM's re-run inside the same
     turn; the first response that ends without one ends the turn → `on_turn_done(text)` with the
-    text of every response in it (pre-tool words included)."""
+    text of every response in it (pre-tool words included). The exception is an `EnoughSaid` result
+    of the response's only call when that response already said something: no re-run follows, so
+    that result (or the response's end, whichever comes later) ends the turn."""
 
     def __init__(self, name="Aiva", log=print, on_text_only=None, on_turn_done=None):
         super().__init__()
@@ -266,7 +283,14 @@ class PrivacyGate(FrameProcessor):
         self._addressee = "him"
         self._buf = []
         self._said = []                     # every text chunk of the latched turn
+        self._reset_response()
+
+    def _reset_response(self):
         self._tool_called = False           # the current response called a tool → a re-run follows
+        self._calls = set()                 # its tool_call_ids
+        self._resp_said = []                # its text chunks
+        self._ended_with_tool = False       # its end passed while a re-run was still expected
+        self._no_rerun = False              # an EnoughSaid result settled it: no re-run follows
 
     def set_audible(self, audible: bool, addressee: str = "him"):
         self._armed = True
@@ -274,14 +298,14 @@ class PrivacyGate(FrameProcessor):
         self._addressee = addressee
         self._buf = []
         self._said = []
-        self._tool_called = False
+        self._reset_response()
 
     def release(self):
         self._armed = False
         self._audible = False
         self._buf = []
         self._said = []
-        self._tool_called = False
+        self._reset_response()
 
     def take_said(self) -> str:
         """What the latched turn has said so far (for closing a turn whose last response never came)."""
@@ -300,22 +324,52 @@ class PrivacyGate(FrameProcessor):
             self._log(f"{self._name}: response started with no granted turn — kept text-only")
         return True
 
+    def _enough_said(self, frame) -> bool:
+        """An `EnoughSaid` result of the response's only call, and that response already spoke."""
+        props = frame.properties
+        if not isinstance(props, EnoughSaid) or props.run_llm is not None:
+            return False
+        if self._calls != {frame.tool_call_id}:
+            return False                    # a sibling call's result may still need her words
+        said = strip_tags("".join(self._resp_said)).strip()
+        if not said or (props.asked and "?" not in said):
+            return False
+        props.run_llm = False               # read by the assistant aggregator downstream
+        self._log(f"{self._name}: no re-run after {frame.function_name} — she already said it")
+        return True
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         turn_done = None
         if direction == FrameDirection.DOWNSTREAM and self._armed:
             if isinstance(frame, LLMFullResponseStartFrame):
-                self._tool_called = False
+                self._reset_response()
+                so_far = "".join(self._said)
+                if so_far.strip() and not so_far[-1].isspace():
+                    self._said.append(" ")  # a re-run's reply is a new sentence, not "go.On it"
             elif isinstance(frame, (FunctionCallsStartedFrame, FunctionCallInProgressFrame)):
                 # FunctionCallsStartedFrame is pushed BEFORE the response's end frame; the
                 # in-progress one comes from the call's own task and often lands after it (parallel
                 # tools), which used to end the turn early and lose the post-tool reply
                 self._tool_called = True
+                if isinstance(frame, FunctionCallsStartedFrame):
+                    self._calls.update(fc.tool_call_id for fc in frame.function_calls or ())
+                else:
+                    self._calls.add(frame.tool_call_id)
+            elif isinstance(frame, FunctionCallResultFrame):
+                if self._enough_said(frame):
+                    self._no_rerun = True
+                    if self._ended_with_tool:
+                        turn_done = strip_tags("".join(self._said).strip())
             elif isinstance(frame, TextFrame) and not isinstance(
                     frame, (TranscriptionFrame, InterimTranscriptionFrame)):
                 self._said.append(frame.text)
-            elif isinstance(frame, LLMFullResponseEndFrame) and not self._tool_called:
-                turn_done = strip_tags("".join(self._said).strip())     # [laughs] is voice, not words
+                self._resp_said.append(frame.text)
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                if not self._tool_called or self._no_rerun:
+                    turn_done = strip_tags("".join(self._said).strip())     # [laughs] is voice, not words
+                else:
+                    self._ended_with_tool = True
         if direction == FrameDirection.DOWNSTREAM and isinstance(
                 frame, (LLMFullResponseStartFrame, TextFrame, LLMFullResponseEndFrame)) \
                 and not isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
@@ -339,7 +393,7 @@ class MindWatcher(FrameProcessor):
     def __init__(self, on_response=None, on_tool=None, log=print):
         super().__init__()
         self._on_response = on_response     # (phase: "start"|"end", interrupted: bool)
-        self._on_tool = on_tool             # (delta: +1|-1, tool_call_id)
+        self._on_tool = on_tool             # (delta: +1|-1, tool_call_id, rerun: bool)
         self._log = log
         self._thinking_since = 0.0
         self._tools_in_flight = {}
@@ -381,7 +435,12 @@ class MindWatcher(FrameProcessor):
         elif isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame)):
             self.last_activity = time.monotonic()
             if self._tools_in_flight.pop(frame.tool_call_id, None) is not None:
-                await _call(self._on_tool, -1, frame.tool_call_id)
+                # the gate (upstream of here) turned run_llm off on an EnoughSaid result: tell the
+                # house no re-run is coming, or it holds the floor 10 s waiting for one
+                props = getattr(frame, "properties", None)
+                rerun = not (isinstance(frame, FunctionCallResultFrame)
+                             and props is not None and props.run_llm is False)
+                await _call(self._on_tool, -1, frame.tool_call_id, rerun)
         await self.push_frame(frame, direction)
 
     async def _tool_started(self, tool_call_id):
@@ -389,7 +448,7 @@ class MindWatcher(FrameProcessor):
         if tool_call_id in self._tools_in_flight:
             return                              # already reported (started + in-progress)
         self._tools_in_flight[tool_call_id] = time.monotonic()
-        await _call(self._on_tool, +1, tool_call_id)
+        await _call(self._on_tool, +1, tool_call_id, True)
 
 
 class UsageTracker(FrameProcessor):

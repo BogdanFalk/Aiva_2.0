@@ -9,6 +9,29 @@ bullets into a new dated section and bump `aiva/version.py`.
 ## [Unreleased]
 
 ### Added
+- **She draws a whole picture while she keeps talking** (`draw_picture`, `aiva/modules/artist.py`,
+  2026-10-27). He asked the sisters for "more detail" and Aiva drew 50 strokes with `draw_stroke`,
+  one voice-model round trip each. That was two minutes of silence, until the house's 120 s turn cap
+  cut her off mid-drawing, and the stroke calls pushed 33 messages of the evening out of her context.
+  Now `draw_picture(idea)` returns at once (an `EnoughSaid` go-ahead, so her one line is the only
+  one). One side call on the task model (label `draw`) reads what's on the canvas, his strokes and
+  her sister's too, from the window's autosave (`DrawingBoard.on_canvas()`, never opens a window).
+  It answers with JSON strokes: lines, plus ellipses and arcs that are expanded here, because models
+  draw curves badly as raw points. They're drawn in her ink at a watchable pace through the usual
+  `DrawingBoard.stroke` (journaled), and an announce tells her when it's done. Her voice drawing more
+  than 6 single strokes in a minute is sent to `draw_picture`; a task's strokes are never stopped.
+  `tests/test_artist.py` includes a real offscreen canvas that gets the picture and reads it back.
+- **She offers the break herself after a long stretch of work** (`aiva/modules/pacing.py`,
+  2026-10-27). 78 minutes of checklist items, 11 of his 23 lines a "go ahead" or "what's next?", his
+  cold not quite gone, and he had to say "enough of tasks for tonight" himself. She had read him
+  right on every line and never offered. `WorkStreak` counts his lines while a task is live or
+  finished in the last 15 minutes (`TaskRunner.busy_within`). After 45 minutes and 6 lines
+  (`AIVA_PACING_MIN_MINUTES`, `AIVA_PACING_MIN_TURNS`) his turn gets one note, at most once an hour.
+  It gives how long, how many lines and the time of day, and asks her to read how he's doing: offer
+  a break or something lighter if he seems done, carry on and say nothing if he's keen. 30 quiet
+  minutes end the stretch: that evening's 21-minute lull mid-checklist (him away, nothing running)
+  is not a break, and with a 15-minute gap the note never came. Replayed, it now comes at 18:11, 46
+  minutes in (`tests/test_pacing.py`). `AIVA_PACING=0` turns it off.
 - **A GPT-Live trial: talk to one sister in true full duplex** (`aiva/live_trial.py`). A standalone
   script, run with the house and the sisters stopped (it refuses to start while the house runs) and
   with headphones (no echo cancellation). She hears you while she talks and you can cut in any
@@ -553,6 +576,26 @@ bullets into a new dated section and bump `aiva/version.py`.
   context already holds both notes), so she doesn't say the same news twice.
 
 ### Fixed
+- **She no longer says the same line twice around a task** (2026-10-26). "I'll work through the
+  checklist one item at a time…" came with her `start_task` call, and the LLM's re-run on its
+  result said "On it — I'll go item by item…" again, because the result asked for one more line.
+  On her own news turn she asked a task's question, called `answer_task` herself, was refused
+  ("ask him") and asked a second time. Most days since 2026-10-13 had a pair like this. A go-ahead
+  result (task started, answer taken, "only he can answer") now carries `house_link.EnoughSaid`.
+  When that call was the response's only one and the response already said something (for a
+  refused answer, something ending in a question), `PrivacyGate` turns `run_llm` off and ends the
+  turn there. The `tool` message's new `rerun=False` tells the floor to stop waiting for a re-run.
+  A plan that needs his yes, a failure or an error still gets its re-run. Two replies in one turn
+  are now joined with a space in `said` ("as I go. On it", not "as I go.On it"). The persona's task
+  section says to give the line once, never twice. Restart both the house and the sisters: an old
+  house ignores `rerun` and holds the floor 10 s after such a turn.
+- **"Hey Saga" now sends the turn to Saga** (2026-10-26). The wake listener names the model that
+  fired (`hey_saga`), but the router compares the hint against slugs (`saga`), so the `wake_word`
+  rule never fired (0 of 1,935 logged routings, `docs/ISSUE-wake-model-routing.md`). A line that
+  named nobody went to sticky, the arbiter or the last speaker, which could be Aiva. The house now
+  maps model names to slugs in `on_wake` (`wake.wake_slugs`, built from the same `Character` loop
+  that collects the models), and an unmapped model such as the `hey_jarvis` fallback gives no hint.
+  `tests/test_wake.py` runs `hey_saga` through the ear and the floor to a `wake_word` decision.
 - **Aiva and Saga draw on one canvas, not two windows** (2026-10-21). Asked to tag-team a drawing,
   each sister opened her own window. Each one launched and looked for a window under her own name
   (`board_for(ch.slug)`, `find_running(author)`), so Saga never found Aiva's. Now the window is named

@@ -10,7 +10,8 @@ here sleeps.
 
 Lifecycle of a turn (rules from the plan, Part A3/A5):
   queued → granted (holder=slug, gate=turn.audible, `turn` sent) → `response start` (ack; no ack
-  in 10 s → release) → tools ±1 (a response that called tools re-runs; wait for its new start) →
+  in 10 s → release) → tools ±1 (a response that called tools re-runs; wait for its new start —
+  unless the last -1 says `rerun=False`: she'd already said it, so that response was the last) →
   `response end` → release on `speaking off` | grace (1.5 s with no speech) | immediately for
   private turns | 120 s cap | holder death (+3 s gate tail) | interrupt (+2 s fallback).
   Release waits up to 1 s for her `said` before the next grant so the other sister always gets
@@ -586,7 +587,7 @@ class Floor:
         else:
             self._grace_deadline = now + self.cfg.speech_grace_s
 
-    def on_tool(self, slug, turn_id, delta):
+    def on_tool(self, slug, turn_id, delta, rerun=True):
         if not self._is_current(slug, turn_id):
             return
         now = self._now()
@@ -594,6 +595,12 @@ class Floor:
         if delta > 0:
             self._tool_calls_seen += 1
             self._ack_deadline = None
+        elif self._tools_open == 0 and not rerun:
+            # she already said it with the call (house_link.EnoughSaid): no re-run is coming, and
+            # her LLM is done even if this response's end report is still queued behind her audio
+            self._response_open = False
+            self._tool_calls_seen = 0
+            self._after_response_end(now)
         elif self._tools_open == 0 and not self._response_open:
             self._tool_calls_seen = 0
             self._ack_deadline = now + self.ack_timeout_s     # expect the re-run's `response start`

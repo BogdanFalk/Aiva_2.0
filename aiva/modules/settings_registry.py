@@ -209,6 +209,9 @@ SETTINGS = (
 
     # --- Mood & self loop ------------------------------------------------------------------------
     S("AIVA_VOICE_REMINDER_TURNS", "Mood & self loop", "int", 25, "In a long conversation, every this many of your lines she gets a short nudge to stay herself (0 turns it off).", "sisters", min=0, max=1000),
+    S("AIVA_PACING", "Mood & self loop", "bool", True, "After a long stretch of tasks with you, she gets one nudge to check how you're doing and offer a break or something lighter.", "sisters"),
+    S("AIVA_PACING_MIN_MINUTES", "Mood & self loop", "float", 45.0, "How many minutes a stretch of task work lasts before that nudge.", "sisters", min=5.0, max=600.0),
+    S("AIVA_PACING_MIN_TURNS", "Mood & self loop", "int", 6, "How many of your lines must be in that stretch before the nudge.", "sisters", min=1, max=200),
     S("AIVA_APPRAISAL", "Mood & self loop", "bool", True, "After each of your lines, a quick side-call reads what's going on with you and how it lands on her; it moves her mood and is noted on your next turn.", "sisters"),
     S("AIVA_APPRAISAL_MIN_CONFIDENCE", "Mood & self loop", "float", 0.5, "How sure that reading must be before she gets a note about it.", "sisters", min=0.0, max=1.0),
     S("AIVA_APPRAISAL_NOTE_TTL_S", "Mood & self loop", "float", 600.0, "A reading older than this many seconds isn't noted on your next turn.", "sisters", min=0.0, max=86400.0),

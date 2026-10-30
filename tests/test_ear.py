@@ -5,7 +5,7 @@ from modules.ear import MicController, mentions_any_of
 def test_muted_blocks_wakeword_but_not_own_announce():
     m = MicController(ambient=True, log=lambda s: None)
     m.muted = True
-    m.wake("wake word", preroll=b"\x00\x00", verify=True, hint="hey_saga")
+    m.wake("wake word", preroll=b"\x00\x00", verify=True, hint="saga")
     assert not m.awake and m.wake_hint is None
     m.wake("background news announce")
     assert m.awake
@@ -13,13 +13,13 @@ def test_muted_blocks_wakeword_but_not_own_announce():
 
 def test_wake_hint_is_kept_and_cleared_on_reject():
     m = MicController(ambient=True, log=lambda s: None)
-    m.wake("wake word", preroll=b"\x00\x00", verify=True, hint="hey_saga")
-    assert m.awake and m.verifying and not m.visibly_awake and m.wake_hint == "hey_saga"
+    m.wake("wake word", preroll=b"\x00\x00", verify=True, hint="saga")
+    assert m.awake and m.verifying and not m.visibly_awake and m.wake_hint == "saga"
     m.reject_wake("no name")
     assert not m.awake and m.wake_hint is None
-    m.wake("wake word", preroll=b"\x00\x00", verify=True, hint="hey_aiva")
+    m.wake("wake word", preroll=b"\x00\x00", verify=True, hint="aiva")
     m.confirm_wake("heard aiva")
-    assert m.visibly_awake and m.wake_hint == "hey_aiva"
+    assert m.visibly_awake and m.wake_hint == "aiva"
 
 
 def test_floor_speaking_gates_the_mic_like_bot_frames():
@@ -57,13 +57,13 @@ def test_wake_word_is_ignored_while_a_sister_is_speaking():
     """The wake listener has its own mic stream; its pre-roll would carry HER voice into STT."""
     m = MicController(ambient=True, log=lambda s: None, bot_cooldown_secs=10.0)
     m.set_speaking(True)
-    m.wake("wake word hey_saga", preroll=b"\x00\x00", verify=True, hint="hey_saga")
+    m.wake("wake word hey_saga", preroll=b"\x00\x00", verify=True, hint="saga")
     assert not m.awake
     m.set_speaking(False)                       # still inside the cooldown
-    m.wake("wake word hey_saga", preroll=b"\x00\x00", verify=True, hint="hey_saga")
+    m.wake("wake word hey_saga", preroll=b"\x00\x00", verify=True, hint="saga")
     assert not m.awake
     m._bot_stopped_at = 0.0
-    m.wake("wake word hey_saga", preroll=b"\x00\x00", verify=True, hint="hey_saga")
+    m.wake("wake word hey_saga", preroll=b"\x00\x00", verify=True, hint="saga")
     assert m.awake
     # her own announce-style wake (no preroll) is never blocked
     m2 = MicController(ambient=True, log=lambda s: None)

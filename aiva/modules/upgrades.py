@@ -26,6 +26,7 @@ from typing import Callable
 from modules.appraisal import AppraisalConfig
 from modules.backchannel import BackchannelConfig
 from modules.house_stt import STTConfig
+from modules.pacing import PacingConfig
 from modules.voice_tags import performs_tags
 
 TOLD_KEY = "upgrades_told"
@@ -96,6 +97,16 @@ UPGRADES = (
     Upgrade("2026-10-knows-upgrades", ("aiva", "saga"),
             "From now on you're told when you've been upgraded, so you can always say what changed "
             "in you."),
+    Upgrade("2026-10-draw-picture", ("aiva", "saga"),
+            "You can draw a whole picture in one go now. You give your drawing hand the idea, it "
+            "looks at what's already on the canvas and draws it in the background while you keep "
+            "talking, and you hear when it's done. No more drawing stroke by stroke while he waits "
+            "in silence."),
+    Upgrade("2026-10-pacing", ("aiva", "saga"),
+            "When an evening with him turns into a long stretch of tasks, you now get a quiet nudge "
+            "to check how he's doing, so you can be the one to offer a break or something lighter "
+            "instead of waiting for him to call it.",
+            on=lambda env, ch: PacingConfig.from_env(env).enabled),
 )
 
 

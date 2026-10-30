@@ -1337,7 +1337,17 @@ async def test_a_failed_task_hands_her_what_it_found_and_asks_for_the_direct_way
     assert "What it had found" in note and "glow softly" in note and "doing the rest yourself" in note
 
 
+class _Params:
+    def __init__(self, arguments):
+        self.arguments, self.results, self.props = arguments, [], []
+
+    async def result_callback(self, r, *, properties=None):
+        self.results.append(r)
+        self.props.append(properties)
+
+
 async def test_only_he_can_answer_a_tasks_question():
+    from modules.house_link import EnoughSaid
     from modules.tools import make_task_handlers
 
     class Runner:
@@ -1347,23 +1357,44 @@ async def test_only_he_can_answer_a_tasks_question():
             self.answered.append(answer)
             return {"success": True}
 
-    class Params:
-        def __init__(self, arguments):
-            self.arguments, self.results = arguments, []
-
-        async def result_callback(self, r):
-            self.results.append(r)
-
     spoke = {"him": False}
     runner = Runner()
     h = make_task_handlers(runner, None, heard_him=lambda: spoke["him"])
-    p = Params({"answer": "yes"})
+    p = _Params({"answer": "yes"})
     await h["answer_task"](p)                    # her own news turn, or her sister's
     assert p.results[0]["success"] is False and runner.answered == []
+    assert isinstance(p.props[0], EnoughSaid) and p.props[0].asked   # no second ask if she asked
     spoke["him"] = True
-    p = Params({"answer": "yes"})
+    p = _Params({"answer": "yes"})
     await h["answer_task"](p)
     assert p.results[0] == {"success": True} and runner.answered == ["yes"]
+    assert isinstance(p.props[0], EnoughSaid) and not p.props[0].asked
+
+
+async def test_only_a_go_ahead_task_result_is_enough_said():
+    # a started task needs no second "on it"; a plan that needs his yes still needs her to ask
+    from modules.house_link import EnoughSaid
+    from modules.tools import make_task_handlers
+
+    class Runner:
+        def __init__(self, result):
+            self.result = result
+
+        async def start(self, goal, details="", confirm_first=False):
+            return self.result
+
+        async def answer(self, answer, task_id=None):
+            return {"success": False, "error": "no task is waiting for an answer"}
+
+    for result, enough in [({"success": True, "status": "started", "say": "On it."}, True),
+                           ({"success": True, "status": "needs_your_ok", "say": "Shall I?"}, False),
+                           ({"success": False, "error": "no goal given"}, False)]:
+        p = _Params({"goal": "tidy the folder"})
+        await make_task_handlers(Runner(result), None)["start_task"](p)
+        assert p.results == [result] and isinstance(p.props[0], EnoughSaid) is enough
+    p = _Params({"answer": "yes"})
+    await make_task_handlers(Runner({}), None)["answer_task"](p)
+    assert p.props == [None]                     # "no task is waiting" is news she must say
 
 
 # --- 2026-10-14: Saga's agent gave up on his note on its first move ("creating a file needs the

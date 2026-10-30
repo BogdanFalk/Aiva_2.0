@@ -12,7 +12,8 @@ def test_every_type_round_trips():
     samples = [
         p.Hello(slug="saga", name="Saga", name_variants=["saga"], loose_regex="s[ae]+r?g+a+h?r?", blurb="new",
                 capabilities=["web"], pid=42, version="0.10.0"),
-        p.Response(turn=3, phase="start"), p.Tool(turn=3, delta=1), p.Speaking(turn=3, on=True),
+        p.Response(turn=3, phase="start"), p.Tool(turn=3, delta=1), p.Tool(turn=3, delta=-1, rerun=False),
+        p.Speaking(turn=3, on=True),
         p.Said(turn=3, text="hi", addressee="him", private=False, interrupted=False),
         p.Event(kind="tool_done", summary="looked up the weather", capability="web"),
         p.WantFloor(kind="initiative", to="aiva"), p.Mode(sister_talk="private"),

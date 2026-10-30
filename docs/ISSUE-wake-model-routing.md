@@ -1,6 +1,6 @@
 # Issue: the wake-word model name never routes a turn (`hey_saga` ≠ `saga`)
 
-Status: open · found 2026-10-18 by read-only inspection (no code changed) · version 0.10.0 working tree
+Status: fixed in the working tree 2026-10-26 (`wake.wake_slugs` at `house.py` `on_wake`, `tests/test_wake.py`; not yet committed, not yet seen live) · found 2026-10-18 by read-only inspection · version 0.10.0 working tree
 
 ## Summary
 

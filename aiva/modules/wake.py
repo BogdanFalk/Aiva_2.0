@@ -24,6 +24,13 @@ def model_name(path_or_name: str) -> str:
     return base.rsplit(".", 1)[0] if "." in base else base
 
 
+def wake_slugs(models_by_slug) -> dict:
+    """{model name: sister slug} for `{model path or name: slug}`. The listener reports which model
+    fired ("hey_saga"); the floor routes by slug ("saga"). A name missing here (the hey_jarvis
+    fallback) maps to no sister, so `.get(name)` gives None."""
+    return {model_name(m): slug for m, slug in models_by_slug.items()}
+
+
 class WakeWordListener:
     def __init__(self, models, on_wake, device_index=None, threshold=0.5, patience=2,
                  preroll_secs=2.5, log=print):

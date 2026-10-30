@@ -47,6 +47,9 @@ leave it open, never to close it.
 
 Results are short dicts the voice LLM speaks from; failures are `{"success": False, "error": …}`.
 
+`on_canvas()` reads what's on the shared canvas now (his strokes and her sister's too) from the
+window's autosave, without opening anything: `modules/artist.py` draws around it.
+
 Every canvas action is also written down behind the scenes, one JSON line per action, in
 `aiva/logs/drawing-<author>-YYYYMMDD.jsonl` (`DrawingJournal`; nothing of it is spoken): who, what,
 the points as sent with their bbox/start/end, the color and width she asked for and the ones the
@@ -153,6 +156,11 @@ def _default_brush(author):
     except ImportError:
         return None, None
     return AUTHOR_COLORS.get(author, Brush.color), Brush.width
+
+
+def ink(author):
+    """`author`'s own ink on the canvas (#rrggbb), or None if the drawing app can't be loaded."""
+    return _default_brush(author)[0]
 
 
 def _stroke_facts(author, points, color, width):
@@ -337,6 +345,24 @@ class DrawingBoard:
                 out["status"] += f"; what was on it is saved as {out['saved_previous']}"
             return out
 
+    def _canvas(self):
+        """What's on the canvas now, from the window's autosave (rewritten after every finished
+        stroke, so his strokes and her sister's are in it): [{author, color, width, points}], oldest
+        first. Empty when nothing is drawn or the file can't be read. Never opens a window."""
+        try:
+            _drawapp()
+            from drawapp import storage
+        except ImportError:
+            return []
+        path = os.path.join(self._save_dir or storage.default_save_dir(), storage.RECOVERY,
+                            f"{self.canvas}-autosave{storage.EXT}")
+        try:
+            snap = storage.read_drawing(path)
+        except storage.StorageError:
+            return []
+        return [{"author": s.author, "color": s.color, "width": s.width,
+                 "points": [[x, y] for x, y in s.points]} for s in snap.strokes]
+
     def _close(self):
         with self._lock:
             app, self._seen.app, self._seen.reply = self._app, self._app, None
@@ -435,6 +461,10 @@ class DrawingBoard:
     async def open_saved(self, name=None):
         """Put a saved drawing on her canvas (default: the newest), opening the canvas if needed."""
         return await self._run(self._open_saved, name)
+
+    async def on_canvas(self):
+        """What's on the canvas now (see `_canvas`), off the event loop; never opens a window."""
+        return await asyncio.to_thread(self._canvas)
 
     async def close(self):
         """End the window, for her sister too: it's their one canvas. Nothing of hers calls this."""

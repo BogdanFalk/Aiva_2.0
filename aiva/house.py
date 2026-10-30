@@ -90,7 +90,7 @@ from modules.sisters import (ARBITER_DECISION_INSTRUCTIONS, ExchangeConfig, deci
                              namesets_from_env, which_names)
 from modules.speakers import SpeakerConfig, SpeakerMemory, SpeakerRecognizer
 from modules.tasks import openai_llm_call
-from modules.wake import WakeWordListener, model_name
+from modules.wake import WakeWordListener, model_name, wake_slugs
 
 log_event = EventLog("house")
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -177,8 +177,9 @@ def _launch_dashboard():
 
 
 def _wake_models():
-    """Every sister's wake model that exists on disk (Aiva's is required to arm ambient mode)."""
-    models = []
+    """Every sister's wake model that exists on disk, `{model: slug}` (Aiva's is required to arm
+    ambient mode)."""
+    models = {}
     for slug in character.KNOWN:
         try:
             ch = character.Character.from_env(slug)
@@ -188,8 +189,7 @@ def _wake_models():
         if not m:
             continue
         if os.path.isfile(m) or not m.endswith(".onnx"):    # a bare openWakeWord name is fine too
-            if m not in models:
-                models.append(m)
+            models.setdefault(m, slug)
     return models
 
 
@@ -608,11 +608,14 @@ async def main():
     idle_task = None
     if ambient:
         verify_wakes = os.getenv("AIVA_WAKE_VERIFY", "1") == "1"
-        models = _wake_models() or [os.getenv("AIVA_WAKE_MODEL", "hey_jarvis")]
+        found = _wake_models()
+        models = list(found) or [os.getenv("AIVA_WAKE_MODEL", "hey_jarvis")]
+        slug_of = wake_slugs(found)     # the listener names the model ("hey_saga"), the floor routes by slug
         wake_listener = WakeWordListener(
             models=models,
             on_wake=lambda score, preroll, name: loop.call_soon_threadsafe(
-                mic.wake, f"wake word {name} (score={score:.2f})", preroll, verify_wakes, name),
+                mic.wake, f"wake word {name} (score={score:.2f})", preroll, verify_wakes,
+                slug_of.get(name)),
             device_index=mic_index,
             threshold=float(os.getenv("AIVA_WAKE_THRESHOLD", "0.5")),
             patience=int(os.getenv("AIVA_WAKE_PATIENCE", "2")),

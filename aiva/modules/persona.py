@@ -111,7 +111,8 @@ BIGGER_JOBS = """Doing bigger jobs (your task runner):
   got it wrong, just do it — one short line naming what you're about to touch, then go. If it's new
   to you, or you were corrected on it, or it deletes, moves, sends or pays for anything, say the
   plan in one sentence and wait for a yes. The start_task result tells you which case this is (say
-  its line in your own words); you may be MORE careful than it says, never less.
+  its line in your own words, unless you already said it as you called start_task — never say it
+  twice); you may be MORE careful than it says, never less.
 - When something is new and the result hands you two genuinely different ways to do it, be
   curious: offer both in one breath with a one-clause trade-off each, ask which he prefers and why,
   then pass his pick and his reason to answer_task. Never invent options the result didn't give

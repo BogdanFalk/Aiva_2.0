@@ -14,6 +14,7 @@ import ctypes
 import json
 import os
 import subprocess
+import time
 import weakref
 from ctypes import wintypes
 
@@ -24,6 +25,7 @@ from pipecat.services.llm_service import FunctionCallParams
 from modules import computer, file_operations, utilities
 from modules.app_launcher import launch_app as _launch_app_impl
 from modules.drawing import is_drawing_app_request
+from modules.house_link import EnoughSaid
 
 # --- avatar (rendered by our own modules/avatar_renderer.py process) --------
 
@@ -571,18 +573,39 @@ def make_cat_handlers(cat):
     return name_cat, feed_cat, play_with_cat, pet_cat, cat_status, dismiss_cat, summon_cat
 
 
-def make_drawing_handlers(board):
+STROKE_RUN_MAX = 6        # single strokes her voice may draw ...
+STROKE_RUN_S = 60.0       # ... within this many seconds before she's sent to draw_picture
+
+
+def make_drawing_handlers(board, artist=None):
     """Her drawing canvas (modules/drawing.py): the drawing app opened and drawn on from her own
     process — no terminal, no console, no focus taken from him. The board runs the blocking parts in
-    a worker thread and returns speakable dicts, failures included."""
+    a worker thread and returns speakable dicts, failures included. With an `artist`
+    (modules/artist.py) there's also draw_picture, and her VOICE drawing a long run of single strokes
+    is sent to it: 2026-10-27, 50 strokes one round trip each kept him waiting two minutes in silence
+    until the turn cap cut her off. A task's strokes (its ToolBox passes no `llm`) are never stopped."""
+    voice_strokes = []
 
     async def open_drawing(params: FunctionCallParams):
         await params.result_callback(await board.open())
 
     async def draw_stroke(params: FunctionCallParams):
         args = params.arguments
+        if artist is not None and getattr(params, "llm", None) is not None:
+            now = time.monotonic()
+            voice_strokes[:] = [t for t in voice_strokes if now - t < STROKE_RUN_S] + [now]
+            if len(voice_strokes) > STROKE_RUN_MAX:
+                await params.result_callback({
+                    "success": False, "error": "that's a long run of single strokes while he waits in silence",
+                    "note": "Tell him in one short sentence what you're adding, then call draw_picture "
+                            "with the rest of the idea; it draws in the background while you talk."})
+                return
         await params.result_callback(await board.stroke(
             args.get("points"), color=args.get("color") or None, width=args.get("width")))
+
+    async def draw_picture(params: FunctionCallParams):
+        out = artist.start(params.arguments.get("idea"))
+        await params.result_callback(out, properties=EnoughSaid() if out.get("success") else None)
 
     async def clear_drawing(params: FunctionCallParams):
         await params.result_callback(await board.clear())
@@ -596,9 +619,12 @@ def make_drawing_handlers(board):
     async def open_saved_drawing(params: FunctionCallParams):
         await params.result_callback(await board.open_saved(params.arguments.get("name") or None))
 
-    return {"open_drawing": open_drawing, "draw_stroke": draw_stroke, "clear_drawing": clear_drawing,
-            "undo_stroke": undo_stroke, "save_drawing": save_drawing,
-            "open_saved_drawing": open_saved_drawing}
+    handlers = {"open_drawing": open_drawing, "draw_stroke": draw_stroke, "clear_drawing": clear_drawing,
+                "undo_stroke": undo_stroke, "save_drawing": save_drawing,
+                "open_saved_drawing": open_saved_drawing}
+    if artist is not None:
+        handlers["draw_picture"] = draw_picture
+    return handlers
 
 
 # --- schemas ---------------------------------------------------------------
@@ -1345,12 +1371,14 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="draw_stroke",
-        description="Draw one stroke on your drawing canvas, opening it first if needed: a line "
+        description="Draw ONE stroke on your drawing canvas, opening it first if needed: a line "
                     "through the points, in canvas pixels. The canvas is 1024 wide and 768 tall, "
                     "x to the right and y DOWN from the top-left corner, and every point must be "
                     "on it. A shape is its outline as many points (a circle is about 40 points "
                     "around it); a dot is a single point. It's in your own ink unless you pass a "
-                    "color. Nothing touches his mouse or keyboard. Returns the stroke id.",
+                    "color. Nothing touches his mouse or keyboard. Returns the stroke id. For a "
+                    "picture, or anything more than a couple of strokes, use draw_picture instead: "
+                    "stroke by stroke keeps him waiting in silence.",
         properties={
             "points": {"type": "array", "minItems": 1, "maxItems": 2000,
                        "items": {"type": "array", "items": {"type": "number"},
@@ -1361,6 +1389,22 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
                                                        "(default 4)"},
         },
         required=["points"],
+    ),
+    FunctionSchema(
+        name="draw_picture",
+        description="Draw a whole picture on your drawing canvas, or add to the one there: your "
+                    "drawing hand reads what's already on it (yours, your sister's and his) and "
+                    "draws the idea around it, stroke by stroke in your ink, in the background "
+                    "while you keep talking. You get a note when it's done. Use it for any real "
+                    "drawing or 'more detail'; draw_stroke is for a single mark. Say one short "
+                    "line about what you're drawing as you call it, never wait in silence.",
+        properties={
+            "idea": {"type": "string",
+                     "description": "what to draw or add and roughly where, in a sentence or two, "
+                                    "e.g. 'a moonlit sky with fireflies above the cats, and fur and "
+                                    "whiskers on Miso'"},
+        },
+        required=["idea"],
     ),
     FunctionSchema(
         name="clear_drawing",
@@ -1405,11 +1449,11 @@ TOOL_SCHEMAS = ToolsSchema(standard_tools=[
 
 
 def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, restart=None,
-                   name="Aiva", capability_exclude=(), drawing=None):
+                   name="Aiva", capability_exclude=(), drawing=None, artist=None):
     """Every tool handler by name. The voice LLM gets them via register_tools;
     the task runner (modules/tasks.py) reuses the same dict out-of-band. `name` is the
     character these hands belong to; `capability_exclude` the powers she doesn't have;
-    `drawing` her DrawingBoard (modules/drawing.py)."""
+    `drawing` her DrawingBoard (modules/drawing.py), `artist` her drawing hand (modules/artist.py)."""
     handlers = {}
     (avatar_expression, avatar_move, avatar_position,
      move_avatar_to_monitor, set_avatar_layer) = make_avatar_handlers(avatar)
@@ -1437,7 +1481,7 @@ def build_handlers(avatar, mic=None, terminals=None, memory=None, cat=None, rest
                          "show_terminal": show_terminal, "claude_code": claude_code})
 
     if drawing is not None:
-        handlers.update(make_drawing_handlers(drawing))
+        handlers.update(make_drawing_handlers(drawing, artist))
 
     async def what_can_i_do(params: FunctionCallParams):
         from modules import capabilities
@@ -1521,10 +1565,11 @@ def _timed(name, handler):
 
 
 def register_tools(llm, avatar, mic=None, terminals=None, memory=None, cat=None, restart=None,
-                   name="Aiva", capability_exclude=(), drawing=None):
+                   name="Aiva", capability_exclude=(), drawing=None, artist=None):
     """Register every tool handler on the LLM service; returns the handler dict."""
     handlers = build_handlers(avatar, mic, terminals, memory, cat, restart,
-                              name=name, capability_exclude=capability_exclude, drawing=drawing)
+                              name=name, capability_exclude=capability_exclude, drawing=drawing,
+                              artist=artist)
     for name, handler in handlers.items():
         llm.register_function(name, _timed(name, handler))
     return handlers
@@ -1535,22 +1580,27 @@ def register_tools(llm, avatar, mic=None, terminals=None, memory=None, cat=None,
 def make_task_handlers(runner, task_memory, memory=None, heard_him=None):
     """start_task & co. close over the TaskRunner and TaskMemory (modules/tasks.py,
     modules/task_memory.py). Results are short dicts the voice LLM speaks from. `heard_him()` says
-    whether the turn running now is one he spoke in: a task's question is his to answer."""
+    whether the turn running now is one he spoke in: a task's question is his to answer.
+    A go-ahead result ("started", "continuing", "ask him") is `EnoughSaid`: if she said her line
+    as she called the tool, she doesn't say it a second time after it."""
 
     async def start_task(params: FunctionCallParams):
         a = params.arguments
-        await params.result_callback(await runner.start(
-            a.get("goal", ""), a.get("details", "") or "", bool(a.get("confirm_first", False))))
+        result = await runner.start(
+            a.get("goal", ""), a.get("details", "") or "", bool(a.get("confirm_first", False)))
+        started = result.get("success") and result.get("status") == "started"
+        await params.result_callback(result, properties=EnoughSaid() if started else None)
 
     async def answer_task(params: FunctionCallParams):
         if heard_him is not None and not heard_him():
             # 2026-10-14: on her own news turns she answered "yes" to nine of her task's commands
             # herself, and her sister once said "yes, let it run" to a question meant for him
             await params.result_callback({"success": False, "error": "only he can answer a task's question",
-                                          "note": "Don't answer for him. Ask him in one sentence and wait."})
+                                          "note": "Don't answer for him. Ask him in one sentence and wait."},
+                                         properties=EnoughSaid(asked=True))
             return
-        await params.result_callback(await runner.answer(
-            params.arguments.get("answer", ""), params.arguments.get("task_id")))
+        result = await runner.answer(params.arguments.get("answer", ""), params.arguments.get("task_id"))
+        await params.result_callback(result, properties=EnoughSaid() if result.get("success") else None)
 
     async def task_status(params: FunctionCallParams):
         await params.result_callback(runner.status(params.arguments.get("task_id")))

@@ -70,6 +70,7 @@ class Tool(Msg):
     T: ClassVar[str] = "tool"
     turn: int
     delta: int                      # +1 when a tool call starts, -1 when it completes
+    rerun: bool = True              # with -1: False when her LLM won't run again on this result
 
 
 @dataclass(kw_only=True)

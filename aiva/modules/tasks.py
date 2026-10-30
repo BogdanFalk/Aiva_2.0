@@ -941,6 +941,20 @@ class TaskRunner:
         return {"success": True, "tasks": out,
                 "note": "Answer in one sentence." if out else "Nothing is running."}
 
+    def busy_within(self, seconds, now=None):
+        """True while a task is live or one of this session's finished in the last `seconds`: the
+        stretch counts as work for modules/pacing.py. A pure read of self.tasks."""
+        if any(t["status"] in tm.LIVE_STATUSES for t in self.tasks.values()):
+            return True
+        now = now or datetime.now()
+        for t in self.tasks.values():
+            try:
+                if t.get("finished_ts") and (now - datetime.fromisoformat(t["finished_ts"])).total_seconds() <= seconds:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
     _BODY_STATES = {"planning": "planning", "awaiting_user": "waiting", "verifying": "checking"}
 
     def activity(self):

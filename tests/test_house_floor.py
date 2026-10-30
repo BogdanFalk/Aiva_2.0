@@ -401,6 +401,39 @@ async def test_grace_release_for_tool_only_reply():
     assert not r.floor.busy
 
 
+@pytest.mark.parametrize("end_first", [True, False])
+async def test_a_tool_with_no_rerun_releases_on_speaking_off(end_first):
+    # 2026-10-26: she said her line with start_task and its re-run said it again; a skipped re-run
+    # must not leave the floor waiting 10 s for a `response start` that never comes
+    r = Rig()
+    await r.floor.submit_user_turn("Aiva, go through the list")
+    tid = r.aiva.turn.turn
+    r.floor.on_response("aiva", tid, "start")
+    r.floor.on_speaking("aiva", tid, True)
+    r.floor.on_tool("aiva", tid, +1)
+    if end_first:
+        r.floor.on_response("aiva", tid, "end")
+    r.floor.on_tool("aiva", tid, -1, rerun=False)       # its end may still be behind her audio
+    r.floor.tick(r.clock.advance(1.0))
+    assert r.floor.holder == "aiva"                     # still speaking
+    r.floor.on_speaking("aiva", tid, False)
+    assert r.floor.holder is None and any("(speaking_off)" in m for m in r.logs)
+
+
+async def test_a_tool_with_no_rerun_after_her_speech_ended_releases_at_once():
+    r = Rig()
+    await r.floor.submit_user_turn("Aiva, go through the list")
+    tid = r.aiva.turn.turn
+    r.floor.on_response("aiva", tid, "start")
+    r.floor.on_speaking("aiva", tid, True)
+    r.floor.on_tool("aiva", tid, +1)
+    r.floor.on_response("aiva", tid, "end")
+    r.floor.on_speaking("aiva", tid, False)             # her line ended while the task was planning
+    assert r.floor.holder == "aiva"
+    r.floor.on_tool("aiva", tid, -1, rerun=False)
+    assert r.floor.holder is None and any("(end:spoken)" in m for m in r.logs)
+
+
 async def test_speech_within_grace_cancels_it():
     r = Rig()
     await r.floor.submit_user_turn("Aiva, hi")

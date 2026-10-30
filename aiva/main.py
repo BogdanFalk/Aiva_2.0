@@ -78,6 +78,7 @@ from modules.backchannel import PHRASES as BACKCHANNEL_PHRASES, BackchannelConfi
 from modules.becoming import Becoming, SELF_FORMING_BASELINE_DESC
 from modules.cat import CAT_NAME_RECOVERY_NOTE, CAT_NAMING_NOTE, DesktopCat
 from modules.cat_care import CatCaretaker
+from modules.artist import Artist
 from modules.drawing import board_for
 from modules.ear import MicController, device_index, list_audio_devices  # noqa: F401 (tests import MicController)
 from modules.emotion_hearing import EmotionConfig, describe as describe_emotion, emotion_note
@@ -90,6 +91,7 @@ from modules.limits import ServiceLimits
 from modules.memory import Memory
 from modules.metrics import Metrics
 from modules.notify import Notifier, NotifyConfig
+from modules.pacing import PacingConfig, WorkStreak
 from modules.persona import build_system_prompt
 from modules.preferences import Preferences
 from modules.reading import BookMemory, ReadingEngine, StudyLimits, embed_long
@@ -461,12 +463,16 @@ async def main():
     # her drawing canvas: opened from her own process, never a terminal; strokes in her own ink.
     # board_for is this process's one board, so anything else of hers reuses the same window
     drawing = board_for(ch.slug)
+    task_model = os.getenv("AIVA_TASK_MODEL", llm_model)
+    # a whole picture is one side-model call drawn in the background (modules/artist.py), never a
+    # voice round trip per stroke; it's told when it's done once announce exists (attach_voice below)
+    artist = Artist(drawing, openai_llm_call(oai, task_model, label="draw"), name=ch.name,
+                    log=log_event, spawn=llm.create_task)
     handlers = register_tools(llm, avatar, mic, terminals, memory, cat, restart=trigger_restart,
                               name=ch.name, capability_exclude=ch.capability_exclude,
-                              drawing=drawing)
+                              drawing=drawing, artist=artist)
 
     # --- task runner --------------------------------------------------------------------------------
-    task_model = os.getenv("AIVA_TASK_MODEL", llm_model)
     toolbox = ToolBox(handlers, TOOL_SCHEMAS, name=ch.name)
     task_runner = TaskRunner(
         task_memory=task_memory, toolbox=toolbox, limits=Limits.from_env(),
@@ -900,10 +906,10 @@ async def main():
             _send(proto.Response(turn=turn_id, phase=phase))
         speaking_state["last_activity"] = time.monotonic()
 
-    def _on_tool(delta, call_id):
+    def _on_tool(delta, call_id, rerun=True):
         turn_id = _report_turn_id()
         if turn_id is not None:
-            _send(proto.Tool(turn=turn_id, delta=delta))
+            _send(proto.Tool(turn=turn_id, delta=delta, rerun=rerun))
 
     watcher = MindWatcher(on_response=_on_response, on_tool=_on_tool, log=log_event)
 
@@ -981,6 +987,7 @@ async def main():
         _send(proto.WantFloor(kind="announce"))
 
     terminals._announce = announce
+    artist.attach_voice(announce)
 
     async def cat_announce(text: str):
         if speaking_state["awake"]:
@@ -1140,6 +1147,8 @@ async def main():
     # nudge to stay herself — modules/persona_drift.py measures whether it helps
     reminder_every = max(0, int(os.getenv("AIVA_VOICE_REMINDER_TURNS", "25") or 0))
     his_turns = {"n": 0}
+    # a long stretch of task work gets one "read how he's doing" note (modules/pacing.py)
+    work_streak = WorkStreak(PacingConfig.from_env())
 
     async def _appraise(his_line, tail, heard):
         try:
@@ -1231,6 +1240,13 @@ async def main():
                                      "your own opinions, your own humour, short spoken sentences — "
                                      "don't slide into sounding like a polite assistant.]")
                         log_event(f"voice reminder after {his_turns['n']} of his lines")
+                    working = task_runner.busy_within(work_streak.cfg.recent_minutes * 60)
+                    pace = work_streak.heard(time.monotonic(), working)
+                    if pace:
+                        notes.append(pace)
+                        critical = True            # a reply prepared without it would skip it
+                        log_event(f"pacing: {round((work_streak.last - work_streak.since) / 60)} min of "
+                                  f"work, {work_streak.turns} of his lines")
                     if appraise_call is not None:
                         emo = (getattr(msg, "affect", None) or {}).get("emotion")
                         tail = context.get_messages()[-appraisal_cfg.tail_lines:]
